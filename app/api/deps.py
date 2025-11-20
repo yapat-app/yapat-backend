@@ -2,16 +2,17 @@
 API dependencies (auth, DB session)
 """
 
-from typing import Generator
+from typing import Generator, Optional
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models.user import User
 from app.core.security import verify_token
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+# Simple bearer token scheme - just requires the access token
+security = HTTPBearer()
 
 
 def get_db() -> Generator:
@@ -24,7 +25,7 @@ def get_db() -> Generator:
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
     """Dependency to get current authenticated user"""
@@ -34,12 +35,20 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     
+    token = credentials.credentials
     payload = verify_token(token)
+    
     if payload is None:
         raise credentials_exception
     
-    user_id: int = payload.get("sub")
+    user_id = payload.get("sub")
     if user_id is None:
+        raise credentials_exception
+    
+    # Ensure user_id is an integer
+    try:
+        user_id = int(user_id)
+    except (ValueError, TypeError):
         raise credentials_exception
     
     user = db.query(User).filter(User.id == user_id).first()
@@ -55,5 +64,18 @@ async def get_current_active_user(
     """Dependency to get current active user"""
     if not current_user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
+
+async def get_current_admin_user(
+    current_user: User = Depends(get_current_active_user)
+) -> User:
+    """Dependency to get current admin user"""
+    from app.models.user import UserRole
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required"
+        )
     return current_user
 
