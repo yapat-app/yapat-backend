@@ -1,0 +1,4 @@
+"""
+YAPAT Backend Application
+"""
+
