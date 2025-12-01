@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     """Application settings"""
     
     # Database
-    DATABASE_URL: str = "postgresql://user:password@localhost/yapat"
+    DATABASE_URL: str = "postgresql://yapat_user:yapat_password@localhost/yapat"
     
     # Security
     SECRET_KEY: str = "your-secret-key-change-in-production"
