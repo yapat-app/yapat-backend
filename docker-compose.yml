@@ -18,6 +18,52 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: yapat-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+
+  # Celery worker for asynchronous task processing
+  celery-worker:
+    build: .
+    container_name: yapat-celery-worker
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  # Flower monitoring dashboard for Celery
+  flower:
+    build: .
+    container_name: yapat-flower
+    command: celery -A app.celery_app flower --port=5555
+    depends_on:
+      - redis
+      - celery-worker
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  redis_data:
 

@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     # CORS
     BACKEND_CORS_ORIGINS: list = ["http://localhost:3000", "http://localhost:8000"]
     
+    # Celery
+    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+    CELERY_TASK_TRACK_STARTED: bool = True
+    CELERY_TASK_TIME_LIMIT: int = 3600  # 1 hour max per task
+    CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes limit
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

@@ -22,10 +22,13 @@ FastAPI backend application for YAPAT project.
    pip install -r requirements.txt
    ```
 
-3. **Start PostgreSQL database**
+3. **Start services (PostgreSQL & Redis)**
    ```bash
    docker-compose up -d
    ```
+   This starts:
+   - PostgreSQL database (port 5432)
+   - Redis for Celery (port 6379)
 
 4. **Configure environment variables** (optional)
    
@@ -44,7 +47,7 @@ FastAPI backend application for YAPAT project.
 
 ## Running the Application
 
-Start the development server:
+### 1. Start the FastAPI server:
 ```bash
 uvicorn app.main:app --reload
 ```
@@ -54,6 +57,28 @@ The API will be available at:
 - **Interactive Docs**: http://localhost:8000/docs
 - **OpenAPI Schema**: http://localhost:8000/api/openapi.json
 
+### 2. Start Celery worker (for async tasks):
+```bash
+./start_celery_worker.sh
+```
+
+### 3. (Optional) Start Flower for monitoring:
+```bash
+./start_flower.sh
+```
+- **Monitoring Dashboard**: http://localhost:5555 (admin/yapat123)
+
+## Celery Tasks
+
+YAPAT uses Celery for asynchronous task processing:
+- **Embedding generation**: Generate audio embeddings for snippets
+- **Recording processing**: Process audio files and create snippets
+- **Data export**: Export annotations and generate reports
+
+
+**API Endpoints:**
+All task endpoints are under `/api/tasks` - see interactive docs at http://localhost:8000/docs
+
 
 ## Database Management
 
@@ -62,13 +87,14 @@ The API will be available at:
 - **Rollback**: `alembic downgrade -1`
 - **Check current version**: `alembic current`
 
-## Stop the Database
+## Stop Services
 
+Stop all services (PostgreSQL, Redis):
 ```bash
 docker-compose down
 ```
 
-To also remove the data volume:
+To also remove data volumes:
 ```bash
 docker-compose down -v
 ```

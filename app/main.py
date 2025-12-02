@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api import auth, teams, datasets, recordings, snippets, annotations, feed, classifiers, invitations
+from app.api import auth, teams, datasets, recordings, snippets, annotations, feed, classifiers, invitations, tasks
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -36,6 +36,7 @@ app.include_router(annotations.router, prefix=f"{settings.API_STR}/annotations",
 app.include_router(feed.router, prefix=f"{settings.API_STR}/feed", tags=["feed"])
 app.include_router(classifiers.router, prefix=f"{settings.API_STR}/classifiers", tags=["classifiers"])
 app.include_router(invitations.router, prefix=f"{settings.API_STR}/invitations", tags=["invitations"])
+app.include_router(tasks.router, prefix=f"{settings.API_STR}/tasks", tags=["tasks"])
 
 
 @app.get("/")
