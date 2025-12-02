@@ -24,7 +24,7 @@ FastAPI backend application for YAPAT project.
 
 3. **Start PostgreSQL database**
    ```bash
-   docker-compose up -d
+   docker compose up -d
    ```
 
 4. **Configure environment variables** (optional)
