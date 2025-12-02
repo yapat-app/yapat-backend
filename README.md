@@ -65,10 +65,10 @@ The API will be available at:
 ## Stop the Database
 
 ```bash
-docker-compose down
+docker compose down
 ```
 
 To also remove the data volume:
 ```bash
-docker-compose down -v
+docker compose down -v
 ```
