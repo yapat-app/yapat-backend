@@ -91,7 +91,7 @@ services:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - SECRET_KEY=${SECRET_KEY:secret-key-change-in-production}
+      - SECRET_KEY=${SECRET_KEY:-secret-key-change-in-production}
     volumes:
       - .:/app
     restart: unless-stopped
