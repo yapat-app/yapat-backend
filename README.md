@@ -24,7 +24,7 @@ FastAPI backend application for YAPAT project.
 
 3. **Start services (PostgreSQL & Redis)**
    ```bash
-   docker-compose up -d
+   docker compose up -d
    ```
    This starts:
    - PostgreSQL database (port 5432)
@@ -91,10 +91,10 @@ All task endpoints are under `/api/tasks` - see interactive docs at http://local
 
 Stop all services (PostgreSQL, Redis):
 ```bash
-docker-compose down
+docker compose down
 ```
 
 To also remove data volumes:
 ```bash
-docker-compose down -v
+docker compose down -v
 ```
