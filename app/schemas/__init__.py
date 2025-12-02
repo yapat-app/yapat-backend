@@ -8,7 +8,6 @@ from app.schemas.dataset import Dataset, DatasetCreate, DatasetUpdate
 from app.schemas.recording import Recording, RecordingCreate, RecordingUpdate
 from app.schemas.snippet import Snippet, SnippetCreate, SnippetUpdate
 from app.schemas.annotation import Annotation, AnnotationCreate
-from app.schemas.classifier import Classifier, ClassifierCreate, ClassifierUpdate
 from app.schemas.invitation import InvitationLink, InvitationLinkCreate
 
 __all__ = [
@@ -32,9 +31,6 @@ __all__ = [
     "SnippetUpdate",
     "Annotation",
     "AnnotationCreate",
-    "Classifier",
-    "ClassifierCreate",
-    "ClassifierUpdate",
     "InvitationLink",
     "InvitationLinkCreate",
 ]

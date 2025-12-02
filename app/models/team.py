@@ -29,7 +29,6 @@ class Team(Base):
     # Relationships
     memberships = relationship("TeamMembership", back_populates="team", cascade="all, delete-orphan")
     datasets = relationship("Dataset", back_populates="team", cascade="all, delete-orphan")
-    classifiers = relationship("Classifier", back_populates="team", cascade="all, delete-orphan")
     invitations = relationship("TeamInvitation", back_populates="team", cascade="all, delete-orphan")
 
 
