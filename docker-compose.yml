@@ -15,6 +15,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -29,6 +30,33 @@ services:
       timeout: 5s
       retries: 5
     command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  # FastAPI application
+  api:
+    build: .
+    container_name: yapat-api
+    command: /app/startup.sh uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - ALGORITHM=HS256
+      - ACCESS_TOKEN_EXPIRE_MINUTES=30
+      - API_STR=/api
+      - PROJECT_NAME=YAPAT Backend
+      - BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    restart: unless-stopped
 
   # Celery worker for asynchronous task processing
   celery-worker:
@@ -36,12 +64,34 @@ services:
     container_name: yapat-celery-worker
     command: celery -A app.celery_app worker --loglevel=info --concurrency=4
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  # Celery beat scheduler for periodic tasks
+  celery-beat:
+    build: .
+    container_name: yapat-celery-beat
+    command: celery -A app.celery_app beat --loglevel=info --scheduler=celery.beat:PersistentScheduler
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:secret-key-change-in-production}
     volumes:
       - .:/app
     restart: unless-stopped
@@ -52,13 +102,17 @@ services:
     container_name: yapat-flower
     command: celery -A app.celery_app flower --port=5555
     depends_on:
-      - redis
-      - celery-worker
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     ports:
       - "5555:5555"
+    volumes:
+      - .:/app
     restart: unless-stopped
 
 volumes:

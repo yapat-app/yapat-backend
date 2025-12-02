@@ -4,11 +4,50 @@ FastAPI backend application for YAPAT project.
 
 ## Prerequisites
 
-- Python 3.11+
 - Docker and Docker Compose
-- pip
 
-## Setup
+## Quick Start with Docker Compose
+
+The easiest way to run the entire application is using Docker Compose:
+
+```bash
+docker compose up
+```
+
+This single command will start:
+- **PostgreSQL** database (port 5432)
+- **Redis** for Celery (port 6379)
+- **FastAPI** application (port 8000)
+- **Celery worker** for async tasks
+- **Celery beat** scheduler for periodic tasks
+- **Flower** monitoring dashboard (port 5555)
+
+The API will be available at:
+- **API**: http://localhost:8000
+- **Interactive Docs**: http://localhost:8000/docs
+- **OpenAPI Schema**: http://localhost:8000/api/openapi.json
+- **Flower Dashboard**: http://localhost:5555
+
+Database migrations run automatically on startup.
+
+To run in detached mode (background):
+```bash
+docker compose up -d
+```
+
+To stop all services:
+```bash
+docker compose down
+```
+
+To stop and remove all data volumes:
+```bash
+docker compose down -v
+```
+
+## Manual Setup (Development)
+
+If you prefer to run services manually:
 
 1. **Create and activate virtual environment**
    ```bash
@@ -24,7 +63,7 @@ FastAPI backend application for YAPAT project.
 
 3. **Start services (PostgreSQL & Redis)**
    ```bash
-   docker compose up -d
+   docker compose up -d db redis
    ```
    This starts:
    - PostgreSQL database (port 5432)
@@ -40,33 +79,25 @@ FastAPI backend application for YAPAT project.
    
    If not provided, defaults from `app/config.py` will be used.
 
-6. **Run database migrations**
+5. **Run database migrations**
    ```bash
    alembic upgrade head
    ```
 
-## Running the Application
+6. **Start the FastAPI server:**
+   ```bash
+   uvicorn app.main:app --reload
+   ```
 
-### 1. Start the FastAPI server:
-```bash
-uvicorn app.main:app --reload
-```
+7. **Start Celery worker** (in a separate terminal):
+   ```bash
+   ./start_celery_worker.sh
+   ```
 
-The API will be available at:
-- **API**: http://localhost:8000
-- **Interactive Docs**: http://localhost:8000/docs
-- **OpenAPI Schema**: http://localhost:8000/api/openapi.json
-
-### 2. Start Celery worker (for async tasks):
-```bash
-./start_celery_worker.sh
-```
-
-### 3. (Optional) Start Flower for monitoring:
-```bash
-./start_flower.sh
-```
-- **Monitoring Dashboard**: http://localhost:5555 (admin/yapat123)
+8. **(Optional) Start Flower for monitoring:**
+   ```bash
+   ./start_flower.sh
+   ```
 
 ## Celery Tasks
 

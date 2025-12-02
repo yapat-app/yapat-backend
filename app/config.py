@@ -3,7 +3,8 @@ Configuration
 """
 
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, Union
+import os
 
 
 class Settings(BaseSettings):
@@ -21,8 +22,15 @@ class Settings(BaseSettings):
     API_STR: str = "/api"
     PROJECT_NAME: str = "YAPAT Backend"
     
-    # CORS
-    BACKEND_CORS_ORIGINS: list = ["http://localhost:3000", "http://localhost:8000"]
+    # CORS - can be set as comma-separated string or list
+    BACKEND_CORS_ORIGINS: Union[str, list] = ["http://localhost:3000", "http://localhost:8000"]
+    
+    @property
+    def cors_origins_list(self) -> list:
+        """Parse CORS origins from string or return list"""
+        if isinstance(self.BACKEND_CORS_ORIGINS, str):
+            return [origin.strip() for origin in self.BACKEND_CORS_ORIGINS.split(",")]
+        return self.BACKEND_CORS_ORIGINS
     
     # Celery
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
