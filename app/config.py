@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     # API
     API_STR: str = "/api"
     PROJECT_NAME: str = "YAPAT Backend"
+    DATA_ROOT: Optional[str] = "/data"
     
     # CORS - can be set as comma-separated string or list
     BACKEND_CORS_ORIGINS: Union[str, list] = ["http://localhost:3000", "http://localhost:8000"]
