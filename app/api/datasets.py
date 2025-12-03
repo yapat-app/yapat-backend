@@ -10,6 +10,7 @@ from app.api.deps import get_db, get_current_active_user, get_current_admin_user
 from app.schemas.dataset import Dataset, DatasetCreate, DatasetUpdate
 from app.models.dataset import Dataset as DatasetModel
 from app.models.user import User, UserRole
+from app.models.team import Team as TeamModel, TeamMembership as TeamMembershipModel, TeamRole
 
 router = APIRouter()
 
@@ -56,8 +57,34 @@ def read_datasets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Get list of datasets"""
-    datasets = db.query(DatasetModel).offset(skip).limit(limit).all()
+    """Get list of datasets. 
+    For non-admin users: returns datasets from teams where the user is an owner.
+    For admin users: returns all datasets."""
+    # Check if user is admin
+    is_admin = current_user.role == UserRole.ADMIN
+    
+    if is_admin:
+        # Admins can see all datasets
+        datasets = db.query(DatasetModel).offset(skip).limit(limit).all()
+    else:
+        # Get all teams where current user is an owner
+        owned_teams = db.query(TeamModel).join(
+            TeamMembershipModel
+        ).filter(
+            TeamMembershipModel.user_id == current_user.id,
+            TeamMembershipModel.role == TeamRole.OWNER
+        ).all()
+        
+        owned_team_ids = [t.id for t in owned_teams]
+        
+        if not owned_team_ids:
+            return []
+        
+        # Get all datasets from owned teams
+        datasets = db.query(DatasetModel).filter(
+            DatasetModel.team_id.in_(owned_team_ids)
+        ).offset(skip).limit(limit).all()
+    
     return datasets
 
 

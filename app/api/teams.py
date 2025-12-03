@@ -18,7 +18,7 @@ from app.models.team import (
 )
 from app.models.user import User, User as UserModel
 from app.models.dataset import Dataset as DatasetModel
-from app.core.permissions import require_team_owner
+from app.core.permissions import require_team_owner, require_team_member
 from datetime import datetime, timezone, timedelta
 
 router = APIRouter()
@@ -31,8 +31,10 @@ def create_team(
     current_user: User = Depends(get_current_active_user)
 ):
     """Create a new team"""
-    # If dataset_id is provided, validate it belongs to a team where user is owner
-    if team_in.dataset_id is not None:
+    datasets = []
+    
+    # If dataset_ids are provided, validate they belong to teams where user is owner
+    if team_in.dataset_ids is not None and len(team_in.dataset_ids) > 0:
         # Get all teams where current user is an owner
         owned_teams = db.query(TeamModel).join(
             TeamMembershipModel
@@ -43,25 +45,33 @@ def create_team(
         
         owned_team_ids = [t.id for t in owned_teams]
         
-        # Get the dataset and verify it belongs to one of the owned teams
-        dataset = db.query(DatasetModel).filter(
-            DatasetModel.id == team_in.dataset_id
-        ).first()
+        # Get all datasets and verify they belong to one of the owned teams
+        datasets = db.query(DatasetModel).filter(
+            DatasetModel.id.in_(team_in.dataset_ids)
+        ).all()
         
-        if not dataset:
+        if len(datasets) != len(team_in.dataset_ids):
+            found_ids = {d.id for d in datasets}
+            missing_ids = set(team_in.dataset_ids) - found_ids
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Dataset not found"
+                detail=f"Datasets not found: {list(missing_ids)}"
             )
         
-        if dataset.team_id not in owned_team_ids:
+        # Verify all datasets belong to teams owned by the user
+        invalid_datasets = []
+        for dataset in datasets:
+            if dataset.team_id not in owned_team_ids:
+                invalid_datasets.append(dataset.id)
+        
+        if invalid_datasets:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Dataset does not belong to any team you own"
+                detail=f"Datasets do not belong to any team you own: {invalid_datasets}"
             )
     
     # Create the team
-    team_data = team_in.dict(exclude={'dataset_id'})
+    team_data = team_in.dict(exclude={'dataset_ids'})
     team = TeamModel(**team_data)
     db.add(team)
     db.commit()
@@ -75,9 +85,10 @@ def create_team(
     )
     db.add(membership)
     
-    # If dataset_id was provided, assign it to the new team
-    if team_in.dataset_id is not None:
-        dataset.team_id = team.id
+    # If dataset_ids were provided, assign them to the new team
+    if datasets:
+        for dataset in datasets:
+            dataset.team_id = team.id
     
     db.commit()
     db.refresh(team)
@@ -123,6 +134,32 @@ def read_teams(
     """Get list of teams"""
     teams = db.query(TeamModel).offset(skip).limit(limit).all()
     return teams
+
+
+@router.get("/{team_id}/datasets", response_model=List[DatasetSchema])
+def get_team_datasets(
+    team_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Get all datasets belonging to a specific team.
+    
+    Only team members (or admins) can access this endpoint.
+    """
+    # Verify team exists
+    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    
+    # Check if user is a team member (or admin)
+    require_team_member(current_user, team_id, db)
+    
+    # Get all datasets for this team
+    datasets = db.query(DatasetModel).filter(
+        DatasetModel.team_id == team_id
+    ).all()
+    
+    return datasets
 
 
 @router.get("/{team_id}/members", response_model=List[TeamMember])
