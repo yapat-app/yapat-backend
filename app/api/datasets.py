@@ -69,3 +69,47 @@ def read_dataset(
         raise HTTPException(status_code=404, detail="Dataset not found")
     return dataset
 
+
+@router.delete("/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_dataset(
+        dataset_id: int,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_active_user),
+):
+    svc = DatasetService(db)
+
+    dataset = svc.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    is_admin = current_user.role == UserRole.ADMIN
+    is_owner = True
+    # TODO Limit which users can delete datasets (team owners? dataset owners?)
+
+    if not (is_admin or is_owner):
+        raise HTTPException(status_code=403, detail="Not authorized to delete dataset")
+
+    svc.delete_dataset(dataset)
+    return None
+
+
+@router.post("/{dataset_id}/claim", response_model=Dataset)
+def claim_dataset(
+        dataset_id: int,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_active_user),
+):
+    """
+    A user may claim ownership of a dataset whose team_id is NULL.
+    """
+    svc = DatasetService(db)
+
+    dataset = svc.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    if dataset.team_id is not None:
+        raise HTTPException(status_code=400, detail="Dataset already belongs to a team")
+
+    updated = svc.claim_dataset(dataset, current_user)
+    return updated
