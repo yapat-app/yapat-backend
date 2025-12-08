@@ -8,9 +8,9 @@ from app.tasks.embedding_tasks import (
     regenerate_embeddings_for_dataset,
 )
 from app.tasks.processing_tasks import (
-    process_recording,
-    generate_snippets_for_recording,
-    scan_and_process_dataset,
+    scan_dataset,
+    generate_snippets,
+    process_dataset,
 )
 
 __all__ = [
@@ -18,9 +18,9 @@ __all__ = [
     "generate_embedding_for_snippet",
     "generate_embeddings_batch",
     "regenerate_embeddings_for_dataset",
-    # Processing tasks
-    "process_recording",
-    "generate_snippets_for_recording",
-    "scan_and_process_dataset",
-]
 
+    # Processing tasks (new architecture)
+    "scan_dataset",
+    "generate_snippets",
+    "process_dataset",
+]
