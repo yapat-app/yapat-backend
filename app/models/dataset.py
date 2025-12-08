@@ -21,11 +21,16 @@ class Dataset(Base):
     name = Column(String, nullable=False, index=True)
     description = Column(Text, nullable=True)
     source_uri = Column(String, nullable=False, index=True)  # Path to audio files directory
-    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=True)  # Nullable for admin-created datasets
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"),
+                     nullable=True)  # Nullable for admin-created datasets
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     # Relationships
     team = relationship("Team", back_populates="datasets")
     recordings = relationship("Recording", back_populates="dataset", cascade="all, delete-orphan")
-
+    snippet_configs = relationship(
+        "SnippetConfig",
+        back_populates="dataset",
+        cascade="all, delete-orphan"
+    )
