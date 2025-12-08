@@ -2,15 +2,16 @@
 Dataset schemas
 """
 
-from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
+
+from pydantic import BaseModel
 
 
 class DatasetBase(BaseModel):
     name: str
     description: Optional[str] = None
-    source_uri: Optional[str] = None
+    source_uri: str
 
 
 class DatasetCreate(DatasetBase):
@@ -26,10 +27,8 @@ class DatasetUpdate(BaseModel):
 class Dataset(DatasetBase):
     id: int
     team_id: Optional[int] = None
-    source_uri: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
-
