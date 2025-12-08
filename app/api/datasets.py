@@ -39,8 +39,15 @@ def create_dataset(
             raise HTTPException(status_code=404, detail="Team not found")
         raise
 
+    # Scan audio recordings in source_uri and create Recording objects
     svc.scan_recordings(dataset)
-    # TODO use Celery task
+
+    # TODO: Replace with Celery workflow:
+    #   1. Ensure default SnippetConfig exists (e.g. BirdNET-like).
+    #   2. generate_snippets_for_dataset.delay(dataset.id, snippet_config_id)
+    #
+    # For now, segmentation may remain synchronous or incomplete.
+
     return dataset
 
 
@@ -84,7 +91,13 @@ def delete_dataset(
 
     is_admin = current_user.role == UserRole.ADMIN
     is_owner = True
-    # TODO Limit which users can delete datasets (team owners? dataset owners?)
+    # TODO: Restrict delete privileges appropriately.
+
+    # NOTE (future): Dataset deletion will delete:
+    #   - SnippetConfigs
+    #   - Snippets
+    #   - Annotations (cascade)
+    # The SnippetConfig safety logic from Issue #<id> must be respected.
 
     if not (is_admin or is_owner):
         raise HTTPException(status_code=403, detail="Not authorized to delete dataset")

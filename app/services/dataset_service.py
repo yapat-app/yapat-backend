@@ -172,3 +172,5 @@ class DatasetService:
         self.db.commit()
         self.db.refresh(rec)
         return rec
+
+#TODO: compute checksum and include in db entry
