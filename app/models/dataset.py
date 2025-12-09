@@ -29,8 +29,8 @@ class Dataset(Base):
     # Relationships
     team = relationship("Team", back_populates="datasets")
     recordings = relationship("Recording", back_populates="dataset", cascade="all, delete-orphan")
-    snippet_configs = relationship(
-        "SnippetConfig",
+    embedding_jobs = relationship(
+        "EmbeddingJob",
         back_populates="dataset",
         cascade="all, delete-orphan"
     )

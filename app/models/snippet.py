@@ -13,8 +13,17 @@ class Snippet(Base):
     __tablename__ = "snippets"
 
     id = Column(Integer, primary_key=True, index=True)
-    recording_id = Column(Integer, ForeignKey("recordings.id", ondelete="CASCADE"), nullable=False)
-    snippet_config_id = Column(Integer, ForeignKey("snippet_configs.id", ondelete="CASCADE"), nullable=False)
+    recording_id = Column(
+        Integer,
+        ForeignKey("recordings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # New architecture: snippets belong to an embedding job
+    embedding_job_id = Column(
+        Integer,
+        ForeignKey("embedding_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
 
     start_time = Column(Float, nullable=False)  # seconds
     duration = Column(Float, nullable=False)  # == window_size
@@ -23,14 +32,12 @@ class Snippet(Base):
 
     # Relationships
     recording = relationship("Recording", back_populates="snippets")
+    embedding_job = relationship("EmbeddingJob", back_populates="snippets")
+
     annotations = relationship(
         "Annotation",
         back_populates="snippet",
-        cascade="all, delete-orphan"
-    )
-    config = relationship(
-        "SnippetConfig",
-        back_populates="snippets"
+        cascade="all, delete-orphan",
     )
 
 
@@ -38,18 +45,17 @@ class SnippetConfig(Base):
     __tablename__ = "snippet_configs"
 
     id = Column(Integer, primary_key=True, index=True)
-    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False)
 
-    overlap = Column(Float, default=0.0, nullable=False)
+    embedding_job_id = Column(
+        Integer,
+        ForeignKey("embedding_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,  # enforce 1:1
+    )
+
     window_size = Column(Float, nullable=False)
     step_size = Column(Float, nullable=False)
+    overlap = Column(Float, nullable=False)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    # Relationships
-    snippets = relationship(
-        "Snippet",
-        back_populates="config",
-        cascade="all, delete-orphan"  # Correct place for cascade
-    )
-    dataset = relationship("Dataset", back_populates="snippet_configs")
+    # 1:1 relationship
+    embedding_job = relationship("EmbeddingJob", back_populates="snippet_config")
