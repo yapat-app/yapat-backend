@@ -23,7 +23,17 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "YAPAT Backend"
     
     # CORS - can be set as comma-separated string or list
-    BACKEND_CORS_ORIGINS: Union[str, list] = ["http://localhost:3000", "http://localhost:8000"]
+    BACKEND_CORS_ORIGINS: Union[str, list] = [
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ]
+    
+    # Mock data settings (for development/testing)
+    USE_MOCK_AUDIO: bool = True
+    MOCK_AUDIO_PATH: str = "/mock/audio"
+    REAL_AUDIO_PATH: str = "/data/audio"
     
     @property
     def cors_origins_list(self) -> list:
@@ -31,6 +41,11 @@ class Settings(BaseSettings):
         if isinstance(self.BACKEND_CORS_ORIGINS, str):
             return [origin.strip() for origin in self.BACKEND_CORS_ORIGINS.split(",")]
         return self.BACKEND_CORS_ORIGINS
+    
+    @property
+    def audio_base_path(self) -> str:
+        """Get audio path based on mock setting"""
+        return self.MOCK_AUDIO_PATH if self.USE_MOCK_AUDIO else self.REAL_AUDIO_PATH
     
     # Celery
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
