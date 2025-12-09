@@ -50,7 +50,6 @@ class DatasetService:
             team = self.db.query(TeamModel).filter(TeamModel.id == dataset_in.team_id).first()
             if not team:
                 raise ValueError("team_not_found")
-        # Admin-created datasets (team_id = None) are claimable later.
 
         # Proactive duplicate check for (team_id, source_uri)
         duplicate = (
@@ -67,7 +66,6 @@ class DatasetService:
             raise ValueError("duplicate_dataset")
 
         dataset = DatasetModel(**dataset_in.dict())
-
         self.db.add(dataset)
         try:
             self.db.commit()
@@ -85,15 +83,6 @@ class DatasetService:
         """
         self.db.delete(dataset)
         self.db.commit()
-
-    def claim_dataset(self, dataset: DatasetModel, user: User) -> DatasetModel:
-        """
-        Allow a user to claim ownership of an admin-created dataset (team_id NULL).
-        """
-        dataset.team_id = user.team_id
-        self.db.commit()
-        self.db.refresh(dataset)
-        return dataset
 
     def list_datasets(self, current_user: User, skip: int = 0, limit: int = 100):
         # Admins see everything
@@ -194,7 +183,7 @@ class DatasetService:
             .first()
         )
         if existing:
-            return None  # not "new"
+            return None
 
         # Extract duration & sample rate from audio
         try:

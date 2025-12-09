@@ -32,3 +32,13 @@ class Dataset(DatasetBase):
 
     class Config:
         from_attributes = True
+
+
+class DatasetCreationResponse(BaseModel):
+    dataset: Dataset
+    process_task_id: Optional[str] = None
+    snippet_config_id: Optional[int] = None
+    embedding_job_id: Optional[int] = None
+
+    class Config:
+        orm_mode = True
