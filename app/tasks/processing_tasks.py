@@ -1,26 +1,20 @@
 """
-Celery tasks for recording and snippet processing.
-
-These tasks wrap DatasetService + SnippetService.
-The tasks DO NOT implement business logic themselves.
+Celery tasks for dataset scanning and orchestration.
 """
 
 from contextlib import contextmanager
 from celery import shared_task
 
 from app.database import SessionLocal
-from app.models.dataset import Dataset
-from app.models.snippet import SnippetConfig
 from app.services.dataset_service import DatasetService
 
 
-# ---------------------------------------------------------
-# Safe session helper
-# ---------------------------------------------------------
+# --------------------------------------------------------------------
+# Context manager for DB session handling
+# --------------------------------------------------------------------
 
 @contextmanager
 def session_scope():
-    """Provide a transactional scope around task operations."""
     db = SessionLocal()
     try:
         yield db
@@ -28,23 +22,23 @@ def session_scope():
         db.close()
 
 
-# ---------------------------------------------------------
-# Scan dataset (async)
-# ---------------------------------------------------------
+# --------------------------------------------------------------------
+# Task: Scan dataset for recordings
+# --------------------------------------------------------------------
 
-@shared_task(bind=True, name="tasks.scan_dataset")
+@shared_task(bind=True)
 def scan_dataset(self, dataset_id: int):
     """
-    Asynchronously scan recordings under a dataset.
+    Discover recordings in dataset.source_uri.
+    Uses DatasetService.scan_recordings().
     """
     with session_scope() as db:
         svc = DatasetService(db)
-        dataset = svc.get_dataset(dataset_id)
 
+        dataset = svc.get_dataset(dataset_id)
         if dataset is None:
             return {"status": "error", "message": "dataset_not_found"}
 
-        # Optional metadata update for task monitors
         self.update_state(state="SCANNING", meta={"dataset_id": dataset_id})
 
         try:
@@ -59,48 +53,23 @@ def scan_dataset(self, dataset_id: int):
         }
 
 
-# ---------------------------------------------------------
-# Snippet generation (placeholder until segmentation is implemented)
-# ---------------------------------------------------------
+# --------------------------------------------------------------------
+# Orchestration: dataset processing = scan only
+# --------------------------------------------------------------------
 
-@shared_task(bind=True, name="tasks.generate_snippets")
-def generate_snippets(self, dataset_id: int, snippet_config_id: int):
-    """
-    Placeholder snippet-generation task.
-    Actual segmentation MUST be implemented in SnippetService or a dedicated class.
-    """
-    with session_scope() as db:
-        dataset = db.query(Dataset).filter_by(id=dataset_id).first()
-        if not dataset:
-            return {"status": "error", "message": "dataset_not_found"}
-
-        cfg = db.query(SnippetConfig).filter_by(id=snippet_config_id).first()
-        if not cfg:
-            return {"status": "error", "message": "snippet_config_not_found"}
-
-        # TODO: SnippetService integration
-        return {
-            "status": "not_implemented",
-            "dataset_id": dataset_id,
-            "snippet_config_id": snippet_config_id,
-        }
-
-
-# ---------------------------------------------------------
-# Orchestration: scan dataset → (future) generate snippets
-# ---------------------------------------------------------
-
-@shared_task(bind=True, name="tasks.process_dataset")
+@shared_task(bind=True)
 def process_dataset(self, dataset_id: int):
     """
-    High-level pipeline:
-    1. Scan for recordings
-    2. Kick off snippet generation for all configs (future)
+    Trigger the dataset scanning pipeline.
+
+    New architecture:
+    - Only scanning runs at dataset creation
+    - Snippet generation is triggered by embedding jobs, not datasets
     """
-    scan_result = scan_dataset.delay(dataset_id)
+    result = scan_dataset.delay(dataset_id)
 
     return {
         "status": "submitted",
         "dataset_id": dataset_id,
-        "scan_task_id": scan_result.id,
+        "scan_task_id": result.id,
     }
