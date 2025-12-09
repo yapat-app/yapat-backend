@@ -7,11 +7,8 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db, get_current_active_user, get_current_admin_user
-from app.schemas.dataset import Dataset, DatasetCreate, DatasetUpdate
-from app.models.dataset import Dataset as DatasetModel
+from app.api.deps import get_db, get_current_active_user
 from app.models.user import User, UserRole
-from app.models.team import Team as TeamModel, TeamMembership as TeamMembershipModel, TeamRole
 from app.schemas.dataset import Dataset, DatasetCreate
 from app.services.dataset_service import DatasetService
 
@@ -29,7 +26,7 @@ def create_dataset(
     """Create a new dataset. Admins can create datasets without team_id."""
     # Check if user is admin
     is_admin = current_user.role == UserRole.ADMIN
-    
+
     # Non-admins must provide team_id
     if not is_admin and dataset_in.team_id is None:
         raise HTTPException(
@@ -73,7 +70,7 @@ def read_datasets(
 ):
     """List datasets visible to the current user."""
     svc = DatasetService(db)
-    return svc.list_datasets(skip=skip, limit=limit)
+    return svc.list_datasets(current_user=current_user, skip=skip, limit=limit)
 
 
 @router.get("/{dataset_id}", response_model=Dataset)
@@ -117,25 +114,3 @@ def delete_dataset(
 
     svc.delete_dataset(dataset)
     return None
-
-
-@router.post("/{dataset_id}/claim", response_model=Dataset)
-def claim_dataset(
-        dataset_id: int,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_active_user),
-):
-    """
-    A user may claim ownership of a dataset whose team_id is NULL.
-    """
-    svc = DatasetService(db)
-
-    dataset = svc.get_dataset(dataset_id)
-    if not dataset:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    if dataset.team_id is not None:
-        raise HTTPException(status_code=400, detail="Dataset already belongs to a team")
-
-    updated = svc.claim_dataset(dataset, current_user)
-    return updated
