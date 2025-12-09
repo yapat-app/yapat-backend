@@ -209,6 +209,14 @@ def login(
     return LoginResponse(access_token=access_token, token_type="bearer")
 
 
+@router.post("/logout", status_code=status.HTTP_200_OK)
+def logout(current_user: UserModel = Depends(get_current_active_user)):
+    """Logout the current user"""
+    # Using a stateless JWT system, So logout has to be handled on the client-side by discarding the token
+    # This endpoint provides a way to confirm logout and can be used for logging/analytics
+    return {"message": "Successfully logged out"}
+
+
 @router.get("/me", response_model=User)
 def read_users_me(current_user: UserModel = Depends(get_current_active_user)):
     """Get current user information"""
