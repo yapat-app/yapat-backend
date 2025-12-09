@@ -7,8 +7,11 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db, get_current_active_user
+from app.api.deps import get_db, get_current_active_user, get_current_admin_user
+from app.schemas.dataset import Dataset, DatasetCreate, DatasetUpdate
+from app.models.dataset import Dataset as DatasetModel
 from app.models.user import User, UserRole
+from app.models.team import Team as TeamModel, TeamMembership as TeamMembershipModel, TeamRole
 from app.schemas.dataset import Dataset, DatasetCreate
 from app.services.dataset_service import DatasetService
 
@@ -23,20 +26,30 @@ def create_dataset(
 ):
     svc = DatasetService(db)
 
+    """Create a new dataset. Admins can create datasets without team_id."""
+    # Check if user is admin
     is_admin = current_user.role == UserRole.ADMIN
+    
+    # Non-admins must provide team_id
     if not is_admin and dataset_in.team_id is None:
         raise HTTPException(
-            status_code=400,
-            detail="team_id is required for non-admin users",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="team_id is required for non-admin users"
         )
 
     try:
         dataset = svc.create_dataset(dataset_in, current_user)
     except ValueError as e:
         if str(e) == "duplicate_dataset":
-            raise HTTPException(status_code=409, detail="Dataset already exists")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Dataset already exists",
+            )
         if str(e) == "team_not_found":
-            raise HTTPException(status_code=404, detail="Team not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Team not found",
+            )
         raise
 
     # Scan audio recordings in source_uri and create Recording objects

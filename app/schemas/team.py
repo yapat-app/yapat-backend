@@ -14,14 +14,14 @@ class TeamBase(BaseModel):
 
 
 class TeamCreate(TeamBase):
-    dataset_id: Optional[int] = Field(
+    dataset_ids: Optional[List[int]] = Field(
         None,
         description=(
-            "Optional dataset ID to assign to the team. "
+            "Optional list of dataset IDs to assign to the team. "
             "Only datasets from teams where you are an owner can be selected. "
             "Use GET /api/teams/available-datasets to get the list of available datasets."
         ),
-        examples=[1, 2, 3],
+        examples=[[1, 2, 3]],
         json_schema_extra={
             "x-link": "/api/teams/available-datasets",
             "x-link-description": "View available datasets"
