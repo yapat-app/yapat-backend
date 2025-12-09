@@ -13,7 +13,6 @@ from app.celery_app import celery_app
 # Import the actual, existing tasks
 from app.tasks.processing_tasks import (
     scan_dataset,
-    generate_snippets,
     process_dataset,
 )
 
