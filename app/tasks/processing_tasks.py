@@ -5,6 +5,7 @@ These tasks wrap DatasetService + SnippetService.
 The tasks DO NOT implement business logic themselves.
 """
 
+from contextlib import contextmanager
 from celery import shared_task
 
 from app.database import SessionLocal
@@ -17,7 +18,9 @@ from app.services.dataset_service import DatasetService
 # Safe session helper
 # ---------------------------------------------------------
 
-def _session():
+@contextmanager
+def session_scope():
+    """Provide a transactional scope around task operations."""
     db = SessionLocal()
     try:
         yield db
@@ -34,13 +37,14 @@ def scan_dataset(self, dataset_id: int):
     """
     Asynchronously scan recordings under a dataset.
     """
-    for db in _session():
+    with session_scope() as db:
         svc = DatasetService(db)
         dataset = svc.get_dataset(dataset_id)
 
         if dataset is None:
             return {"status": "error", "message": "dataset_not_found"}
 
+        # Optional metadata update for task monitors
         self.update_state(state="SCANNING", meta={"dataset_id": dataset_id})
 
         try:
@@ -65,7 +69,7 @@ def generate_snippets(self, dataset_id: int, snippet_config_id: int):
     Placeholder snippet-generation task.
     Actual segmentation MUST be implemented in SnippetService or a dedicated class.
     """
-    for db in _session():
+    with session_scope() as db:
         dataset = db.query(Dataset).filter_by(id=dataset_id).first()
         if not dataset:
             return {"status": "error", "message": "dataset_not_found"}
@@ -74,7 +78,7 @@ def generate_snippets(self, dataset_id: int, snippet_config_id: int):
         if not cfg:
             return {"status": "error", "message": "snippet_config_not_found"}
 
-        # TODO: actual segmentation implementation here
+        # TODO: SnippetService integration
         return {
             "status": "not_implemented",
             "dataset_id": dataset_id,
@@ -83,7 +87,7 @@ def generate_snippets(self, dataset_id: int, snippet_config_id: int):
 
 
 # ---------------------------------------------------------
-# Orchestration: scan dataset → process each recording
+# Orchestration: scan dataset → (future) generate snippets
 # ---------------------------------------------------------
 
 @shared_task(bind=True, name="tasks.process_dataset")
@@ -95,7 +99,6 @@ def process_dataset(self, dataset_id: int):
     """
     scan_result = scan_dataset.delay(dataset_id)
 
-    # Future: trigger snippet generation group(...)
     return {
         "status": "submitted",
         "dataset_id": dataset_id,

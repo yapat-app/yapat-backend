@@ -49,8 +49,8 @@ def create_dataset(
             )
         raise
 
-    # Scan audio recordings in source_uri and create Recording objects
-    svc.scan_recordings(dataset)
+    # # Scan audio recordings in source_uri and create Recording objects
+    # svc.scan_recordings(dataset)
 
     # TODO: Replace with Celery workflow:
     #   1. Ensure default SnippetConfig exists (e.g. BirdNET-like).

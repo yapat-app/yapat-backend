@@ -1,53 +1,99 @@
 import shutil
 import tempfile
 from pathlib import Path
-import pytest
-import numpy as np
-import soundfile as sf
 
+import numpy as np
+import pytest
+import soundfile as sf
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
+from app.main import app
+
+
+
+@pytest.fixture
+def client():
+    """
+    FastAPI test client for API integration tests.
+    """
+    return TestClient(app)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def celery_eager():
+    """
+    Run Celery tasks synchronously in tests.
+    """
+    from app.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+
+    yield
+
+    # restore defaults (optional)
+    celery_app.conf.task_always_eager = False
+    celery_app.conf.task_eager_propagates = False
 
 
 # ------------------------------------------------------
-# Engine (shared across tests)
+# Engine (shared across whole session)
 # ------------------------------------------------------
 
 @pytest.fixture(scope="session")
 def engine():
     """
-    A single in-memory SQLite engine shared across the entire test session.
-    Celery tasks open new sessions, so the engine must persist for the full run.
+    A single in-memory SQLite engine for the entire test session.
+    Celery eager tasks will open new DB sessions, so the engine must persist.
     """
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
     )
 
-    # Enforce SQLite foreign key constraints
     @event.listens_for(engine, "connect")
     def enforce_fk(dbapi_conn, conn_record):
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    # Create all tables on this shared engine
     Base.metadata.create_all(bind=engine)
 
     return engine
 
 
 # ------------------------------------------------------
-# Session (per test)
+# Patch SessionLocal so Celery tasks use test engine
+# ------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def patch_sessionlocal(monkeypatch, engine):
+    """
+    Ensure Celery tasks use the SAME database engine as tests.
+    Prevents creation of a second engine inside app.database.
+    """
+    SessionLocal = sessionmaker(bind=engine)
+
+    monkeypatch.setattr("app.database.SessionLocal", SessionLocal)
+    monkeypatch.setattr("app.tasks.processing_tasks.SessionLocal", SessionLocal)
+
+    # If embedding_tasks or others touch the DB, patch them too:
+    monkeypatch.setattr("app.tasks.embedding_tasks.SessionLocal", SessionLocal, raising=False)
+
+    yield
+
+
+# ------------------------------------------------------
+# Session factory (fresh per test)
 # ------------------------------------------------------
 
 @pytest.fixture(scope="function")
 def db_session(engine):
     """
-    Each test gets a fresh session.
-    The engine itself persists across tests so Celery tasks can connect.
+    Each test gets a fresh session, but all share the same engine.
     """
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
@@ -59,14 +105,13 @@ def db_session(engine):
 
 
 # ------------------------------------------------------
-# Temporary test data directory
+# Temporary dataset root
 # ------------------------------------------------------
 
 @pytest.fixture
 def temp_data_root(monkeypatch):
     """
-    Creates a temp folder and sets INTERNAL_DATA_ROOT to it.
-    Cleaned after test completion.
+    Creates a temp directory and sets INTERNAL_DATA_ROOT to it.
     """
     tmp = tempfile.mkdtemp(prefix="yapat_data_")
     monkeypatch.setenv("INTERNAL_DATA_ROOT", tmp)
@@ -77,19 +122,19 @@ def temp_data_root(monkeypatch):
 
 
 # ------------------------------------------------------
-# Utility: create small WAV files
+# Tiny WAV generator
 # ------------------------------------------------------
 
 @pytest.fixture
 def tiny_wav_file():
     """
-    Writes a minimal WAV file using float32 NumPy array (safe for soundfile).
+    Writes a minimal WAV file with float32 samples.
     """
 
-    def _make(path: Path, duration_sec=0.1, sr=16000):
+    def _create(path: Path, duration_sec=0.1, sr=16000):
         samples = int(duration_sec * sr)
         data = np.zeros(samples, dtype=np.float32)
         sf.write(str(path), data, sr)
         return path
 
-    return _make
+    return _create
