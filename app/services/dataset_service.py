@@ -3,8 +3,8 @@ Dataset service — create datasets and scan source_uri for recordings.
 No snippet generation yet.
 """
 
-import os
 import hashlib
+import os
 from typing import List, Optional
 
 import soundfile as sf
@@ -12,10 +12,12 @@ from sqlalchemy import exists, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.dataset import Dataset
-from app.models.recording import Recording
-from app.models.team import Team
-from app.models.user import User
+from app.models.dataset import Dataset as DatasetModel
+from app.models.recording import Recording as RecordingModel
+from app.models.team import Team as TeamModel
+from app.models.team import TeamMembership as TeamMembershipModel
+from app.models.team import TeamRole
+from app.models.user import User, UserRole
 from app.schemas.dataset import DatasetCreate
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
@@ -29,17 +31,23 @@ class DatasetService:
     # Dataset operations
     # ---------------------------------------------------------
 
-    def create_dataset(self, dataset_in: DatasetCreate, current_user: User) -> Dataset:
+    def create_dataset(self, dataset_in: DatasetCreate, current_user: User) -> DatasetModel:
         """
         Create dataset with uniqueness check on (team_id, source_uri).
 
         Raises:
+            ValueError("team_id_required") if a non-admin creates dataset without team_id.
             ValueError("duplicate_dataset") if the dataset already exists.
             ValueError("team_not_found") if team_id is invalid.
         """
+
+        # Non-admin users MUST supply a team_id
+        if current_user.role != UserRole.ADMIN and dataset_in.team_id is None:
+            raise ValueError("team_id_required")
+
         # Validate team
         if dataset_in.team_id is not None:
-            team = self.db.query(Team).filter(Team.id == dataset_in.team_id).first()
+            team = self.db.query(TeamModel).filter(TeamModel.id == dataset_in.team_id).first()
             if not team:
                 raise ValueError("team_not_found")
         # Admin-created datasets (team_id = None) are claimable later.
@@ -49,8 +57,8 @@ class DatasetService:
             self.db.query(
                 exists().where(
                     and_(
-                        Dataset.team_id == dataset_in.team_id,
-                        Dataset.source_uri == dataset_in.source_uri,
+                        DatasetModel.team_id == dataset_in.team_id,
+                        DatasetModel.source_uri == dataset_in.source_uri,
                     )
                 )
             ).scalar()
@@ -58,7 +66,7 @@ class DatasetService:
         if duplicate:
             raise ValueError("duplicate_dataset")
 
-        dataset = Dataset(**dataset_in.dict())
+        dataset = DatasetModel(**dataset_in.dict())
 
         self.db.add(dataset)
         try:
@@ -71,14 +79,14 @@ class DatasetService:
         self.db.refresh(dataset)
         return dataset
 
-    def delete_dataset(self, dataset: Dataset) -> None:
+    def delete_dataset(self, dataset: DatasetModel) -> None:
         """
         Delete dataset and its recordings (cascade).
         """
         self.db.delete(dataset)
         self.db.commit()
 
-    def claim_dataset(self, dataset: Dataset, user: User) -> Dataset:
+    def claim_dataset(self, dataset: DatasetModel, user: User) -> DatasetModel:
         """
         Allow a user to claim ownership of an admin-created dataset (team_id NULL).
         """
@@ -87,23 +95,48 @@ class DatasetService:
         self.db.refresh(dataset)
         return dataset
 
-    def list_datasets(self, skip: int, limit: int) -> List[Dataset]:
+    def list_datasets(self, current_user: User, skip: int = 0, limit: int = 100):
+        # Admins see everything
+        if current_user.role == UserRole.ADMIN:
+            return (
+                self.db.query(DatasetModel)
+                .offset(skip)
+                .limit(limit)
+                .all()
+            )
+
+        # Non-admin users: list datasets from teams where the user is OWNER
+        owned_team_ids = (
+            self.db.query(TeamModel.id)
+            .join(TeamMembershipModel)
+            .filter(
+                TeamMembershipModel.user_id == current_user.id,
+                TeamMembershipModel.role == TeamRole.OWNER,
+            )
+            .all()
+        )
+
+        owned_team_ids = [t[0] for t in owned_team_ids]
+
+        if not owned_team_ids:
+            return []
+
         return (
-            self.db.query(Dataset)
-            .order_by(Dataset.created_at.desc())
+            self.db.query(DatasetModel)
+            .filter(DatasetModel.team_id.in_(owned_team_ids))
             .offset(skip)
             .limit(limit)
             .all()
         )
 
-    def get_dataset(self, dataset_id: int) -> Optional[Dataset]:
-        return self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    def get_dataset(self, dataset_id: int) -> Optional[DatasetModel]:
+        return self.db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
 
     # ---------------------------------------------------------
     # Recording discovery
     # ---------------------------------------------------------
 
-    def scan_recordings(self, dataset: Dataset) -> List[Recording]:
+    def scan_recordings(self, dataset: DatasetModel) -> List[RecordingModel]:
         """
         Walk dataset.source_uri (relative to INTERNAL_DATA_ROOT, default /data),
         detect audio files, and create Recording rows.
@@ -117,7 +150,7 @@ class DatasetService:
             raise ValueError(f"Invalid dataset path: {dataset_path}")
 
         audio_files = self._scan_audio_files(dataset_path)
-        new_recordings: List[Recording] = []
+        new_recordings: List[RecordingModel] = []
 
         for fpath in audio_files:
             rec = self._get_or_create_recording(dataset, fpath)
@@ -150,13 +183,13 @@ class DatasetService:
         return h.hexdigest()
 
     def _get_or_create_recording(
-        self, dataset: Dataset, filepath: str
-    ) -> Optional[Recording]:
+            self, dataset: DatasetModel, filepath: str
+    ) -> Optional[RecordingModel]:
         existing = (
-            self.db.query(Recording)
+            self.db.query(RecordingModel)
             .filter(
-                Recording.dataset_id == dataset.id,
-                Recording.file_path == filepath,
+                RecordingModel.dataset_id == dataset.id,
+                RecordingModel.file_path == filepath,
             )
             .first()
         )
@@ -174,7 +207,7 @@ class DatasetService:
 
         checksum = self._compute_checksum(filepath)
 
-        rec = Recording(
+        rec = RecordingModel(
             dataset_id=dataset.id,
             file_path=filepath,
             file_name=os.path.basename(filepath),
