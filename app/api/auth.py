@@ -14,7 +14,7 @@ from app.models.team import (
     Team as TeamModel, TeamMembership as TeamMembershipModel, TeamRole,
     TeamInvitation as TeamInvitationModel
 )
-from app.models.dataset import Dataset
+from app.models.dataset import Dataset, user_datasets
 from app.core.security import get_password_hash, verify_password, create_access_token
 
 router = APIRouter()
@@ -115,15 +115,19 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
     
     # If invitation token was used, grant access to datasets
     if invitation:
-        # Get unique teams that own the invited datasets (only datasets with existing teams)
+        # Separate datasets into two categories:
+        # 1. Datasets with teams - add user to those teams as OWNER
+        # 2. Datasets without teams - grant direct access
         team_ids = set()
+        unassigned_datasets = []
         
         for dataset in invitation.datasets:
             if dataset.team_id is not None:
                 team_ids.add(dataset.team_id)
-            # Skip datasets without a team - user can create a team later and assign them
+            else:
+                unassigned_datasets.append(dataset)
         
-        # Add user as member to each team that owns the invited datasets
+        # Add user as OWNER member to each team that owns the invited datasets
         for team_id in team_ids:
             if team_id is None:  # Safety check
                 continue
@@ -141,6 +145,16 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
                     role=TeamRole.OWNER  # Team owner role for invited users
                 )
                 db.add(membership)
+        
+        # Grant direct access to datasets without teams
+        for dataset in unassigned_datasets:
+            # Add to user_datasets association table
+            stmt = user_datasets.insert().values(
+                user_id=db_user.id,
+                dataset_id=dataset.id,
+                granted_by_invitation_id=invitation.id
+            )
+            db.execute(stmt)
         
         # Increment invitation uses count
         invitation.used_count += 1

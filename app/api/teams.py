@@ -16,8 +16,8 @@ from app.models.team import (
     Team as TeamModel, TeamMembership as TeamMembershipModel, TeamRole,
     TeamInvitation as TeamInvitationModel
 )
-from app.models.user import User, User as UserModel
-from app.models.dataset import Dataset as DatasetModel
+from app.models.user import User, User as UserModel, UserRole
+from app.models.dataset import Dataset as DatasetModel, user_datasets
 from app.core.permissions import require_team_owner, require_team_member
 from datetime import datetime, timezone, timedelta
 
@@ -30,22 +30,21 @@ def create_team(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Create a new team"""
+    """Create a new team and optionally assign datasets.
+    
+    Users can assign datasets they have access to:
+    - Datasets from teams where they are OWNER
+    - Datasets they have direct access to (granted via invitation)
+    - Admins can assign any dataset
+    """
     datasets = []
     
-    # If dataset_ids are provided, validate they belong to teams where user is owner
+    # If dataset_ids are provided, validate user has access to them
     if team_in.dataset_ids is not None and len(team_in.dataset_ids) > 0:
-        # Get all teams where current user is an owner
-        owned_teams = db.query(TeamModel).join(
-            TeamMembershipModel
-        ).filter(
-            TeamMembershipModel.user_id == current_user.id,
-            TeamMembershipModel.role == TeamRole.OWNER
-        ).all()
+        # Check if user is admin
+        is_admin = current_user.role == UserRole.ADMIN
         
-        owned_team_ids = [t.id for t in owned_teams]
-        
-        # Get all datasets and verify they belong to one of the owned teams
+        # Get all requested datasets
         datasets = db.query(DatasetModel).filter(
             DatasetModel.id.in_(team_in.dataset_ids)
         ).all()
@@ -58,17 +57,41 @@ def create_team(
                 detail=f"Datasets not found: {list(missing_ids)}"
             )
         
-        # Verify all datasets belong to teams owned by the user
-        invalid_datasets = []
-        for dataset in datasets:
-            if dataset.team_id not in owned_team_ids:
-                invalid_datasets.append(dataset.id)
-        
-        if invalid_datasets:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Datasets do not belong to any team you own: {invalid_datasets}"
-            )
+        if not is_admin:
+            # For non-admin users, verify they have access to all requested datasets
+            # Access sources: 1) Teams where user is OWNER, 2) Direct access via invitation
+            
+            # Get teams where user is owner
+            owned_teams = db.query(TeamModel).join(
+                TeamMembershipModel
+            ).filter(
+                TeamMembershipModel.user_id == current_user.id,
+                TeamMembershipModel.role == TeamRole.OWNER
+            ).all()
+            
+            owned_team_ids = [t.id for t in owned_teams]
+            
+            # Get datasets with direct access
+            direct_access_dataset_ids = db.query(user_datasets.c.dataset_id).filter(
+                user_datasets.c.user_id == current_user.id
+            ).all()
+            direct_access_dataset_ids = [row[0] for row in direct_access_dataset_ids]
+            
+            # Verify all datasets are accessible
+            invalid_datasets = []
+            for dataset in datasets:
+                has_access = (
+                    (dataset.team_id in owned_team_ids) or  # From owned team
+                    (dataset.id in direct_access_dataset_ids)  # Direct access
+                )
+                if not has_access:
+                    invalid_datasets.append(dataset.id)
+            
+            if invalid_datasets:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"You do not have access to these datasets: {invalid_datasets}"
+                )
     
     # Create the team
     team_data = team_in.dict(exclude={'dataset_ids'})
@@ -89,6 +112,15 @@ def create_team(
     if datasets:
         for dataset in datasets:
             dataset.team_id = team.id
+            
+        # Remove direct access for these datasets since they're now part of a team
+        # Team membership will control access
+        for dataset in datasets:
+            db.execute(
+                user_datasets.delete().where(
+                    user_datasets.c.dataset_id == dataset.id
+                )
+            )
     
     db.commit()
     db.refresh(team)
@@ -101,25 +133,56 @@ def get_available_datasets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Get list of datasets from teams where the current user is an owner.
-    These datasets can be assigned when creating a new team."""
-    # Get all teams where current user is an owner
-    owned_teams = db.query(TeamModel).join(
-        TeamMembershipModel
-    ).filter(
-        TeamMembershipModel.user_id == current_user.id,
-        TeamMembershipModel.role == TeamRole.OWNER
-    ).all()
+    """Get list of datasets available to the user for team assignment.
     
-    owned_team_ids = [t.id for t in owned_teams]
+    Returns:
+    - For admins: all datasets (both with and without teams)
+    - For other users: datasets from teams where they have OWNER membership + 
+                      datasets they have direct access to (granted via invitation)
+    """
+    # Check if user is admin
+    is_admin = current_user.role == UserRole.ADMIN
     
-    if not owned_team_ids:
-        return []
-    
-    # Get all datasets from owned teams
-    datasets = db.query(DatasetModel).filter(
-        DatasetModel.team_id.in_(owned_team_ids)
-    ).all()
+    if is_admin:
+        # Admins can see all datasets
+        datasets = db.query(DatasetModel).all()
+    else:
+        # Collect datasets from two sources:
+        # 1. Datasets from teams where user is OWNER
+        # 2. Datasets with direct access (via invitation)
+        
+        # Get all teams where current user is an owner (via team membership)
+        owned_teams = db.query(TeamModel).join(
+            TeamMembershipModel,
+            TeamModel.id == TeamMembershipModel.team_id
+        ).filter(
+            TeamMembershipModel.user_id == current_user.id,
+            TeamMembershipModel.role == TeamRole.OWNER
+        ).all()
+        
+        owned_team_ids = [t.id for t in owned_teams]
+        
+        # Get datasets from owned teams
+        team_datasets = []
+        if owned_team_ids:
+            team_datasets = db.query(DatasetModel).filter(
+                DatasetModel.team_id.in_(owned_team_ids)
+            ).all()
+        
+        # Get datasets with direct access (via user_datasets table)
+        direct_access_datasets = db.query(DatasetModel).join(
+            user_datasets,
+            DatasetModel.id == user_datasets.c.dataset_id
+        ).filter(
+            user_datasets.c.user_id == current_user.id
+        ).all()
+        
+        # Combine and deduplicate
+        dataset_dict = {}
+        for ds in team_datasets + direct_access_datasets:
+            dataset_dict[ds.id] = ds
+        
+        datasets = list(dataset_dict.values())
     
     return datasets
 
