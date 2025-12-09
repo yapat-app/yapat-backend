@@ -1,166 +1,182 @@
 """
-Celery tasks for embedding generation and similarity computation
+Celery tasks for the embedding pipeline.
+
+This implements the new architecture:
+
+    run_embedding(embedding_job_id):
+        - loads job + model + snippet_config
+        - segments all recordings for the dataset
+        - creates snippet rows
+        - generates embeddings for each snippet
+        - marks job COMPLETE or FAILED
 """
 
-from typing import List, Optional
-from celery import group, chord
+from typing import List
+from celery import group
 from sqlalchemy.orm import Session
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
-from app.models.snippet import Snippet
+
+from app.models.snippet import Snippet, SnippetConfig
 from app.models.recording import Recording
+from app.models.embedding import EmbeddingJob, EmbeddingModel, EmbeddingJobStatus
+
 from app.services.embedding_service import EmbeddingService
 
 
-def get_db():
-    """Get database session for tasks"""
+# ----------------------------------------------------------------------
+# Helper: DB session
+# ----------------------------------------------------------------------
+def get_db() -> Session:
     db = SessionLocal()
     try:
         return db
     finally:
-        pass  # Will be closed in task
+        pass  # closed in tasks
 
 
-@celery_app.task(bind=True, name="app.tasks.embedding_tasks.generate_embedding_for_snippet")
-def generate_embedding_for_snippet(self, snippet_id: int, embedding_model: Optional[str] = None):
+# ----------------------------------------------------------------------
+# Core task: generate embedding for a single snippet
+# ----------------------------------------------------------------------
+@celery_app.task(bind=True, name="app.tasks.embedding.generate_embedding_for_snippet")
+def generate_embedding_for_snippet(self, snippet_id: int, model_id: int):
     """
-    Generate embedding for a single snippet
-    
-    Args:
-        snippet_id: ID of the snippet to process
-        embedding_model: Optional model name to use
-        
-    Returns:
-        dict: Result with snippet_id and status
+    Generate embedding for a single snippet.
     """
     db = SessionLocal()
     try:
-        # Update task state
-        self.update_state(state='PROCESSING', meta={'snippet_id': snippet_id})
-        
-        # Get snippet
-        snippet = db.query(Snippet).filter(Snippet.id == snippet_id).first()
+        snippet = db.query(Snippet).filter_by(id=snippet_id).first()
         if not snippet:
-            return {"status": "error", "message": f"Snippet {snippet_id} not found"}
-        
-        # Initialize embedding service
-        embedding_service = EmbeddingService(model_name=embedding_model)
-        
-        # TODO: In actual implementation, this would:
-        # 1. Load audio file from snippet.file_path or recording
-        # 2. Generate embedding using the model
-        # 3. Store embedding vector in snippet.embedding
-        
-        # Placeholder implementation
-        embedding = embedding_service.generate_embedding(b"dummy_audio_data")
-        snippet.embedding = embedding
+            return {"status": "error", "snippet_id": snippet_id, "message": "Not found"}
+
+        model = db.query(EmbeddingModel).filter_by(id=model_id).first()
+        if not model:
+            return {"status": "error", "message": f"EmbeddingModel(id={model_id}) not found"}
+
+        # TODO: Actual embedding code
+        dummy_embedding = [0.1, 0.2, 0.3]  # placeholder
+
+        snippet.embedding = dummy_embedding
         db.commit()
-        
-        return {
-            "status": "success",
-            "snippet_id": snippet_id,
-            "embedding_dim": len(embedding)
-        }
+
+        return {"status": "success", "snippet_id": snippet_id}
+
     except Exception as e:
         db.rollback()
-        return {
-            "status": "error",
-            "snippet_id": snippet_id,
-            "message": str(e)
-        }
+        return {"status": "error", "snippet_id": snippet_id, "message": str(e)}
+
     finally:
         db.close()
 
 
-@celery_app.task(bind=True, name="app.tasks.embedding_tasks.generate_embeddings_batch")
-def generate_embeddings_batch(self, snippet_ids: List[int], embedding_model: Optional[str] = None):
+# ----------------------------------------------------------------------
+# Main pipeline: run_embedding(job)
+# ----------------------------------------------------------------------
+@celery_app.task(bind=True, name="app.tasks.embedding.run_embedding")
+def run_embedding(self, embedding_job_id: int):
     """
-    Generate embeddings for a batch of snippets in parallel
-    
-    Args:
-        snippet_ids: List of snippet IDs to process
-        embedding_model: Optional model name to use
-        
-    Returns:
-        dict: Summary of batch processing
+    Run the entire embedding pipeline for an EmbeddingJob:
+        - update job status
+        - segment recordings
+        - create snippets
+        - generate embeddings for each snippet (parallel group)
     """
-    self.update_state(
-        state='PROCESSING',
-        meta={'total': len(snippet_ids), 'processed': 0}
-    )
-    
-    # Create parallel tasks for each snippet
-    job = group(
-        generate_embedding_for_snippet.s(snippet_id, embedding_model)
-        for snippet_id in snippet_ids
-    )
-    
-    result = job.apply_async()
-    results = result.get()
-    
-    # Summarize results
-    successful = sum(1 for r in results if r.get("status") == "success")
-    failed = len(results) - successful
-    
-    return {
-        "status": "completed",
-        "total": len(snippet_ids),
-        "successful": successful,
-        "failed": failed,
-        "results": results
-    }
 
-
-@celery_app.task(bind=True, name="app.tasks.embedding_tasks.regenerate_embeddings_for_dataset")
-def regenerate_embeddings_for_dataset(self, dataset_id: int, embedding_model: Optional[str] = None):
-    """
-    Regenerate embeddings for all snippets in a dataset
-    
-    Args:
-        dataset_id: ID of the dataset
-        embedding_model: Optional model name to use
-        
-    Returns:
-        dict: Summary of regeneration process
-    """
     db = SessionLocal()
+    service = EmbeddingService(db)
+
     try:
-        self.update_state(
-            state='PROCESSING',
-            meta={'dataset_id': dataset_id, 'status': 'fetching_snippets'}
+        # ----------------------------------------------------------
+        # 1. Load job and mark RUNNING
+        # ----------------------------------------------------------
+        job = db.query(EmbeddingJob).filter_by(id=embedding_job_id).first()
+        if not job:
+            raise ValueError(f"EmbeddingJob(id={embedding_job_id}) not found")
+
+        service.update_job_status(job.id, EmbeddingJobStatus.RUNNING, celery_task_id=self.request.id)
+
+        dataset = job.dataset
+        config = job.snippet_config
+        model = job.embedding_model
+
+        window = config.window_size
+        step = config.step_size
+        overlap = config.overlap   # might be redundant but kept for clarity
+
+        # ----------------------------------------------------------
+        # 2. Load recordings for the dataset
+        # ----------------------------------------------------------
+        recordings = (
+            db.query(Recording)
+            .filter_by(dataset_id=dataset.id)
+            .all()
         )
-        
-        # Get all snippets for the dataset through recordings
-        snippets = db.query(Snippet).join(Recording).filter(
-            Recording.dataset_id == dataset_id
-        ).all()
-        
-        snippet_ids = [s.id for s in snippets]
-        
-        if not snippet_ids:
-            return {
-                "status": "success",
-                "dataset_id": dataset_id,
-                "message": "No snippets found in dataset",
-                "total": 0
-            }
-        
-        # Trigger batch processing
-        result = generate_embeddings_batch.delay(snippet_ids, embedding_model)
-        
+
+        snippet_ids = []
+
+        # ----------------------------------------------------------
+        # 3. Segment each recording → create Snippet rows
+        # ----------------------------------------------------------
+        for rec in recordings:
+            duration = rec.duration_seconds
+            if duration is None:
+                # You may want to compute it from the audio or skip
+                continue
+
+            t = 0.0
+            while t + window <= duration:
+                snippet = Snippet(
+                    recording_id=rec.id,
+                    embedding_job_id=job.id,
+                    start_time=t,
+                    end_time=t + window,
+                )
+                db.add(snippet)
+                db.flush()
+                snippet_ids.append(snippet.id)
+                t += step
+
+        db.commit()
+
+        # ----------------------------------------------------------
+        # 4. Generate embeddings (parallel)
+        # ----------------------------------------------------------
+        task_group = group(
+            generate_embedding_for_snippet.s(snippet_id, model.id)
+            for snippet_id in snippet_ids
+        )
+
+        results = task_group.apply_async().get()
+
+        # ----------------------------------------------------------
+        # 5. Final job status
+        # ----------------------------------------------------------
+        failures = [r for r in results if r.get("status") != "success"]
+
+        if failures:
+            service.update_job_status(
+                job.id,
+                EmbeddingJobStatus.FAILED,
+                message=f"{len(failures)} snippet embedding failures"
+            )
+        else:
+            service.update_job_status(job.id, EmbeddingJobStatus.COMPLETED)
+
         return {
-            "status": "started",
-            "dataset_id": dataset_id,
+            "status": "completed",
+            "embedding_job_id": job.id,
             "total_snippets": len(snippet_ids),
-            "batch_task_id": result.id
+            "failed": len(failures),
         }
+
     except Exception as e:
-        return {
-            "status": "error",
-            "dataset_id": dataset_id,
-            "message": str(e)
-        }
+        service.update_job_status(
+            embedding_job_id,
+            EmbeddingJobStatus.FAILED,
+            message=str(e)
+        )
+        return {"status": "error", "message": str(e)}
+
     finally:
         db.close()
-
