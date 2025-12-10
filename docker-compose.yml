@@ -52,10 +52,12 @@ services:
       - API_STR=/api
       - PROJECT_NAME=YAPAT Backend
       - BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
+      - DATA_ROOT=${DATA_ROOT:-/data}
     ports:
       - "8000:8000"
     volumes:
       - .:/app
+      - ${DATA_ROOT}:/data:ro
     restart: unless-stopped
 
   # Celery worker for asynchronous task processing
@@ -73,8 +75,10 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - DATA_ROOT=${DATA_ROOT:-/data}
     volumes:
       - .:/app
+      - ${DATA_ROOT}:/data:ro
     restart: unless-stopped
 
   # Celery beat scheduler for periodic tasks
@@ -92,8 +96,10 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-secret-key-change-in-production}
+      - DATA_ROOT=${DATA_ROOT:-/data}
     volumes:
       - .:/app
+      - ${DATA_ROOT}:/data:ro
     restart: unless-stopped
 
   # Flower monitoring dashboard for Celery
@@ -118,4 +124,3 @@ services:
 volumes:
   postgres_data:
   redis_data:
-

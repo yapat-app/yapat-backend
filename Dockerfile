@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     g++ \
     build-essential \
     postgresql-client \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies

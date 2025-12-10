@@ -9,179 +9,120 @@ from celery.result import AsyncResult
 from app.api.deps import get_db, get_current_active_user
 from app.models.user import User
 from app.celery_app import celery_app
-from app.tasks import (
-    process_recording,
-    generate_snippets_for_recording,
-    scan_and_process_dataset,
+
+# Import the actual, existing tasks
+from app.tasks.processing_tasks import (
+    scan_dataset,
+    process_dataset,
 )
 
 router = APIRouter()
 
 
+# ------------------------------------------------------
+# Task status
+# ------------------------------------------------------
 @router.get("/status/{task_id}")
 def get_task_status(
     task_id: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
 ):
     """
-    Get status of a Celery task
-    
-    Args:
-        task_id: ID of the task to check
-        
-    Returns:
-        Task status and result/metadata
+    Query Celery task status + metadata.
     """
-    task_result = AsyncResult(task_id, app=celery_app)
-    
-    response = {
+    task = AsyncResult(task_id, app=celery_app)
+
+    resp = {
         "task_id": task_id,
-        "status": task_result.state,
-        "ready": task_result.ready(),
-        "successful": task_result.successful() if task_result.ready() else None,
-        "failed": task_result.failed() if task_result.ready() else None,
+        "status": task.state,
+        "ready": task.ready(),
+        "successful": task.successful() if task.ready() else None,
+        "failed": task.failed() if task.ready() else None,
     }
-    
-    # Add result if completed
-    if task_result.ready():
-        if task_result.successful():
-            response["result"] = task_result.result
-        elif task_result.failed():
-            response["error"] = str(task_result.info)
+
+    # include results if task finished
+    if task.ready():
+        if task.successful():
+            resp["result"] = task.result
+        else:
+            resp["error"] = str(task.info)
     else:
-        # Add progress metadata if available
-        if task_result.info:
-            response["meta"] = task_result.info
-    
-    return response
+        # pending progress metadata
+        if task.info:
+            resp["meta"] = task.info
+
+    return resp
 
 
-@router.post("/recordings/{recording_id}/process")
-def trigger_recording_processing(
-    recording_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Trigger processing for a recording (metadata extraction and snippet generation)
-    
-    Args:
-        recording_id: ID of the recording
-        
-    Returns:
-        Task ID and initial status
-    """
-    from app.models.recording import Recording
-    
-    # Verify recording exists
-    recording = db.query(Recording).filter(Recording.id == recording_id).first()
-    if not recording:
-        raise HTTPException(status_code=404, detail="Recording not found")
-    
-    # Trigger task
-    task = process_recording.delay(recording_id)
-    
-    return {
-        "task_id": task.id,
-        "status": "started",
-        "recording_id": recording_id
-    }
-
-
-@router.post("/recordings/{recording_id}/generate-snippets")
-def trigger_snippet_generation(
-    recording_id: int,
-    window_duration_sec: float = 3.0,
-    hop_duration_sec: float = 1.5,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """
-    Trigger snippet generation for a recording
-    
-    Args:
-        recording_id: ID of the recording
-        window_duration_sec: Duration of each snippet
-        hop_duration_sec: Hop size between snippets
-        
-    Returns:
-        Task ID and initial status
-    """
-    from app.models.recording import Recording
-    
-    # Verify recording exists
-    recording = db.query(Recording).filter(Recording.id == recording_id).first()
-    if not recording:
-        raise HTTPException(status_code=404, detail="Recording not found")
-    
-    # Trigger task
-    task = generate_snippets_for_recording.delay(
-        recording_id,
-        window_duration_sec,
-        hop_duration_sec
-    )
-    
-    return {
-        "task_id": task.id,
-        "status": "started",
-        "recording_id": recording_id,
-        "window_duration_sec": window_duration_sec,
-        "hop_duration_sec": hop_duration_sec
-    }
-
-
+# ------------------------------------------------------
+# Dataset-level operations
+# ------------------------------------------------------
 @router.post("/datasets/{dataset_id}/scan")
 def trigger_dataset_scan(
     dataset_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
 ):
     """
-    Trigger dataset scanning and processing
-    Scans directory for audio files and processes them
-    
-    Args:
-        dataset_id: ID of the dataset
-        
-    Returns:
-        Task ID and initial status
+    Trigger scan for audio files inside a dataset.
     """
     from app.models.dataset import Dataset
-    
-    # Verify dataset exists
-    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    if not dataset:
+
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if ds is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    
-    # Trigger task
-    task = scan_and_process_dataset.delay(dataset_id)
-    
+
+    task = scan_dataset.delay(dataset_id)
+
     return {
         "task_id": task.id,
         "status": "started",
-        "dataset_id": dataset_id
+        "dataset_id": dataset_id,
     }
 
 
+@router.post("/datasets/{dataset_id}/process")
+def trigger_dataset_processing(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    High-level dataset pipeline task.
+
+    Currently: scan recordings → return submitted scan task ID.
+    Future: add snippet-generation orchestration.
+    """
+    from app.models.dataset import Dataset
+
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if ds is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    task = process_dataset.delay(dataset_id)
+
+    return {
+        "task_id": task.id,
+        "status": "submitted",
+        "dataset_id": dataset_id,
+    }
+
+
+# ------------------------------------------------------
+# Cancel task
+# ------------------------------------------------------
 @router.delete("/cancel/{task_id}")
 def cancel_task(
     task_id: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
 ):
     """
-    Cancel a running task
-    
-    Args:
-        task_id: ID of the task to cancel
-        
-    Returns:
-        Cancellation status
+    Cancel a running Celery task.
     """
     celery_app.control.revoke(task_id, terminate=True)
-    
+
     return {
         "task_id": task_id,
         "status": "cancelled",
-        "message": "Task cancellation requested"
+        "message": "Task cancellation requested",
     }
-
