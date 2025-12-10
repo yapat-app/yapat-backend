@@ -11,6 +11,7 @@ from app.schemas.dataset import Dataset, DatasetCreate, DatasetUpdate
 from app.models.dataset import Dataset as DatasetModel
 from app.models.user import User, UserRole
 from app.models.team import Team as TeamModel, TeamMembership as TeamMembershipModel, TeamRole
+from app.tasks import scan_and_process_dataset
 
 router = APIRouter()
 
@@ -47,6 +48,11 @@ def create_dataset(
     db.add(dataset)
     db.commit()
     db.refresh(dataset)
+    
+    # Automatically trigger dataset scanning after creation
+    if dataset.source_uri:
+        scan_and_process_dataset.delay(dataset.id)
+    
     return dataset
 
 

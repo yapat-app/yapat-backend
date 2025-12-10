@@ -62,7 +62,7 @@ services:
   celery-worker:
     build: .
     container_name: yapat-celery-worker
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 --queues=default,embeddings,processing,exports
     depends_on:
       db:
         condition: service_healthy
