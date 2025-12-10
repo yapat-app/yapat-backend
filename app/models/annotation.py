@@ -8,6 +8,7 @@ from sqlalchemy.sql import func
 
 from app.database import Base
 
+# TODO Rewrite model
 
 class Annotation(Base):
     __tablename__ = "annotations"
@@ -15,12 +16,11 @@ class Annotation(Base):
     id = Column(Integer, primary_key=True, index=True)
     snippet_id = Column(Integer, ForeignKey("snippets.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    species_name = Column(String, nullable=False, index=True)
-    confidence = Column(Float, nullable=True)  # Confidence score (0.0 to 1.0)
+    taxon_id = Column(String, nullable=False, index=True)
     notes = Column(Text, nullable=True)
     extra_metadata = Column(JSON, nullable=True)  # Additional annotation metadata
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_by = relationship("User", back_populates="annotations")
 
     # Relationships
     snippet = relationship("Snippet", back_populates="annotations")
