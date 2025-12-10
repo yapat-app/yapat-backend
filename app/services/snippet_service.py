@@ -1,5 +1,5 @@
 """
-Snippet retrieval and utility service
+Snippet retrieval and utility service (for SnippetSet-based architecture)
 """
 
 from typing import List, Optional
@@ -8,46 +8,61 @@ from sqlalchemy.orm import Session
 from app.models.snippet import Snippet
 from app.models.annotation import Annotation
 from app.models.recording import Recording
+from app.models.embedding import SnippetSet
 
 
 class SnippetService:
-    """Service for querying snippet metadata"""
+    """Service for querying snippet metadata and statistics."""
 
     def __init__(self, db: Session):
         self.db = db
 
+    # ---------------------------------------------------------
+    # Snippet Listing
+    # ---------------------------------------------------------
+
     def list_snippets(
         self,
         dataset_id: int,
-        snippet_config_id: int,
+        snippet_set_id: int,
         recording_id: Optional[int] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> List[Snippet]:
         """
-        Retrieve snippets belonging to a dataset + snippet configuration.
+        Retrieve snippets belonging to a dataset and snippet_set.
 
-        Optionally restrict to a single recording.
+        Optionally filter by recording.
         """
+
         query = (
             self.db.query(Snippet)
             .join(Snippet.recording)
-            .filter(Recording.dataset_id == dataset_id)
-            .filter(Snippet.snippet_config_id == snippet_config_id)
+            .join(Snippet.snippet_set)
+            .filter(SnippetSet.dataset_id == dataset_id)
+            .filter(Snippet.snippet_set_id == snippet_set_id)
         )
 
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
 
-        return query.offset(skip).limit(limit).all()
+        return query.order_by(Snippet.start_time).offset(skip).limit(limit).all()
+
+    # ---------------------------------------------------------
+    # Annotation Utility
+    # ---------------------------------------------------------
 
     def annotation_count(self, snippet_id: int) -> int:
-        """Return number of annotations for a snippet."""
+        """Return the number of annotations attached to a snippet."""
         return (
             self.db.query(Annotation)
             .filter(Annotation.snippet_id == snippet_id)
             .count()
         )
+
+    # ---------------------------------------------------------
+    # Similarity Search Placeholder
+    # ---------------------------------------------------------
 
     def get_similar_snippets(
         self,
@@ -58,8 +73,7 @@ class SnippetService:
         """
         Retrieve similar snippets based on embedding vectors.
 
-        This function delegates to an embedding/vector search backend.
-        Snippets no longer store embeddings themselves.
+        Placeholder — real implementation will delegate
+        to EmbeddingService or a vector-search backend.
         """
-        # TODO: Replace with EmbeddingService.get_similar(snippet_id, embedding_model_id)
         return []

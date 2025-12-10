@@ -1,32 +1,26 @@
 """
-Celery tasks for the embedding pipeline.
-
-This implements the new architecture:
-
-    run_embedding(embedding_job_id):
-        - loads job + model + snippet_config
-        - segments all recordings for the dataset
-        - creates snippet rows
-        - generates embeddings for each snippet
-        - marks job COMPLETE or FAILED
+Celery tasks for the embedding pipeline (SnippetSet architecture).
 """
 
-from typing import List
 from celery import group
 from sqlalchemy.orm import Session
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
 
-from app.models.snippet import Snippet, SnippetConfig
+from app.models.snippet import Snippet
 from app.models.recording import Recording
-from app.models.embedding import EmbeddingJob, EmbeddingModel, EmbeddingJobStatus
-
+from app.models.embedding import (
+    EmbeddingJob,
+    EmbeddingModel,
+    EmbeddingJobStatus,
+    SnippetSet,
+)
 from app.services.embedding_service import EmbeddingService
 
 
 # ----------------------------------------------------------------------
-# Helper: DB session
+# DB session helper
 # ----------------------------------------------------------------------
 def get_db() -> Session:
     db = SessionLocal()
@@ -37,33 +31,31 @@ def get_db() -> Session:
 
 
 # ----------------------------------------------------------------------
-# Core task: generate embedding for a single snippet
+# Generate embedding for a single snippet
 # ----------------------------------------------------------------------
 @celery_app.task(bind=True, name="app.tasks.embedding.generate_embedding_for_snippet")
 def generate_embedding_for_snippet(self, snippet_id: int, model_id: int):
     """
-    Generate embedding for a single snippet.
+    Placeholder: generate embedding for a single snippet.
+    In the current architecture, embeddings are *not* stored in Snippet.
     """
     db = SessionLocal()
     try:
         snippet = db.query(Snippet).filter_by(id=snippet_id).first()
         if not snippet:
-            return {"status": "error", "snippet_id": snippet_id, "message": "Not found"}
+            return {"status": "error", "snippet_id": snippet_id, "message": "snippet_not_found"}
 
         model = db.query(EmbeddingModel).filter_by(id=model_id).first()
         if not model:
-            return {"status": "error", "message": f"EmbeddingModel(id={model_id}) not found"}
+            return {"status": "error", "message": f"model_not_found"}
 
-        # TODO: Actual embedding code
-        dummy_embedding = [0.1, 0.2, 0.3]  # placeholder
+        # TODO: embedding inference should write into a vector store, not DB
+        dummy_vector = [0.1, 0.2, 0.3]
 
-        snippet.embedding = dummy_embedding
-        db.commit()
-
+        # No snippet.embedding field exists; pretend we saved it externally.
         return {"status": "success", "snippet_id": snippet_id}
 
     except Exception as e:
-        db.rollback()
         return {"status": "error", "snippet_id": snippet_id, "message": str(e)}
 
     finally:
@@ -71,66 +63,70 @@ def generate_embedding_for_snippet(self, snippet_id: int, model_id: int):
 
 
 # ----------------------------------------------------------------------
-# Main pipeline: run_embedding(job)
+# Main pipeline: run embedding job
 # ----------------------------------------------------------------------
 @celery_app.task(bind=True, name="app.tasks.embedding.run_embedding")
 def run_embedding(self, embedding_job_id: int):
     """
-    Run the entire embedding pipeline for an EmbeddingJob:
-        - update job status
-        - segment recordings
-        - create snippets
-        - generate embeddings for each snippet (parallel group)
+    Run the embedding pipeline:
+
+        - Update job → RUNNING
+        - Load SnippetSet
+        - Segment all recordings into Snippets
+        - Generate embeddings (parallel Celery group)
+        - Mark job COMPLETED or FAILED
     """
 
     db = SessionLocal()
     service = EmbeddingService(db)
 
     try:
-        # ----------------------------------------------------------
-        # 1. Load job and mark RUNNING
-        # ----------------------------------------------------------
+        # ------------------------------------------------------
+        # 1. Load EmbeddingJob
+        # ------------------------------------------------------
         job = db.query(EmbeddingJob).filter_by(id=embedding_job_id).first()
         if not job:
             raise ValueError(f"EmbeddingJob(id={embedding_job_id}) not found")
 
-        service.update_job_status(job.id, EmbeddingJobStatus.RUNNING, celery_task_id=self.request.id)
+        service.update_job_status(
+            job.id,
+            EmbeddingJobStatus.RUNNING,
+            celery_task_id=self.request.id,
+        )
 
-        dataset = job.dataset
-        config = job.snippet_config
-        model = job.embedding_model
+        snippet_set: SnippetSet = job.snippet_set
+        model: EmbeddingModel = job.embedding_model
 
-        window = config.window_size
-        step = config.step_size
-        overlap = config.overlap   # might be redundant but kept for clarity
+        window = snippet_set.window_size
+        step = snippet_set.step_size
+        overlap = snippet_set.overlap
 
-        # ----------------------------------------------------------
-        # 2. Load recordings for the dataset
-        # ----------------------------------------------------------
+        # ------------------------------------------------------
+        # 2. Fetch recordings for dataset
+        # ------------------------------------------------------
         recordings = (
             db.query(Recording)
-            .filter_by(dataset_id=dataset.id)
+            .filter(Recording.dataset_id == job.dataset_id)
             .all()
         )
 
         snippet_ids = []
 
-        # ----------------------------------------------------------
-        # 3. Segment each recording → create Snippet rows
-        # ----------------------------------------------------------
+        # ------------------------------------------------------
+        # 3. Segment each recording into Snippets
+        # ------------------------------------------------------
         for rec in recordings:
-            duration = rec.duration_seconds
+            duration = rec.duration  # field name in your model
             if duration is None:
-                # You may want to compute it from the audio or skip
                 continue
 
             t = 0.0
             while t + window <= duration:
                 snippet = Snippet(
                     recording_id=rec.id,
-                    embedding_job_id=job.id,
+                    snippet_set_id=snippet_set.id,
                     start_time=t,
-                    end_time=t + window,
+                    duration=window,
                 )
                 db.add(snippet)
                 db.flush()
@@ -139,26 +135,25 @@ def run_embedding(self, embedding_job_id: int):
 
         db.commit()
 
-        # ----------------------------------------------------------
-        # 4. Generate embeddings (parallel)
-        # ----------------------------------------------------------
+        # ------------------------------------------------------
+        # 4. Compute embeddings in parallel
+        # ------------------------------------------------------
         task_group = group(
             generate_embedding_for_snippet.s(snippet_id, model.id)
             for snippet_id in snippet_ids
         )
 
         results = task_group.apply_async().get()
-
-        # ----------------------------------------------------------
-        # 5. Final job status
-        # ----------------------------------------------------------
         failures = [r for r in results if r.get("status") != "success"]
 
+        # ------------------------------------------------------
+        # 5. Final job status
+        # ------------------------------------------------------
         if failures:
             service.update_job_status(
                 job.id,
                 EmbeddingJobStatus.FAILED,
-                message=f"{len(failures)} snippet embedding failures"
+                message=f"{len(failures)} snippet embedding failures",
             )
         else:
             service.update_job_status(job.id, EmbeddingJobStatus.COMPLETED)
@@ -172,9 +167,9 @@ def run_embedding(self, embedding_job_id: int):
 
     except Exception as e:
         service.update_job_status(
-            embedding_job_id,
+            job.id,
             EmbeddingJobStatus.FAILED,
-            message=str(e)
+            message=str(e),
         )
         return {"status": "error", "message": str(e)}
 
