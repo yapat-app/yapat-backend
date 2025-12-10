@@ -1,5 +1,5 @@
 """
-Snippet and SnippetConfig models
+Snippet model
 """
 
 from sqlalchemy import Column, Integer, DateTime, ForeignKey, Float
@@ -13,26 +13,27 @@ class Snippet(Base):
     __tablename__ = "snippets"
 
     id = Column(Integer, primary_key=True, index=True)
+
     recording_id = Column(
         Integer,
         ForeignKey("recordings.id", ondelete="CASCADE"),
         nullable=False,
     )
-    # New architecture: snippets belong to an embedding job
-    embedding_job_id = Column(
+
+    snippet_set_id = Column(
         Integer,
-        ForeignKey("embedding_jobs.id", ondelete="CASCADE"),
+        ForeignKey("snippet_sets.id", ondelete="CASCADE"),
         nullable=False,
     )
 
-    start_time = Column(Float, nullable=False)  # seconds
-    duration = Column(Float, nullable=False)  # == window_size
+    start_time = Column(Float, nullable=False)
+    duration = Column(Float, nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     recording = relationship("Recording", back_populates="snippets")
-    embedding_job = relationship("EmbeddingJob", back_populates="snippets")
+    snippet_set = relationship("SnippetSet", back_populates="snippets")
 
     annotations = relationship(
         "Annotation",
@@ -41,21 +42,24 @@ class Snippet(Base):
     )
 
 
-class SnippetConfig(Base):
-    __tablename__ = "snippet_configs"
 
-    id = Column(Integer, primary_key=True, index=True)
 
-    embedding_job_id = Column(
-        Integer,
-        ForeignKey("embedding_jobs.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,  # enforce 1:1
-    )
 
-    window_size = Column(Float, nullable=False)
-    step_size = Column(Float, nullable=False)
-    overlap = Column(Float, nullable=False)
-
-    # 1:1 relationship
-    embedding_job = relationship("EmbeddingJob", back_populates="snippet_config")
+# class SnippetConfig(Base):
+#     __tablename__ = "snippet_configs"
+#
+#     id = Column(Integer, primary_key=True, index=True)
+#
+#     embedding_job_id = Column(
+#         Integer,
+#         ForeignKey("embedding_jobs.id", ondelete="CASCADE"),
+#         nullable=False,
+#         unique=True,  # enforce 1:1
+#     )
+#
+#     window_size = Column(Float, nullable=False)
+#     step_size = Column(Float, nullable=False)
+#     overlap = Column(Float, nullable=False)
+#
+#     # 1:1 relationship
+#     embedding_job = relationship("EmbeddingJob", back_populates="snippet_config")

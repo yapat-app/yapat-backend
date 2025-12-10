@@ -34,3 +34,6 @@ class Dataset(Base):
         back_populates="dataset",
         cascade="all, delete-orphan"
     )
+    snippet_sets = relationship("SnippetSet", back_populates="dataset")
+
+

@@ -1,48 +1,28 @@
 """
-Snippet and SnippetConfig schemas
+Snippet schemas (updated for SnippetSet architecture)
 """
 
 from datetime import datetime
 from pydantic import BaseModel
-from typing import Optional
 
 
-# ---------------------------
-# Snippet schemas
-# ---------------------------
+# ---------------------------------------------------------
+# Snippet Base
+# ---------------------------------------------------------
 
 class SnippetBase(BaseModel):
     start_time: float
     duration: float
-    snippet_config_id: int
+    snippet_set_id: int
 
+
+# ---------------------------------------------------------
+# Snippet Response
+# ---------------------------------------------------------
 
 class Snippet(SnippetBase):
     id: int
     recording_id: int
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-# ---------------------------
-# SnippetConfig schemas
-# ---------------------------
-
-class SnippetConfigBase(BaseModel):
-    window_size: float
-    step_size: float
-    overlap: float
-
-
-class SnippetConfigCreate(SnippetConfigBase):
-    dataset_id: int
-
-
-class SnippetConfig(SnippetConfigBase):
-    id: int
-    dataset_id: int
     created_at: datetime
 
     class Config:
