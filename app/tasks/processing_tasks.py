@@ -73,3 +73,13 @@ def process_dataset(self, dataset_id: int):
         "dataset_id": dataset_id,
         "scan_task_id": result.id,
     }
+
+@shared_task(bind=True)
+def generate_snippets(self, dataset_id: int, snippet_set_id: int):
+    """
+    Placeholder for snippet segmentation logic.
+
+    In the new SnippetSet architecture, snippet generation
+    happens inside embedding jobs (run_embedding).
+    """
+    return {"status": "not_implemented"}
