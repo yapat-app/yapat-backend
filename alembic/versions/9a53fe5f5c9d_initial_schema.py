@@ -211,7 +211,7 @@ def upgrade() -> None:
     
     op.execute("""
         INSERT INTO embedding_models (name, version, description, window_size, step_size, overlap, requires_fixed_window, requires_fixed_step, requires_fixed_overlap)
-        VALUES ('birdnet', '2.4', 'BirdNET v2.4 - 3-second windows at 48 kHz', 3.0, 1.0, 0.0, 1, 1, 1)
+        VALUES ('birdnet', '2.4', 'BirdNET v2.4 - 3-second windows at 48 kHz', 3.0, 3.0, 0.0, 1, 1, 1)
     """)
     # ### end Alembic commands ###
 
