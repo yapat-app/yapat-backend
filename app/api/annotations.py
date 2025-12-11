@@ -9,6 +9,7 @@ from typing import List, Optional
 from app.api.deps import get_db, get_current_active_user
 from app.schemas.annotation import Annotation, AnnotationCreate, AnnotationBatchCreate
 from app.models.annotation import Annotation as AnnotationModel
+from app.models.snippet import Snippet
 from app.models.user import User
 from app.core import taxonomy
 
@@ -61,6 +62,12 @@ def create_annotation(
     
     annotation = AnnotationModel(**annotation_data)
     db.add(annotation)
+    
+    # Update snippet's is_annotated flag
+    snippet = db.query(Snippet).filter(Snippet.id == annotation_in.snippet_id).first()
+    if snippet:
+        snippet.is_annotated = True
+    
     db.commit()
     db.refresh(annotation)
     return annotation
@@ -113,6 +120,11 @@ def create_annotations_batch(
         annotation = AnnotationModel(**annotation_data)
         db.add(annotation)
         created_annotations.append(annotation)
+    
+    # Update snippet's is_annotated flag
+    snippet = db.query(Snippet).filter(Snippet.id == batch_in.snippet_id).first()
+    if snippet:
+        snippet.is_annotated = True
     
     db.commit()
     for annotation in created_annotations:
@@ -185,7 +197,22 @@ def delete_annotation(
             detail="You can only delete your own annotations"
         )
     
+    # Store snippet_id before deletion
+    snippet_id = annotation.snippet_id
+    
+    # Check if snippet has any other annotations before deleting
+    total_annotations = db.query(AnnotationModel).filter(
+        AnnotationModel.snippet_id == snippet_id
+    ).count()
+    
     db.delete(annotation)
+    
+    # Update snippet's is_annotated flag if this was the last annotation
+    if total_annotations == 1:  # This annotation was the only one
+        snippet = db.query(Snippet).filter(Snippet.id == snippet_id).first()
+        if snippet:
+            snippet.is_annotated = False
+    
     db.commit()
     return None
 

@@ -77,3 +77,124 @@ class SnippetService:
         to EmbeddingService or a vector-search backend.
         """
         return []
+
+    # ---------------------------------------------------------
+    # Feed Generation
+    # ---------------------------------------------------------
+
+    def get_feed(
+        self,
+        dataset_id: Optional[int] = None,
+        recording_id: Optional[int] = None,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> List[Snippet]:
+        """
+        Get feed of snippets for annotation workflow.
+        
+        Prioritizes unannotated snippets (snippets with is_annotated=False).
+        Optionally filters by dataset_id and/or recording_id.
+        
+        Args:
+            dataset_id: Optional dataset ID to filter snippets
+            recording_id: Optional recording ID to filter snippets
+            skip: Number of snippets to skip (for pagination)
+            limit: Maximum number of snippets to return
+            
+        Returns:
+            List of Snippet objects, ordered by annotation status (unannotated first)
+            and then by start_time
+        """
+        # Build base query
+        query = (
+            self.db.query(Snippet)
+            .join(Snippet.recording)
+            .join(Snippet.snippet_set)
+        )
+        
+        # Filter by dataset_id if provided
+        if dataset_id is not None:
+            query = query.filter(SnippetSet.dataset_id == dataset_id)
+        
+        # Filter by recording_id if provided
+        if recording_id is not None:
+            query = query.filter(Snippet.recording_id == recording_id)
+        
+        # Order by: unannotated first (is_annotated = False), then by start_time
+        # Use case statement to order False before True
+        query = query.order_by(
+            Snippet.is_annotated.asc(),  # False (0) comes before True (1)
+            Snippet.start_time.asc()
+        )
+        
+        # Apply pagination
+        return query.offset(skip).limit(limit).all()
+
+    def get_feed_random(
+        self,
+        dataset_id: Optional[int] = None,
+        recording_id: Optional[int] = None,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[Snippet]:
+        """
+        Randomly sample snippets from the dataset without bias.
+        
+        Useful for initial exploration or broad manual labeling before model initialization.
+        
+        Args:
+            dataset_id: Optional dataset ID to filter snippets
+            recording_id: Optional recording ID to filter snippets
+            status: Optional filter by snippet status ('unlabeled', 'labeled', etc.)
+            skip: Number of snippets to skip (for pagination)
+            limit: Maximum number of snippets to return (default 50)
+            
+        Returns:
+            List of Snippet objects in random order
+            
+        TODO: Implement random sampling logic
+        """
+        # Placeholder implementation
+        return []
+
+    def get_feed_similarity(
+        self,
+        dataset_id: int,
+        query_embedding: Optional[List[float]] = None,
+        query_snippet_id: Optional[int] = None,
+        embedding_model_id: Optional[int] = None,
+        crop_start_sec: Optional[float] = None,
+        crop_end_sec: Optional[float] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[Snippet]:
+        """
+        Find snippets acoustically similar to a query example.
+        
+        Uses cosine similarity in the embedding space. The query is embedded on the fly
+        and is ephemeral (not stored).
+        
+        Args:
+            dataset_id: Required dataset ID
+            query_embedding: Optional pre-computed embedding vector for the query
+            query_snippet_id: Optional snippet ID to use as query (alternative to query_embedding)
+            embedding_model_id: Optional embedding model ID (defaults to dataset's current model)
+            crop_start_sec: Optional crop start time for query audio
+            crop_end_sec: Optional crop end time for query audio
+            skip: Number of snippets to skip (for pagination)
+            limit: Maximum number of similar snippets to return (default 50)
+            
+        Returns:
+            List of Snippet objects ranked by similarity to query
+            
+        TODO: Implement embedding-based similarity search
+        """
+        # Placeholder implementation - delegates to existing method if query_snippet_id provided
+        if query_snippet_id:
+            return self.get_similar_snippets(
+                snippet_id=query_snippet_id,
+                embedding_model_id=embedding_model_id or 1,  # TODO: Get default from dataset
+                limit=limit
+            )
+        return []
