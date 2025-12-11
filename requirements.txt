@@ -19,3 +19,5 @@ librosa==0.10.1
 matplotlib==3.8.2
 setuptools>=65.0.0
 pytest
+tensorflow
+birdnetlib

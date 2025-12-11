@@ -5,20 +5,23 @@ Embedding-related models:
 - EmbeddingJob: represents an embedding computation pass over a SnippetSet
 """
 
+import enum
+
 from sqlalchemy import (
+    ARRAY,
+    JSON,
     Column,
     Integer,
     String,
     DateTime,
     ForeignKey,
     Float,
-    Enum,
     Text,
-    TypeDecorator,
 )
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-import enum
+from sqlalchemy.types import TypeDecorator
 
 from app.database import Base
 
@@ -27,11 +30,11 @@ class EnumValue(TypeDecorator):
     """Ensure enum values (not names) are stored in database."""
     impl = String
     cache_ok = True
-    
+
     def __init__(self, enum_class, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.enum_class = enum_class
-    
+
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
@@ -39,12 +42,33 @@ class EnumValue(TypeDecorator):
             # Return the enum value (lowercase string) instead of name
             return value.value
         return value
-    
+
     def process_result_value(self, value, dialect):
         if value is None:
             return None
         # Convert database value back to enum
         return self.enum_class(value)
+
+
+class VectorType(TypeDecorator):
+    """
+    Stores list[float] as ARRAY(Float) on Postgres, JSON elsewhere (SQLite).
+    """
+    impl = JSON  # fallback for SQLite
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(PG_ARRAY(Float))
+        else:
+            return dialect.type_descriptor(JSON)
+
+    def process_bind_param(self, value, dialect):
+        # Store list as-is; dialect impl handles encoding
+        return value
+
+    def process_result_value(self, value, dialect):
+        return value
 
 
 # ---------------------------
@@ -191,3 +215,50 @@ class EmbeddingJob(Base):
     dataset = relationship("Dataset", back_populates="embedding_jobs")
     embedding_model = relationship("EmbeddingModel", back_populates="embedding_jobs")
     snippet_set = relationship("SnippetSet", back_populates="embedding_jobs")
+
+
+# ---------------------------
+# Embedding Vector
+# ---------------------------
+
+class EmbeddingVector(Base):
+    """
+    Stores a single embedding vector for a snippet × model × job.
+    This is intentionally minimal for first integration step.
+    """
+
+    __tablename__ = "embedding_vectors"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    snippet_id = Column(
+        Integer,
+        ForeignKey("snippets.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    embedding_job_id = Column(
+        Integer,
+        ForeignKey("embedding_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    embedding_model_id = Column(
+        Integer,
+        ForeignKey("embedding_models.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    dim = Column(Integer, nullable=False)
+    vector = Column(VectorType, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships (lightly defined; no back_populates yet)
+    snippet = relationship("Snippet")
+    job = relationship("EmbeddingJob")
+    embedding_model = relationship("EmbeddingModel")

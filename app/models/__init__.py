@@ -12,6 +12,7 @@ from app.models.invitation import InvitationLink
 from app.models.embedding import (
     EmbeddingModel,
     EmbeddingJob,
+    EmbeddingVector,
     SnippetSet,
 )
 

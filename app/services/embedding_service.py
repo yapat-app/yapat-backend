@@ -3,17 +3,19 @@ Embedding service: manages embedding models, snippet sets, and embedding jobs.
 """
 
 from typing import Optional, List
+
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
+from app.models.dataset import Dataset
 from app.models.embedding import (
     EmbeddingModel,
     EmbeddingJob,
     EmbeddingJobStatus,
+    EmbeddingVector,
     SnippetSet,
     SnippetSetStatus,
 )
-from app.models.dataset import Dataset
 
 
 class EmbeddingService:
@@ -44,13 +46,13 @@ class EmbeddingService:
     # ---------------------------------------------------------
 
     def get_or_create_snippet_set(
-        self,
-        dataset: Dataset,
-        model: EmbeddingModel,
-        *,
-        window_size: Optional[float] = None,
-        step_size: Optional[float] = None,
-        overlap: Optional[float] = None,
+            self,
+            dataset: Dataset,
+            model: EmbeddingModel,
+            *,
+            window_size: Optional[float] = None,
+            step_size: Optional[float] = None,
+            overlap: Optional[float] = None,
     ) -> SnippetSet:
         """
         Returns an existing SnippetSet if parameters match, otherwise creates a new one.
@@ -109,13 +111,13 @@ class EmbeddingService:
     # ---------------------------------------------------------
 
     def create_embedding_job(
-        self,
-        dataset: Dataset,
-        model: EmbeddingModel,
-        *,
-        window_size: Optional[float] = None,
-        step_size: Optional[float] = None,
-        overlap: Optional[float] = None,
+            self,
+            dataset: Dataset,
+            model: EmbeddingModel,
+            *,
+            window_size: Optional[float] = None,
+            step_size: Optional[float] = None,
+            overlap: Optional[float] = None,
     ) -> EmbeddingJob:
         """
         Create an EmbeddingJob for a dataset × model.
@@ -165,11 +167,11 @@ class EmbeddingService:
     # ---------------------------------------------------------
 
     def update_job_status(
-        self,
-        job_id: int,
-        status: EmbeddingJobStatus,
-        message: Optional[str] = None,
-        celery_task_id: Optional[str] = None,
+            self,
+            job_id: int,
+            status: EmbeddingJobStatus,
+            message: Optional[str] = None,
+            celery_task_id: Optional[str] = None,
     ):
         job = self.get_job(job_id)
 
@@ -188,3 +190,64 @@ class EmbeddingService:
             job.error_message = message
 
         self.db.commit()
+
+
+class VectorStore:
+    def __init__(self, db):
+        self.db = db
+
+    def insert(self, snippet_id: int, job_id: int, model_id: int, vector):
+        ev = EmbeddingVector(
+            snippet_id=snippet_id,
+            embedding_job_id=job_id,
+            embedding_model_id=model_id,
+            dim=len(vector),
+            vector=vector,
+        )
+        self.db.add(ev)
+        self.db.commit()
+        return ev
+
+    def get(self, snippet_id: int, model_id: int):
+        row = (
+            self.db.query(EmbeddingVector)
+            .filter_by(snippet_id=snippet_id, embedding_model_id=model_id)
+            .first()
+        )
+        return row
+
+    def search(self, model_id: int, query_vector, k: int = 10):
+        rows = (
+            self.db.query(EmbeddingVector)
+            .filter_by(embedding_model_id=model_id)
+            .all()
+        )
+
+        if not rows:
+            return []
+
+        import numpy as np
+
+        q = np.array(query_vector, dtype=float)
+        q_norm = np.linalg.norm(q)
+        if q_norm == 0:
+            return []
+
+        # Stack vectors into a matrix for vectorized computation
+        mat = np.array([r.vector for r in rows], dtype=float)
+
+        # Compute norms and cosine scores in batch
+        norms = np.linalg.norm(mat, axis=1)
+        valid = norms > 0
+
+        sims = np.zeros(len(rows))
+        sims[valid] = mat[valid].dot(q) / (norms[valid] * q_norm)
+
+        # Pair snippet_id with score
+        results = [
+            (rows[i].snippet_id, float(sims[i]))
+            for i in range(len(rows))
+        ]
+
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:k]
