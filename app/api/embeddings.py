@@ -2,6 +2,7 @@
 Embedding job endpoints (updated for SnippetSet architecture)
 """
 
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -10,12 +11,41 @@ from app.models.dataset import Dataset
 from app.services.embedding_service import EmbeddingService
 from app.tasks.embedding_tasks import run_embedding
 from app.schemas.embedding import (
+    EmbeddingModel,
     EmbeddingJobCreateRequest,
     EmbeddingJobResponse,
 )
 from app.models.user import User
 
 router = APIRouter()
+
+
+# ---------------------------------------------------------
+# Embedding Models
+# ---------------------------------------------------------
+
+@router.get("/embedding-models", response_model=List[EmbeddingModel])
+def list_embedding_models(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List all available embedding models."""
+    service = EmbeddingService(db)
+    return service.list_models()
+
+
+@router.get("/embedding-models/{model_id}", response_model=EmbeddingModel)
+def get_embedding_model(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Retrieve a single embedding model by ID."""
+    service = EmbeddingService(db)
+    try:
+        return service.get_model(model_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 # ---------------------------------------------------------
