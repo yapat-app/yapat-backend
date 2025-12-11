@@ -4,6 +4,7 @@ Embedding service: manages embedding models, snippet sets, and embedding jobs.
 
 from typing import Optional, List
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
 
 from app.models.embedding import (
     EmbeddingModel,
@@ -20,13 +21,15 @@ class EmbeddingService:
         self.db = db
 
     # ---------------------------------------------------------
-    # Embedding Models
+    # Embedding Models (from database)
     # ---------------------------------------------------------
 
     def list_models(self) -> List[EmbeddingModel]:
+        """List all available embedding models from database."""
         return self.db.query(EmbeddingModel).all()
 
     def get_model(self, model_id: int) -> EmbeddingModel:
+        """Get embedding model from database by ID."""
         model = (
             self.db.query(EmbeddingModel)
             .filter(EmbeddingModel.id == model_id)

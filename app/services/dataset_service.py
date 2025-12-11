@@ -19,6 +19,7 @@ from app.models.team import TeamMembership as TeamMembershipModel
 from app.models.team import TeamRole
 from app.models.user import User, UserRole
 from app.schemas.dataset import DatasetCreate
+from app.config import settings
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
 
@@ -127,13 +128,13 @@ class DatasetService:
 
     def scan_recordings(self, dataset: DatasetModel) -> List[RecordingModel]:
         """
-        Walk dataset.source_uri (relative to INTERNAL_DATA_ROOT, default /data),
+        Walk dataset.source_uri (relative to DATA_ROOT),
         detect audio files, and create Recording rows.
 
         Returns a list of newly created recordings.
         """
-        INTERNAL_DATA_ROOT = os.getenv("INTERNAL_DATA_ROOT", "/data")
-        dataset_path = os.path.join(INTERNAL_DATA_ROOT, dataset.source_uri)
+        DATA_ROOT = settings.DATA_ROOT or "/data"
+        dataset_path = os.path.join(DATA_ROOT, dataset.source_uri)
 
         if not os.path.isdir(dataset_path):
             raise ValueError(f"Invalid dataset path: {dataset_path}")
@@ -174,11 +175,18 @@ class DatasetService:
     def _get_or_create_recording(
             self, dataset: DatasetModel, filepath: str
     ) -> Optional[RecordingModel]:
+        # Store relative path (relative to DATA_ROOT) for portability
+        DATA_ROOT = settings.DATA_ROOT or "/data"
+        if filepath.startswith(DATA_ROOT):
+            relative_path = os.path.relpath(filepath, DATA_ROOT)
+        else:
+            relative_path = filepath
+        
         existing = (
             self.db.query(RecordingModel)
             .filter(
                 RecordingModel.dataset_id == dataset.id,
-                RecordingModel.file_path == filepath,
+                RecordingModel.file_path == relative_path,
             )
             .first()
         )
@@ -190,15 +198,18 @@ class DatasetService:
             info = sf.info(filepath)
             duration = float(info.frames) / float(info.samplerate)
             sample_rate = int(info.samplerate)
-        except Exception:
-            # Skip unreadable audio files silently for now
+        except Exception as e:
+            # Log error but skip unreadable audio files
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to read audio file {filepath}: {e}")
             return None
 
         checksum = self._compute_checksum(filepath)
 
         rec = RecordingModel(
             dataset_id=dataset.id,
-            file_path=filepath,
+            file_path=relative_path,  # Store relative path
             file_name=os.path.basename(filepath),
             duration=duration,
             sample_rate=sample_rate,

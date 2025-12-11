@@ -11,7 +11,7 @@ from pydantic import BaseModel
 class DatasetBase(BaseModel):
     name: str
     description: Optional[str] = None
-    source_uri: str
+    source_uri: Optional[str] = None
 
 
 class DatasetCreate(DatasetBase):
