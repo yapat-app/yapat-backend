@@ -2,6 +2,7 @@
 Snippet retrieval and utility service (for SnippetSet-based architecture)
 """
 
+import random
 from typing import List, Optional
 from sqlalchemy.orm import Session
 
@@ -92,7 +93,7 @@ class SnippetService:
         """
         Get feed of snippets for annotation workflow.
         
-        Prioritizes unannotated snippets (snippets with is_annotated=False).
+        Returns random snippets as a placeholder.
         Optionally filters by dataset_id and/or recording_id.
         
         Args:
@@ -102,8 +103,7 @@ class SnippetService:
             limit: Maximum number of snippets to return
             
         Returns:
-            List of Snippet objects, ordered by annotation status (unannotated first)
-            and then by start_time
+            List of Snippet objects in random order
         """
         # Build base query
         query = (
@@ -120,15 +120,12 @@ class SnippetService:
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
         
-        # Order by: unannotated first (is_annotated = False), then by start_time
-        # Use case statement to order False before True
-        query = query.order_by(
-            Snippet.is_annotated.asc(),  # False (0) comes before True (1)
-            Snippet.start_time.asc()
-        )
+        # Return random snippets as placeholder
+        all_snippets = query.all()
+        random.shuffle(all_snippets)
         
         # Apply pagination
-        return query.offset(skip).limit(limit).all()
+        return all_snippets[skip:skip + limit]
 
     def get_feed_random(
         self,
@@ -146,17 +143,35 @@ class SnippetService:
         Args:
             dataset_id: Optional dataset ID to filter snippets
             recording_id: Optional recording ID to filter snippets
-            status: Optional filter by snippet status ('unlabeled', 'labeled', etc.)
+            status: Optional filter by snippet status (ignored for now)
             skip: Number of snippets to skip (for pagination)
             limit: Maximum number of snippets to return (default 50)
             
         Returns:
             List of Snippet objects in random order
-            
-        TODO: Implement random sampling logic
         """
-        # Placeholder implementation
-        return []
+        # Build base query
+        query = (
+            self.db.query(Snippet)
+            .join(Snippet.recording)
+            .join(Snippet.snippet_set)
+        )
+        
+        # Filter by dataset_id if provided
+        if dataset_id is not None:
+            query = query.filter(SnippetSet.dataset_id == dataset_id)
+        
+        # Filter by recording_id if provided
+        if recording_id is not None:
+            query = query.filter(Snippet.recording_id == recording_id)
+        
+        # Return random snippets
+        import random
+        all_snippets = query.all()
+        random.shuffle(all_snippets)
+        
+        # Apply pagination
+        return all_snippets[skip:skip + limit]
 
     def get_feed_similarity(
         self,
