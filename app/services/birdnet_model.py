@@ -59,6 +59,7 @@ class BirdNetEmbedder:
             return None
 
         # 2. Pad or trim to match model requirements
+        # TODO Assert file has the expected length
         if len(audio) < cls.WINDOW_SAMPLES:
             audio = np.pad(audio, (0, cls.WINDOW_SAMPLES - len(audio)))
         else:
@@ -72,6 +73,6 @@ class BirdNetEmbedder:
         outputs = model(batch)
 
         # 4. Extract embedding
-        emb = outputs["embedding"].numpy()[0]
+        emb = outputs["embeddings"].numpy()[0]
 
         return emb.tolist()

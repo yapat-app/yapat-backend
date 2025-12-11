@@ -1,33 +1,24 @@
 """
 Celery tasks for the embedding pipeline (SnippetSet architecture).
 """
+import os
 
 from celery import chord, group
-# from sqlalchemy.orm import Session
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
-
-from app.models.snippet import Snippet
-from app.models.recording import Recording
 from app.models.embedding import (
     EmbeddingJob,
     EmbeddingJobStatus,
     EmbeddingModel,
     SnippetSet,
 )
+from app.models.recording import Recording
+from app.models.snippet import Snippet
 from app.services.embedding_service import EmbeddingService, VectorStore
 
 
-# # ----------------------------------------------------------------------
-# # DB helper
-# # ----------------------------------------------------------------------
-# def get_db() -> Session:
-#     db = SessionLocal()
-#     try:
-#         return db
-#     finally:
-#         pass
+# from sqlalchemy.orm import Session
 
 
 # ----------------------------------------------------------------------
@@ -44,17 +35,11 @@ def generate_embedding_for_snippet(self, snippet_id: int, model_id: int):
 
         service = EmbeddingService(db)
 
-        # --- Load model ---
-        try:
-            model = service.get_model(model_id)
-        except ValueError:
-            return {"status": "error", "message": f"model_not_found"}
-
         # --- BirdNET embedding ---
         from app.services.birdnet_model import BirdNetEmbedder
 
         vector = BirdNetEmbedder.embed(
-            audio_path=snippet.recording.file_path,
+            audio_path=os.path.join(os.getenv("DATA_ROOT", "/data"), snippet.recording.file_path),
             start_time=snippet.start_time
         )
 
