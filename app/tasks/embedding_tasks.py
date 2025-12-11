@@ -2,8 +2,8 @@
 Celery tasks for the embedding pipeline (SnippetSet architecture).
 """
 
-from celery import group
-from sqlalchemy.orm import Session
+from celery import chord, group
+# from sqlalchemy.orm import Session
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
@@ -19,15 +19,15 @@ from app.models.embedding import (
 from app.services.embedding_service import EmbeddingService, VectorStore
 
 
-# ----------------------------------------------------------------------
-# DB helper
-# ----------------------------------------------------------------------
-def get_db() -> Session:
-    db = SessionLocal()
-    try:
-        return db
-    finally:
-        pass
+# # ----------------------------------------------------------------------
+# # DB helper
+# # ----------------------------------------------------------------------
+# def get_db() -> Session:
+#     db = SessionLocal()
+#     try:
+#         return db
+#     finally:
+#         pass
 
 
 # ----------------------------------------------------------------------
@@ -55,8 +55,7 @@ def generate_embedding_for_snippet(self, snippet_id: int, model_id: int):
 
         vector = BirdNetEmbedder.embed(
             audio_path=snippet.recording.file_path,
-            start_time=snippet.start_time,
-            end_time=snippet.end_time,
+            start_time=snippet.start_time
         )
 
         if vector is None:
@@ -153,27 +152,15 @@ def run_embedding(self, embedding_job_id: int):
             for snippet_id in snippet_ids
         )
 
-        group_result = task_group.apply_async()
-        results = group_result.join()  # returns list of results
+        # Use a chord instead of blocking join
+        finalize = finalize_embedding_job.s(job.id)
 
-        # Detect failures
-        failures = [r for r in results if r.get("status") != "success"]
-
-        # --- Final job state ---
-        if failures:
-            service.update_job_status(
-                job.id,
-                EmbeddingJobStatus.FAILED,
-                message=f"{len(failures)} snippet embedding failures",
-            )
-        else:
-            service.update_job_status(job.id, EmbeddingJobStatus.COMPLETED)
+        chord(task_group)(finalize)
 
         return {
-            "status": "completed",
+            "status": "scheduled",
             "embedding_job_id": job.id,
             "total_snippets": len(snippet_ids),
-            "failed": len(failures),
         }
 
     except Exception as e:
@@ -183,6 +170,38 @@ def run_embedding(self, embedding_job_id: int):
             message=str(e),
         )
         return {"status": "error", "message": str(e)}
+
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.tasks.embedding.finalize_embedding_job")
+def finalize_embedding_job(self, results, embedding_job_id):
+    db = SessionLocal()
+    service = EmbeddingService(db)
+
+    try:
+        failures = [r for r in results if r.get("status") != "success"]
+
+        if failures:
+            service.update_job_status(
+                embedding_job_id,
+                EmbeddingJobStatus.FAILED,
+                message=f"{len(failures)} snippet failures",
+            )
+        else:
+            service.update_job_status(
+                embedding_job_id,
+                EmbeddingJobStatus.COMPLETED
+            )
+
+    except Exception as e:
+        service.update_job_status(
+            embedding_job_id,
+            EmbeddingJobStatus.FAILED,
+            message=str(e)
+        )
+        raise
 
     finally:
         db.close()

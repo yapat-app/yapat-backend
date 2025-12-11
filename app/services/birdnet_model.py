@@ -1,54 +1,77 @@
-from birdnetlib.analyzer import Analyzer
-from birdnetlib import Recording as BirdNetRecording
+from pathlib import Path
+
+import librosa
+import numpy as np
+from tensorflow.keras.layers import TFSMLayer
 
 
 class BirdNetEmbedder:
     """
-    BirdNET embedder for snippet-level embeddings.
+    BirdNET V2.4 embedder (raw waveform → 1024-d embedding).
 
-    - Model loads once per worker (Analyzer is expensive).
-    - Embeddings returned as Python list[float].
+    - Uses SavedModel endpoint "embeddings".
+    - Expects exactly 144000 float32 samples (3s @ 48 kHz).
+    - Returns Python list[float].
     """
 
     _instance = None
+    _model_path = (
+            Path(__file__).resolve().parent
+            / ".." / "assets" / "models" / "birdnet"
+    )
+
+    SAMPLE_RATE = 48000
+    WINDOW_SAMPLES = 144000  # 3 seconds
 
     @classmethod
     def instance(cls):
-        """Load Analyzer once per process."""
+        """Load BirdNET SavedModel endpoint once per worker."""
         if cls._instance is None:
-            cls._instance = Analyzer()   # loads model weights
+            cls._instance = TFSMLayer(
+                str(cls._model_path),
+                call_endpoint="embeddings"  # Your endpoint name
+            )
         return cls._instance
 
     @classmethod
-    def embed(cls, audio_path: str, start_time: float, end_time: float):
+    def embed(cls, audio_path: str, start_time: float):
         """
-        Compute a BirdNET embedding for the audio segment.
+        Extract a BirdNET embedding for a 3-second snippet.
+
+        Args:
+            audio_path: path to audio file
+            start_time: snippet start time in seconds
 
         Returns:
-            list[float] | None
+            list[float] (size 1024) or None
         """
-        analyzer = cls.instance()
 
-        rec = BirdNetRecording(
-            path=audio_path,
-            analyzer=analyzer,
-            min_conf=0.0,
-            start_time=start_time,
-            end_time=end_time,
+        # 1. Load exactly 3 seconds from file
+        audio, _ = librosa.load(
+            audio_path,
+            sr=cls.SAMPLE_RATE,
+            offset=start_time,
+            duration=3.0,
+            mono=True
         )
 
-        # This runs BirdNET inference for the snippet duration
-        rec.analyze()
-
-        # BirdNET stores embeddings as rec.data["embedding"]
-        vector = rec.data.get("embedding")
-
-        if vector is None:
+        if audio.size == 0:
             return None
 
-        # birdnetlib returns numpy array → convert to python list
-        try:
-            return vector.tolist()
-        except AttributeError:
-            # Already a list – safe fallback
-            return vector
+        # 2. Pad or trim to match model requirements
+        if len(audio) < cls.WINDOW_SAMPLES:
+            audio = np.pad(audio, (0, cls.WINDOW_SAMPLES - len(audio)))
+        else:
+            audio = audio[:cls.WINDOW_SAMPLES]
+
+        # Shape: (1, 144000)
+        batch = audio.astype(np.float32)[None, :]
+
+        # 3. Run inference
+        model = cls.instance()
+        outputs = model(batch)
+
+        # 4. Extract embedding
+        emb = outputs["embedding"].numpy()[0]
+
+        return emb.tolist()

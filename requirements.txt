@@ -14,10 +14,9 @@ numpy>=1.26.2
 celery[redis]==5.3.4
 redis>=4.5.2,<5.0.0
 flower==2.0.1
-pysoundfile
-librosa==0.10.1
+soundfile>=0.12
+librosa>=0.10.2
 matplotlib==3.8.2
 setuptools>=65.0.0
 pytest
 tensorflow
-birdnetlib
