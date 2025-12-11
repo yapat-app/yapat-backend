@@ -12,8 +12,8 @@ from app.models.snippet import Snippet
 from app.models.recording import Recording
 from app.models.embedding import (
     EmbeddingJob,
-    EmbeddingModel,
     EmbeddingJobStatus,
+    EmbeddingModel,
     SnippetSet,
 )
 from app.services.embedding_service import EmbeddingService
@@ -45,8 +45,11 @@ def generate_embedding_for_snippet(self, snippet_id: int, model_id: int):
         if not snippet:
             return {"status": "error", "snippet_id": snippet_id, "message": "snippet_not_found"}
 
-        model = db.query(EmbeddingModel).filter_by(id=model_id).first()
-        if not model:
+        # Get model from database
+        service = EmbeddingService(db)
+        try:
+            model = service.get_model(model_id)
+        except ValueError:
             return {"status": "error", "message": f"model_not_found"}
 
         # TODO: embedding inference should write into a vector store, not DB
@@ -126,6 +129,7 @@ def run_embedding(self, embedding_job_id: int):
                     recording_id=rec.id,
                     snippet_set_id=snippet_set.id,
                     start_time=t,
+                    end_time=t + window,
                     duration=window,
                 )
                 db.add(snippet)

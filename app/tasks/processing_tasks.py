@@ -7,6 +7,7 @@ from celery import shared_task
 
 from app.database import SessionLocal
 from app.services.dataset_service import DatasetService
+from app.celery_app import celery_app
 
 
 # --------------------------------------------------------------------
@@ -26,25 +27,34 @@ def session_scope():
 # Task: Scan dataset for recordings
 # --------------------------------------------------------------------
 
-@shared_task(bind=True)
+@celery_app.task(bind=True, name="app.tasks.processing_tasks.scan_dataset")
 def scan_dataset(self, dataset_id: int):
     """
     Discover recordings in dataset.source_uri.
     Uses DatasetService.scan_recordings().
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     with session_scope() as db:
         svc = DatasetService(db)
 
         dataset = svc.get_dataset(dataset_id)
         if dataset is None:
-            return {"status": "error", "message": "dataset_not_found"}
+            error_msg = f"Dataset {dataset_id} not found"
+            logger.error(error_msg)
+            return {"status": "error", "message": error_msg}
 
         self.update_state(state="SCANNING", meta={"dataset_id": dataset_id})
+        logger.info(f"Starting scan for dataset {dataset_id} (source_uri: {dataset.source_uri})")
 
         try:
             new_recs = svc.scan_recordings(dataset)
+            logger.info(f"Scan completed for dataset {dataset_id}: {len(new_recs)} recordings created")
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            error_msg = f"Scan failed for dataset {dataset_id}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {"status": "error", "message": error_msg}
 
         return {
             "status": "ok",
@@ -57,7 +67,7 @@ def scan_dataset(self, dataset_id: int):
 # Orchestration: dataset processing = scan only
 # --------------------------------------------------------------------
 
-@shared_task(bind=True)
+@celery_app.task(bind=True, name="app.tasks.processing_tasks.process_dataset")
 def process_dataset(self, dataset_id: int):
     """
     Trigger the dataset scanning pipeline.

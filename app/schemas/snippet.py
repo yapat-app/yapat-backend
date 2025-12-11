@@ -23,6 +23,8 @@ class SnippetBase(BaseModel):
 class Snippet(SnippetBase):
     id: int
     recording_id: int
+    end_time: float
+    is_annotated: bool
     created_at: datetime
 
     class Config:

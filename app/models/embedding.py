@@ -14,12 +14,37 @@ from sqlalchemy import (
     Float,
     Enum,
     Text,
+    TypeDecorator,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
 
 from app.database import Base
+
+
+class EnumValue(TypeDecorator):
+    """Ensure enum values (not names) are stored in database."""
+    impl = String
+    cache_ok = True
+    
+    def __init__(self, enum_class, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.enum_class = enum_class
+    
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, self.enum_class):
+            # Return the enum value (lowercase string) instead of name
+            return value.value
+        return value
+    
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        # Convert database value back to enum
+        return self.enum_class(value)
 
 
 # ---------------------------
@@ -96,7 +121,7 @@ class SnippetSet(Base):
     overlap = Column(Float, nullable=False)
 
     status = Column(
-        Enum(SnippetSetStatus),
+        EnumValue(SnippetSetStatus),
         nullable=False,
         default=SnippetSetStatus.PENDING,
     )
@@ -149,7 +174,7 @@ class EmbeddingJob(Base):
     )
 
     status = Column(
-        Enum(EmbeddingJobStatus),
+        EnumValue(EmbeddingJobStatus),
         nullable=False,
         default=EmbeddingJobStatus.PENDING,
     )

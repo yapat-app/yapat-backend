@@ -57,7 +57,7 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
-      - ${DATA_ROOT}:/data:ro
+      - ./data:/data:ro
     restart: unless-stopped
 
   # Celery worker for asynchronous task processing
@@ -78,7 +78,7 @@ services:
       - DATA_ROOT=${DATA_ROOT:-/data}
     volumes:
       - .:/app
-      - ${DATA_ROOT}:/data:ro
+      - ./data:/data:ro
     restart: unless-stopped
 
   # Celery beat scheduler for periodic tasks
@@ -99,7 +99,7 @@ services:
       - DATA_ROOT=${DATA_ROOT:-/data}
     volumes:
       - .:/app
-      - ${DATA_ROOT}:/data:ro
+      - ./data:/data:ro
     restart: unless-stopped
 
   # Flower monitoring dashboard for Celery
