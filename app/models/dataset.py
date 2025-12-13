@@ -45,7 +45,7 @@ class Dataset(Base):
         back_populates="dataset",
         cascade="all, delete-orphan"
     )
-    snippet_sets = relationship("SnippetSet", back_populates="dataset")
+    snippet_sets = relationship("SnippetSet", back_populates="dataset", cascade="all, delete-orphan")
     # Users with direct access to this dataset (via invitation, before team assignment)
     authorized_users = relationship("User", secondary=user_datasets, backref="accessible_datasets")
 
