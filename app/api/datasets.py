@@ -34,6 +34,11 @@ def create_dataset(
             raise HTTPException(status_code=409, detail="Dataset already exists")
         if str(e) == "team_not_found":
             raise HTTPException(status_code=404, detail="Team not found")
+        if str(e) == "invalid_source_uri":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid dataset path: {dataset_in.source_uri} does not exist or is not a directory"
+            )
         raise
 
     try:
