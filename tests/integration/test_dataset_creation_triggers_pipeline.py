@@ -19,9 +19,8 @@ def test_create_dataset_triggers_process_task(db_session, client):
 
     called = {}
 
-    # Fake Celery apply_async() signature: apply_async(args=(dataset_id,), kwargs=None)
-    def fake_apply_async(args=None, kwargs=None):
-        dataset_id = args[0]
+    # Fake Celery delay() method
+    def fake_delay(dataset_id):
         called["dataset_id"] = dataset_id
 
         class Result:
@@ -30,7 +29,7 @@ def test_create_dataset_triggers_process_task(db_session, client):
         return Result()
 
     # Patch the exact function that the endpoint calls
-    with patch("app.api.datasets.process_dataset.apply_async", side_effect=fake_apply_async):
+    with patch("app.api.datasets.process_dataset.delay", side_effect=fake_delay):
         res = client.post(
             "/api/datasets/",
             json={

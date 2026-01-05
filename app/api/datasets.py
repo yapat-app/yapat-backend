@@ -41,8 +41,10 @@ def create_dataset(
             )
         raise
 
+    # Dispatch background task for dataset processing (scanning + snippet generation)
+    # Returns task ID for client tracking; None if task dispatch fails (backward compatible)
     try:
-        task = process_dataset.apply_async((dataset.id,))
+        task = process_dataset.delay(dataset.id)
         task_id = task.id
     except Exception:
         task_id = None
