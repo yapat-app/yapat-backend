@@ -77,3 +77,28 @@ class Annotation(AnnotationBase):
     class Config:
         from_attributes = True
 
+
+class AnnotationExport(BaseModel):
+    """Annotation with recording and snippet metadata for export"""
+    # Annotation fields
+    annotation_id: int
+    dataset_id: int
+    snippet_id: int
+    taxon_id: str
+    resolved_name_snapshot: str
+    confidence: Optional[float]
+    created_at: datetime
+    created_by: int
+    
+    # Recording metadata
+    recording_file_name: str
+    recording_file_path: str
+    
+    # Snippet metadata
+    snippet_start_time: float
+    snippet_end_time: float
+    snippet_duration: float
+    
+    class Config:
+        from_attributes = True
+

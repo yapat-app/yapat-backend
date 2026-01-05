@@ -2,14 +2,22 @@
 Dataset endpoints
 """
 
-from typing import List
+from typing import List, Optional, Literal
+from datetime import datetime
+from io import StringIO
+import csv
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 
 from app.api.deps import get_db, get_current_active_user
 from app.models.user import User, UserRole
+from app.models.annotation import Annotation as AnnotationModel
+from app.models.snippet import Snippet
+from app.models.recording import Recording
 from app.schemas.dataset import Dataset, DatasetCreate, DatasetCreationResponse
+from app.schemas.annotation import AnnotationExport
 from app.services.dataset_service import DatasetService
 from app.tasks.processing_tasks import process_dataset
 
@@ -100,3 +108,120 @@ def delete_dataset(
 
     svc.delete_dataset(dataset)
     return None
+
+
+@router.get("/{dataset_id}/annotations/export")
+def export_dataset_annotations(
+        dataset_id: int,
+        format: Literal["json", "csv"] = Query("json", description="Export format: json or csv"),
+        taxon_id: Optional[str] = Query(None, description="Filter by taxon_id"),
+        user_id: Optional[int] = Query(None, description="Filter by user_id (created_by)"),
+        created_after: Optional[datetime] = Query(None, description="Filter annotations created after this datetime"),
+        created_before: Optional[datetime] = Query(None, description="Filter annotations created before this datetime"),
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_active_user),
+):
+    """
+    Export all annotations for a dataset with recording and snippet metadata.
+    
+    Supports filtering by:
+    - taxon_id: Filter by specific taxon
+    - user_id: Filter by annotation creator
+    - created_after: Filter annotations created after datetime
+    - created_before: Filter annotations created before datetime
+    
+    Returns either JSON (default) or CSV format.
+    """
+    # Verify dataset exists
+    svc = DatasetService(db)
+    dataset = svc.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    # Build query with joins
+    query = (
+        db.query(
+            AnnotationModel.id.label('annotation_id'),
+            Recording.dataset_id.label('dataset_id'),
+            AnnotationModel.snippet_id,
+            AnnotationModel.taxon_id,
+            AnnotationModel.resolved_name_snapshot,
+            AnnotationModel.confidence,
+            AnnotationModel.created_at,
+            AnnotationModel.user_id.label('created_by'),
+            Recording.file_name.label('recording_file_name'),
+            Recording.file_path.label('recording_file_path'),
+            Snippet.start_time.label('snippet_start_time'),
+            Snippet.end_time.label('snippet_end_time'),
+            Snippet.duration.label('snippet_duration'),
+        )
+        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(Recording.dataset_id == dataset_id)
+    )
+    
+    # Apply filters
+    if taxon_id:
+        query = query.filter(AnnotationModel.taxon_id == taxon_id)
+    if user_id:
+        query = query.filter(AnnotationModel.user_id == user_id)
+    if created_after:
+        query = query.filter(AnnotationModel.created_at >= created_after)
+    if created_before:
+        query = query.filter(AnnotationModel.created_at <= created_before)
+    
+    # Execute query
+    results = query.all()
+    
+    # Convert to dict for easy processing
+    annotations_data = [
+        {
+            'annotation_id': row.annotation_id,
+            'dataset_id': row.dataset_id,
+            'snippet_id': row.snippet_id,
+            'taxon_id': row.taxon_id,
+            'resolved_name_snapshot': row.resolved_name_snapshot,
+            'confidence': row.confidence,
+            'created_at': row.created_at.isoformat() if row.created_at else None,
+            'created_by': row.created_by,
+            'recording_file_name': row.recording_file_name,
+            'recording_file_path': row.recording_file_path,
+            'snippet_start_time': row.snippet_start_time,
+            'snippet_end_time': row.snippet_end_time,
+            'snippet_duration': row.snippet_duration,
+        }
+        for row in results
+    ]
+    
+    # Return based on format
+    if format == "csv":
+        # Generate CSV
+        if not annotations_data:
+            # Return empty CSV with headers
+            csv_headers = [
+                'annotation_id', 'dataset_id', 'snippet_id', 'taxon_id', 
+                'resolved_name_snapshot', 'confidence', 'created_at', 'created_by',
+                'recording_file_name', 'recording_file_path', 'snippet_start_time',
+                'snippet_end_time', 'snippet_duration'
+            ]
+            output = StringIO()
+            writer = csv.DictWriter(output, fieldnames=csv_headers)
+            writer.writeheader()
+            csv_content = output.getvalue()
+        else:
+            output = StringIO()
+            writer = csv.DictWriter(output, fieldnames=annotations_data[0].keys())
+            writer.writeheader()
+            writer.writerows(annotations_data)
+            csv_content = output.getvalue()
+        
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=dataset_{dataset_id}_annotations.csv"
+            }
+        )
+    else:
+        # Return JSON (using Pydantic for validation)
+        return [AnnotationExport(**data) for data in annotations_data]
