@@ -12,7 +12,9 @@ from app.models.embedding import (
     EmbeddingJobStatus,
     EmbeddingModel,
     SnippetSet,
+    SnippetSetStatus,
 )
+from app.models.dataset import Dataset
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.services.embedding_service import EmbeddingService, VectorStore
@@ -130,6 +132,16 @@ def run_embedding(self, embedding_job_id: int):
                 t += step
 
         db.commit()
+
+        # --- Mark SnippetSet as READY after snippet materialization ---
+        snippet_set.status = SnippetSetStatus.READY
+        db.commit()
+
+        # --- Set as default if no default exists ---
+        dataset = db.query(Dataset).filter_by(id=job.dataset_id).first()
+        if dataset and dataset.default_snippet_set_id is None:
+            dataset.default_snippet_set_id = snippet_set.id
+            db.commit()
 
         # --- Parallel embedding tasks ---
         task_group = group(

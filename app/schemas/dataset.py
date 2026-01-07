@@ -27,6 +27,7 @@ class DatasetUpdate(BaseModel):
 class Dataset(DatasetBase):
     id: int
     team_id: Optional[int] = None
+    default_snippet_set_id: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 

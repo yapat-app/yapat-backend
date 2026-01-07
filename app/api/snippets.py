@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_active_user
 from app.models.snippet import Snippet as SnippetModel
-from app.models.embedding import SnippetSet
+from app.models.embedding import SnippetSet, SnippetSetStatus
 from app.models.recording import Recording
 from app.models.user import User
 from app.schemas.snippet import Snippet
@@ -36,7 +36,7 @@ def read_snippets(
     Optionally filter further by recording.
     """
 
-    # Validate snippet_set belongs to dataset
+    # Validate snippet_set belongs to dataset and is READY
     ss = (
         db.query(SnippetSet)
         .filter(
@@ -47,6 +47,11 @@ def read_snippets(
     )
     if not ss:
         raise HTTPException(404, detail="SnippetSet not found for this dataset")
+    if ss.status != SnippetSetStatus.READY:
+        raise HTTPException(
+            400,
+            detail=f"SnippetSet is not READY (status: {ss.status.value}). Only READY SnippetSets can be queried."
+        )
 
     query = (
         db.query(SnippetModel)

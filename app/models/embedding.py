@@ -153,7 +153,11 @@ class SnippetSet(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    dataset = relationship("Dataset", back_populates="snippet_sets")
+    dataset = relationship(
+        "Dataset",
+        back_populates="snippet_sets",
+        foreign_keys=[dataset_id]
+    )
     embedding_model = relationship("EmbeddingModel", back_populates="snippet_sets")
     snippets = relationship("Snippet", back_populates="snippet_set", cascade="all, delete-orphan")
     embedding_jobs = relationship("EmbeddingJob", back_populates="snippet_set", cascade="all, delete-orphan")
