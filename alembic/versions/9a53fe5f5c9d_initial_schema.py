@@ -63,6 +63,7 @@ def upgrade() -> None:
     sa.Column('description', sa.Text(), nullable=True),
     sa.Column('source_uri', sa.String(), nullable=False),
     sa.Column('team_id', sa.Integer(), nullable=True),
+    sa.Column('default_snippet_set_id', sa.Integer(), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=True),
     sa.ForeignKeyConstraint(['team_id'], ['teams.id'], ondelete='CASCADE'),
@@ -150,6 +151,14 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_snippet_sets_id'), 'snippet_sets', ['id'], unique=False)
+    # Add foreign key constraint for default_snippet_set_id after snippet_sets table is created
+    op.create_foreign_key(
+        'fk_datasets_default_snippet_set_id',
+        'datasets', 'snippet_sets',
+        ['default_snippet_set_id'], ['id'],
+        ondelete='SET NULL'
+    )
+    op.create_index(op.f('ix_datasets_default_snippet_set_id'), 'datasets', ['default_snippet_set_id'], unique=False)
     op.create_table('user_datasets',
     sa.Column('user_id', sa.Integer(), nullable=False),
     sa.Column('dataset_id', sa.Integer(), nullable=False),
@@ -239,6 +248,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_invitation_links_token'), table_name='invitation_links')
     op.drop_index(op.f('ix_invitation_links_id'), table_name='invitation_links')
     op.drop_table('invitation_links')
+    op.drop_index(op.f('ix_datasets_default_snippet_set_id'), table_name='datasets')
     op.drop_index(op.f('ix_datasets_source_uri'), table_name='datasets')
     op.drop_index(op.f('ix_datasets_name'), table_name='datasets')
     op.drop_index(op.f('ix_datasets_id'), table_name='datasets')

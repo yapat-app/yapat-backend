@@ -27,6 +27,7 @@ def get_feed(
             description="Feed generation method: 'random' or 'similarity'. Default prioritizes unannotated snippets."
         ),
         dataset_id: Optional[int] = Query(default=None, description="Dataset ID to filter snippets"),
+        snippet_set_id: Optional[int] = Query(default=None, description="SnippetSet ID (defaults to dataset's default if not specified)"),
         recording_id: Optional[int] = Query(default=None, description="Recording ID to filter snippets"),
         skip: int = Query(default=0, ge=0, description="Number of snippets to skip (pagination)"),
         limit: int = Query(default=100, ge=1, le=1000, description="Maximum number of snippets to return"),
@@ -44,47 +45,56 @@ def get_feed(
     
     If no method is specified, defaults to prioritizing unannotated snippets.
     Supported methods: 'random', 'similarity'
+    
+    If snippet_set_id is not provided, uses the dataset's default SnippetSet.
+    Only READY SnippetSets are allowed; PENDING sets are rejected.
     """
     snippet_service = SnippetService(db)
     
-    # Route to appropriate method based on 'method' parameter
-    if method is None or method == "":
-        # Default: prioritize unannotated snippets
-        snippets = snippet_service.get_feed(
-            dataset_id=dataset_id,
-            recording_id=recording_id,
-            skip=skip,
-            limit=limit
-        )
-    elif method == "random":
-        snippets = snippet_service.get_feed_random(
-            dataset_id=dataset_id,
-            recording_id=recording_id,
-            status=status,
-            skip=skip,
-            limit=limit
-        )
-    elif method == "similarity":
-        if dataset_id is None:
-            raise HTTPException(status_code=400, detail="dataset_id is required for 'similarity' method")
-        if query_snippet_id is None:
-            raise HTTPException(status_code=400, detail="query_snippet_id is required for 'similarity' method")
-        snippets = snippet_service.get_feed_similarity(
-            dataset_id=dataset_id,
-            query_snippet_id=query_snippet_id,
-            embedding_model_id=embedding_model_id,
-            crop_start_sec=crop_start_sec,
-            crop_end_sec=crop_end_sec,
-            skip=skip,
-            limit=limit
-        )
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown feed method: '{method}'. Supported methods: 'random', 'similarity'"
-        )
-    
-    return snippets
+    try:
+        # Route to appropriate method based on 'method' parameter
+        if method is None or method == "":
+            # Default: prioritize unannotated snippets
+            snippets = snippet_service.get_feed(
+                dataset_id=dataset_id,
+                snippet_set_id=snippet_set_id,
+                recording_id=recording_id,
+                skip=skip,
+                limit=limit
+            )
+        elif method == "random":
+            snippets = snippet_service.get_feed_random(
+                dataset_id=dataset_id,
+                snippet_set_id=snippet_set_id,
+                recording_id=recording_id,
+                status=status,
+                skip=skip,
+                limit=limit
+            )
+        elif method == "similarity":
+            if dataset_id is None:
+                raise HTTPException(status_code=400, detail="dataset_id is required for 'similarity' method")
+            if query_snippet_id is None:
+                raise HTTPException(status_code=400, detail="query_snippet_id is required for 'similarity' method")
+            snippets = snippet_service.get_feed_similarity(
+                dataset_id=dataset_id,
+                snippet_set_id=snippet_set_id,
+                query_snippet_id=query_snippet_id,
+                embedding_model_id=embedding_model_id,
+                crop_start_sec=crop_start_sec,
+                crop_end_sec=crop_end_sec,
+                skip=skip,
+                limit=limit
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown feed method: '{method}'. Supported methods: 'random', 'similarity'"
+            )
+        
+        return snippets
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/similar/{snippet_id}", response_model=List[Snippet])
