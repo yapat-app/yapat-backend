@@ -208,6 +208,39 @@ class VectorStore:
         self.db.commit()
         return ev
 
+    def bulk_insert(self, embeddings: List[dict]) -> int:
+        """
+        Bulk insert multiple embedding vectors efficiently.
+        
+        Args:
+            embeddings: List of dicts with keys:
+                - snippet_id: int
+                - job_id: int
+                - model_id: int
+                - vector: list[float]
+        
+        Returns:
+            Number of embeddings inserted
+        """
+        if not embeddings:
+            return 0
+        
+        vectors = [
+            EmbeddingVector(
+                snippet_id=emb["snippet_id"],
+                embedding_job_id=emb["job_id"],
+                embedding_model_id=emb["model_id"],
+                dim=len(emb["vector"]),
+                vector=emb["vector"],
+            )
+            for emb in embeddings
+        ]
+        
+        self.db.bulk_save_objects(vectors)
+        self.db.commit()
+        
+        return len(vectors)
+
     def get(self, snippet_id: int, model_id: int):
         row = (
             self.db.query(EmbeddingVector)
