@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, Any
 from pydantic import BaseModel, field_validator
 from datetime import datetime
 
@@ -57,3 +57,50 @@ class EmbeddingJobResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ---------------------------------------------------------
+# SnippetSet Schemas
+# ---------------------------------------------------------
+
+class SnippetSet(BaseModel):
+    """Schema for snippet set response."""
+    id: int
+    dataset_id: int
+    embedding_model_id: int
+    window_size: float
+    step_size: float
+    overlap: float
+    status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SnippetSetWithStats(SnippetSet):
+    """SnippetSet with annotation statistics."""
+    annotation_count: int
+    annotated_snippet_count: int
+    total_snippet_count: int
+    has_annotations: bool
+
+
+class SnippetSetDeleteRequest(BaseModel):
+    """Request to delete a snippet set."""
+    acknowledge_annotation_loss: bool = False
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "acknowledge_annotation_loss": True
+            }
+        }
+
+
+class SnippetSetDeleteResponse(BaseModel):
+    """Response after deleting a snippet set."""
+    deleted_snippet_set_id: int
+    deleted_annotation_count: int
+    deleted_snippet_count: int
+    message: str
