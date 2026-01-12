@@ -45,6 +45,48 @@ To stop and remove all data volumes:
 docker compose down -v
 ```
 
+## Updating from Latest Changes
+
+If you're pulling updates from the repository (especially the pgvector migration):
+
+1. **Pull latest code**
+   ```bash
+   git pull
+   ```
+
+2. **Stop running containers**
+   ```bash
+   docker-compose down
+   ```
+
+3. **Rebuild containers** (required for pgvector and new dependencies)
+   ```bash
+   docker-compose build --no-cache
+   ```
+
+4. **Start containers**
+   ```bash
+   docker-compose up -d
+   ```
+
+5. **Run database migrations**
+   ```bash
+   docker-compose exec api alembic upgrade head
+   ```
+
+6. **Verify migration**
+   ```bash
+   docker-compose exec api alembic current
+   ```
+   Should show: `2026_01_12_pgvector (head)`
+
+7. **Test the API**
+   ```bash
+   curl http://localhost:8000/docs
+   ```
+
+**Important**: The `--no-cache` flag in step 3 ensures the pgvector PostgreSQL extension and Python package are properly installed.
+
 ## Manual Setup (Development)
 
 If you prefer to run services manually:

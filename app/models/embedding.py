@@ -23,6 +23,14 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from sqlalchemy.types import TypeDecorator
 
+# Try to import pgvector, fallback to None if not available
+try:
+    from pgvector.sqlalchemy import Vector
+    PGVECTOR_AVAILABLE = True
+except ImportError:
+    Vector = None
+    PGVECTOR_AVAILABLE = False
+
 from app.database import Base
 
 
@@ -52,19 +60,23 @@ class EnumValue(TypeDecorator):
 
 class VectorType(TypeDecorator):
     """
-    Stores list[float] as ARRAY(Float) on Postgres, JSON elsewhere (SQLite).
+    Stores list[float] as pgvector's vector type on Postgres, JSON for SQLite.
     """
     impl = JSON  # fallback for SQLite
     cache_ok = True
 
     def load_dialect_impl(self, dialect):
-        if dialect.name == "postgresql":
+        if dialect.name == "postgresql" and PGVECTOR_AVAILABLE:
+            # Use pgvector's native Vector type (dimension 1024 for BirdNET)
+            return dialect.type_descriptor(Vector(1024))
+        elif dialect.name == "postgresql":
+            # Fallback to ARRAY if pgvector not installed
             return dialect.type_descriptor(PG_ARRAY(Float))
         else:
+            # JSON for SQLite
             return dialect.type_descriptor(JSON)
 
     def process_bind_param(self, value, dialect):
-        # Store list as-is; dialect impl handles encoding
         return value
 
     def process_result_value(self, value, dialect):
