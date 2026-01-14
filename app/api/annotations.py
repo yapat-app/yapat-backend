@@ -8,7 +8,8 @@ from typing import List, Optional
 
 from app.api.deps import get_db, get_current_active_user
 from app.schemas.annotation import (
-    Annotation, AnnotationCreate, AnnotationBatchCreate, DatasetAnnotationStats
+    Annotation, AnnotationCreate, AnnotationBatchCreate, 
+    DatasetAnnotationStats, AllDatasetsAnnotationStats
 )
 from app.models.annotation import Annotation as AnnotationModel
 from app.models.snippet import Snippet
@@ -200,66 +201,75 @@ def delete_annotation(
     return None
 
 
-@router.get("/datasets/{dataset_id}/stats", response_model=DatasetAnnotationStats)
-def get_dataset_annotation_stats(
-    dataset_id: int,
+@router.get("/datasets/stats", response_model=AllDatasetsAnnotationStats)
+def get_all_datasets_annotation_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Get annotation statistics for a specific dataset.
+    Get annotation statistics for all datasets.
     
-    Returns:
-    - Total number of snippets in the dataset
+    Returns a list of annotation statistics for each dataset including:
+    - Total number of snippets in each dataset
     - Number of annotated snippets (with at least one annotation)
     - Number of not annotated snippets (with zero annotations)
     - Annotation percentage
     - Total number of annotations
     """
-    # Verify dataset exists
-    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    if not dataset:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    # Get all datasets
+    datasets = db.query(Dataset).all()
     
-    # Get all snippets for this dataset through recordings
-    # Count total snippets
-    total_snippets = (
-        db.query(func.count(Snippet.id))
-        .join(Recording)
-        .filter(Recording.dataset_id == dataset_id)
-        .scalar()
-    ) or 0
+    dataset_stats_list = []
     
-    # Count snippets with at least one annotation
-    annotated_snippets = (
-        db.query(func.count(func.distinct(Snippet.id)))
-        .join(Recording)
-        .join(AnnotationModel, AnnotationModel.snippet_id == Snippet.id)
-        .filter(Recording.dataset_id == dataset_id)
-        .scalar()
-    ) or 0
+    for dataset in datasets:
+        dataset_id = dataset.id
+        
+        # Count total snippets for this dataset
+        total_snippets = (
+            db.query(func.count(Snippet.id))
+            .join(Recording)
+            .filter(Recording.dataset_id == dataset_id)
+            .scalar()
+        ) or 0
+        
+        # Count snippets with at least one annotation
+        annotated_snippets = (
+            db.query(func.count(func.distinct(Snippet.id)))
+            .join(Recording)
+            .join(AnnotationModel, AnnotationModel.snippet_id == Snippet.id)
+            .filter(Recording.dataset_id == dataset_id)
+            .scalar()
+        ) or 0
+        
+        # Count total annotations
+        total_annotations = (
+            db.query(func.count(AnnotationModel.id))
+            .join(Snippet)
+            .join(Recording)
+            .filter(Recording.dataset_id == dataset_id)
+            .scalar()
+        ) or 0
+        
+        # Calculate not annotated snippets
+        not_annotated_snippets = total_snippets - annotated_snippets
+        
+        # Calculate percentage
+        annotation_percentage = (annotated_snippets / total_snippets * 100) if total_snippets > 0 else 0.0
+        
+        dataset_stats_list.append(
+            DatasetAnnotationStats(
+                dataset_id=dataset_id,
+                dataset_name=dataset.name,
+                total_snippets=total_snippets,
+                annotated_snippets=annotated_snippets,
+                not_annotated_snippets=not_annotated_snippets,
+                annotation_percentage=round(annotation_percentage, 2),
+                total_annotations=total_annotations
+            )
+        )
     
-    # Count total annotations
-    total_annotations = (
-        db.query(func.count(AnnotationModel.id))
-        .join(Snippet)
-        .join(Recording)
-        .filter(Recording.dataset_id == dataset_id)
-        .scalar()
-    ) or 0
-    
-    # Calculate not annotated snippets
-    not_annotated_snippets = total_snippets - annotated_snippets
-    
-    # Calculate percentage
-    annotation_percentage = (annotated_snippets / total_snippets * 100) if total_snippets > 0 else 0.0
-    
-    return DatasetAnnotationStats(
-        dataset_id=dataset_id,
-        total_snippets=total_snippets,
-        annotated_snippets=annotated_snippets,
-        not_annotated_snippets=not_annotated_snippets,
-        annotation_percentage=round(annotation_percentage, 2),
-        total_annotations=total_annotations
+    return AllDatasetsAnnotationStats(
+        datasets=dataset_stats_list,
+        total_datasets=len(datasets)
     )
 

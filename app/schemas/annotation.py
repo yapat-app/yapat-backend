@@ -99,9 +99,16 @@ class AnnotationExport(BaseModel):
 class DatasetAnnotationStats(BaseModel):
     """Statistics about annotation status for a dataset"""
     dataset_id: int
+    dataset_name: str
     total_snippets: int
     annotated_snippets: int = Field(description="Number of snippets with at least one annotation")
     not_annotated_snippets: int = Field(description="Number of snippets with no annotations")
     annotation_percentage: float = Field(description="Percentage of snippets that are annotated (0-100)")
     total_annotations: int = Field(description="Total number of annotations across all snippets")
+
+
+class AllDatasetsAnnotationStats(BaseModel):
+    """Statistics about annotation status for all datasets"""
+    datasets: list[DatasetAnnotationStats] = Field(description="List of annotation statistics for each dataset")
+    total_datasets: int = Field(description="Total number of datasets")
 
