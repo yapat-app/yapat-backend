@@ -10,6 +10,7 @@ from app.api.deps import get_db, get_current_active_user
 from app.schemas.annotation import Annotation, AnnotationCreate, AnnotationBatchCreate
 from app.models.annotation import Annotation as AnnotationModel
 from app.models.snippet import Snippet
+from app.models.recording import Recording
 from app.models.user import User
 from app.core import taxonomy
 
@@ -127,6 +128,7 @@ def read_annotations(
     snippet_id: Optional[int] = Query(None, description="Filter by snippet ID"),
     taxon_id: Optional[str] = Query(None, description="Filter by taxon ID"),
     user_id: Optional[int] = Query(None, description="Filter by user ID"),
+    dataset_id: Optional[int] = Query(None, description="Filter by dataset ID"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -135,7 +137,7 @@ def read_annotations(
     """
     Get list of annotations with optional filtering.
     
-    Supports filtering by snippet_id, taxon_id, and user_id.
+    Supports filtering by snippet_id, taxon_id, user_id, and dataset_id.
     """
     query = db.query(AnnotationModel)
     
@@ -145,6 +147,9 @@ def read_annotations(
         query = query.filter(AnnotationModel.taxon_id == taxon_id)
     if user_id:
         query = query.filter(AnnotationModel.user_id == user_id)
+    if dataset_id:
+        # Join through Snippet -> Recording -> Dataset to filter by dataset_id
+        query = query.join(Snippet).join(Recording).filter(Recording.dataset_id == dataset_id)
     
     annotations = query.offset(skip).limit(limit).all()
     return annotations
