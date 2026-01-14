@@ -21,13 +21,6 @@ class AnnotationBase(BaseModel):
         None,
         description="Scientific or common species name (e.g., 'Turdus merula' or 'Common Blackbird'). Either taxon_id or species_name must be provided."
     )
-    confidence: Optional[float] = Field(
-        default=0.8,
-        ge=0.0,
-        le=1.0,
-        description="Confidence score between 0.0 and 1.0"
-    )
-    notes: Optional[str] = None
     extra_metadata: Optional[Dict[str, Any]] = None
     
     @field_validator('taxon_id')
