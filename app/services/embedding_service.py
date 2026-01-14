@@ -300,7 +300,7 @@ class VectorStore:
             params['dataset_id'] = dataset_id
         
         sql_parts.append("WHERE " + " AND ".join(where) + " ")
-        sql_parts.append("ORDER BY distance ASC LIMIT :limit")
+        sql_parts.append("ORDER BY distance ASC, ev.snippet_id ASC LIMIT :limit")
         
         # Execute and return results
         result = self.db.execute(text("".join(sql_parts)), params)
