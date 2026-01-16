@@ -11,18 +11,64 @@ Supports feed generation methods:
 import os
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, Form
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_active_user
 from app.models.user import User
-from app.schemas.snippet import Snippet
+from app.models.user_feed import UserFeed
+from app.schemas.snippet import Snippet, UserFeedSnapshot
 from app.services.snippet_service import SnippetService
 from app.services.birdnet_model import BirdNetEmbedder
 
 router = APIRouter()
+
+
+def _save_feed_snapshot(
+    db: Session,
+    user_id: int,
+    method: str,
+    snippets: List[Snippet],
+    request_params: Dict[str, Any],
+) -> None:
+    """
+    Save a feed snapshot and enforce last 5 feeds per user+method.
+    Silently fails if persistence fails to not block feed generation.
+    """
+    try:
+        snippet_payload = jsonable_encoder(
+            [Snippet.from_orm(s) for s in snippets]
+        )
+        
+        feed_snapshot = UserFeed(
+            user_id=user_id,
+            method=method,
+            request_params=request_params,
+            response=snippet_payload,
+        )
+        db.add(feed_snapshot)
+        db.flush()
+        
+        # Enforce last 5 feeds per user+method
+        subquery = (
+            db.query(UserFeed.id)
+            .filter(UserFeed.user_id == user_id, UserFeed.method == method)
+            .order_by(UserFeed.created_at.desc(), UserFeed.id.desc())
+            .offset(5)
+            .all()
+        )
+        ids_to_delete = [row[0] for row in subquery]
+        if ids_to_delete:
+            db.query(UserFeed).filter(UserFeed.id.in_(ids_to_delete)).delete(
+                synchronize_session=False
+            )
+        
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 @router.get("/", response_model=List[Snippet])
@@ -117,6 +163,24 @@ def get_feed(
                 detail=f"Unknown feed method: '{method}'. Supported methods: 'random', 'similarity'"
             )
         
+        # Persist feed snapshot for the user (last 5 per user+method)
+        # Only store feeds when method is explicitly "random" or "similarity"
+        if method in ("random", "similarity"):
+            request_params: Dict[str, Any] = {
+                "method": method,
+                "dataset_id": dataset_id,
+                "snippet_set_id": snippet_set_id,
+                "recording_id": recording_id,
+                "skip": skip,
+                "limit": limit,
+                "status": status,
+                "embedding_model_id": embedding_model_id,
+                "query_snippet_id": query_snippet_id,
+                "crop_start_sec": crop_start_sec,
+                "crop_end_sec": crop_end_sec,
+            }
+            _save_feed_snapshot(db, current_user.id, method, snippets, request_params)
+
         return snippets
     except ValueError as e:
         # Convert service layer errors to appropriate HTTP exceptions
@@ -131,12 +195,45 @@ def get_feed(
         else:
             raise HTTPException(status_code=400, detail=error_msg)
     except Exception as e:
-        # Catch unexpected errors and return a generic error
-        # In production, you would log this error for debugging
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error during feed generation: {str(e)}"
         )
+
+@router.get("/history", response_model=List[UserFeedSnapshot])
+def get_feed_history(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Return the last 5 feed responses stored for the current user.
+    
+    Returns feeds across all methods (random, similarity) ordered by creation time.
+    Each feed snapshot includes the method used: 'random' or 'similarity'.
+    """
+    snapshots = (
+        db.query(UserFeed)
+        .filter(UserFeed.user_id == current_user.id)
+        .order_by(UserFeed.created_at.desc(), UserFeed.id.desc())
+        .limit(5)
+        .all()
+    )
+
+    result: List[UserFeedSnapshot] = []
+    for snap in snapshots:
+        # snap.response is already a list of snippet dicts
+        snippets = [Snippet.model_validate(item) for item in (snap.response or [])]
+        result.append(
+            UserFeedSnapshot(
+                id=snap.id,
+                method=snap.method,
+                created_at=snap.created_at,
+                response=snippets,
+            )
+        )
+
+    return result
+
 
 @router.post("/similarity-search", response_model=List[Snippet])
 async def search_by_audio_upload(
@@ -184,8 +281,6 @@ async def search_by_audio_upload(
                 status_code=400,
                 detail="end_time must be greater than start_time"
             )
-        
-        duration = end_time - start_time
         
         # Validate audio file
         if not audio_file.filename:
@@ -268,6 +363,18 @@ async def search_by_audio_upload(
                 skip=skip,
                 limit=limit
             )
+            
+            # Persist feed snapshot for similarity search (last 5 per user)
+            request_params: Dict[str, Any] = {
+                "method": "similarity",
+                "dataset_id": dataset_id,
+                "snippet_set_id": resolved_snippet_set_id,
+                "embedding_model_id": embedding_model_id,
+                "skip": skip,
+                "limit": limit,
+                "audio_upload": True,
+            }
+            _save_feed_snapshot(db, current_user.id, "similarity", similar_snippets, request_params)
             
             return similar_snippets
             

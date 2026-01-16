@@ -3,6 +3,8 @@ Snippet schemas (updated for SnippetSet architecture)
 """
 
 from datetime import datetime
+from typing import List
+
 from pydantic import BaseModel
 
 
@@ -28,3 +30,11 @@ class Snippet(SnippetBase):
 
     class Config:
         from_attributes = True
+
+
+class UserFeedSnapshot(BaseModel):
+    id: int
+    method: str
+    created_at: datetime
+    response: List[Snippet]
+
