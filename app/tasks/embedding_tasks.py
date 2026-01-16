@@ -207,7 +207,20 @@ def run_embedding(self, embedding_job_id: int):
             Recording.dataset_id == job.dataset_id
         ).all()
 
-        # --- Segmentation: Create snippets grouped by recording ---
+        # --- Check if snippets already exist for this snippet_set ---
+        existing_snippets = (
+            db.query(Snippet)
+            .filter(Snippet.snippet_set_id == snippet_set.id)
+            .all()
+        )
+        
+        # Create a dictionary mapping (recording_id, start_time, end_time) -> snippet_id for O(1) lookup
+        existing_snippet_map = {
+            (s.recording_id, s.start_time, s.end_time): s.id
+            for s in existing_snippets
+        }
+
+        # --- Segmentation: Create snippets grouped by recording (only if they don't exist) ---
         recording_snippet_map = {}  # recording_id -> list of snippet_ids
         total_snippets = 0
 
@@ -217,16 +230,27 @@ def run_embedding(self, embedding_job_id: int):
             recording_snippets = []
 
             while t + window <= duration:
-                snippet = Snippet(
-                    recording_id=rec.id,
-                    snippet_set_id=snippet_set.id,
-                    start_time=t,
-                    end_time=t + window,
-                    duration=window,
-                )
-                db.add(snippet)
-                db.flush()
-                recording_snippets.append(snippet.id)
+                snippet_key = (rec.id, t, t + window)
+                
+                # Check if snippet already exists
+                if snippet_key in existing_snippet_map:
+                    # Reuse existing snippet
+                    recording_snippets.append(existing_snippet_map[snippet_key])
+                else:
+                    # Create new snippet only if it doesn't exist
+                    snippet = Snippet(
+                        recording_id=rec.id,
+                        snippet_set_id=snippet_set.id,
+                        start_time=t,
+                        end_time=t + window,
+                        duration=window,
+                    )
+                    db.add(snippet)
+                    db.flush()
+                    recording_snippets.append(snippet.id)
+                    # Add to map to avoid duplicates in same run
+                    existing_snippet_map[snippet_key] = snippet.id
+                
                 t += step
 
             if recording_snippets:
