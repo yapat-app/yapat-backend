@@ -122,6 +122,7 @@ class EmbeddingService:
         """
         Create an EmbeddingJob for a dataset × model.
         Ensures a SnippetSet exists (or creates one).
+        Prevents duplicate jobs for the same configuration.
         """
 
         snippet_set = self.get_or_create_snippet_set(
@@ -131,6 +132,26 @@ class EmbeddingService:
             step_size=step_size,
             overlap=overlap,
         )
+
+        # Check if a job already exists for this configuration
+        existing_job = (
+            self.db.query(EmbeddingJob)
+            .filter(
+                EmbeddingJob.dataset_id == dataset.id,
+                EmbeddingJob.embedding_model_id == model.id,
+                EmbeddingJob.snippet_set_id == snippet_set.id,
+            )
+            .first()
+        )
+
+        if existing_job:
+            status_msg = existing_job.status.value
+            raise ValueError(
+                f"An embedding job already exists for this configuration "
+                f"(dataset_id={dataset.id}, model_id={model.id}, snippet_set_id={snippet_set.id}). "
+                f"Existing job ID: {existing_job.id}, Status: {status_msg}. "
+                f"To create a new job, please delete the existing one first."
+            )
 
         job = EmbeddingJob(
             dataset_id=dataset.id,

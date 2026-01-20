@@ -98,13 +98,20 @@ def create_embedding_job(
     # --------------------------
     # Create job (SnippetSet + EmbeddingJob)
     # --------------------------
-    job = service.create_embedding_job(
-        dataset,
-        model,
-        window_size=payload.window_size,
-        step_size=payload.step_size,
-        overlap=payload.overlap,
-    )
+    try:
+        job = service.create_embedding_job(
+            dataset,
+            model,
+            window_size=payload.window_size,
+            step_size=payload.step_size,
+            overlap=payload.overlap,
+        )
+    except ValueError as e:
+        # Handle duplicate job error
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e)
+        )
 
     # --------------------------
     # Trigger Celery worker
