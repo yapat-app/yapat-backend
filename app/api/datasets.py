@@ -16,6 +16,7 @@ from app.models.user import User, UserRole
 from app.models.annotation import Annotation as AnnotationModel
 from app.models.snippet import Snippet
 from app.models.recording import Recording
+from app.models.embedding import SnippetSet, SnippetSetStatus
 from app.schemas.dataset import Dataset, DatasetCreate, DatasetCreationResponse
 from app.schemas.annotation import AnnotationExport
 from app.services.dataset_service import DatasetService
@@ -57,7 +58,7 @@ def create_dataset(
     except Exception:
         task_id = None
 
-    # Create dataset response with recording_count
+    # Create dataset response with recording_count and feed readiness
     dataset_dict = {
         "id": dataset.id,
         "name": dataset.name,
@@ -68,6 +69,7 @@ def create_dataset(
         "created_at": dataset.created_at,
         "updated_at": dataset.updated_at,
         "recording_count": 0,  # New datasets start with 0 recordings
+        "is_ready_for_feed": False,  # New datasets don't have snippet sets yet
     }
     dataset_response = Dataset(**dataset_dict)
 
@@ -102,9 +104,29 @@ def read_datasets(
     else:
         count_map = {}
     
-    # Convert to schema and add recording_count
+    # Check feed readiness for datasets with default snippet sets
+    snippet_set_ids = [ds.default_snippet_set_id for ds in datasets if ds.default_snippet_set_id]
+    if snippet_set_ids:
+        ready_snippet_sets = (
+            db.query(SnippetSet.id)
+            .filter(
+                SnippetSet.id.in_(snippet_set_ids),
+                SnippetSet.status == SnippetSetStatus.READY
+            )
+            .all()
+        )
+        ready_set_ids = {ss_id for (ss_id,) in ready_snippet_sets}
+    else:
+        ready_set_ids = set()
+    
+    # Convert to schema and add recording_count and feed readiness
     result = []
     for dataset in datasets:
+        is_ready = (
+            dataset.default_snippet_set_id is not None 
+            and dataset.default_snippet_set_id in ready_set_ids
+        )
+        
         dataset_dict = {
             "id": dataset.id,
             "name": dataset.name,
@@ -115,6 +137,7 @@ def read_datasets(
             "created_at": dataset.created_at,
             "updated_at": dataset.updated_at,
             "recording_count": count_map.get(dataset.id, 0),
+            "is_ready_for_feed": is_ready,
         }
         result.append(Dataset(**dataset_dict))
     
@@ -139,6 +162,17 @@ def read_dataset(
         .scalar()
     ) or 0
     
+    # Check if dataset is ready for feed generation
+    is_ready_for_feed = False
+    if dataset.default_snippet_set_id:
+        snippet_set = (
+            db.query(SnippetSet)
+            .filter(SnippetSet.id == dataset.default_snippet_set_id)
+            .first()
+        )
+        if snippet_set and snippet_set.status == SnippetSetStatus.READY:
+            is_ready_for_feed = True
+    
     dataset_dict = {
         "id": dataset.id,
         "name": dataset.name,
@@ -149,6 +183,7 @@ def read_dataset(
         "created_at": dataset.created_at,
         "updated_at": dataset.updated_at,
         "recording_count": recording_count,
+        "is_ready_for_feed": is_ready_for_feed,
     }
     return Dataset(**dataset_dict)
 

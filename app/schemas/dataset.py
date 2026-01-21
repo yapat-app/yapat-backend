@@ -31,6 +31,7 @@ class Dataset(DatasetBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     recording_count: Optional[int] = None  # Number of recordings in this dataset
+    is_ready_for_feed: bool = False  # True when default snippet set exists and is READY
 
     class Config:
         from_attributes = True
