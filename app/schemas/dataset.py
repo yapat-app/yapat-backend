@@ -30,6 +30,7 @@ class Dataset(DatasetBase):
     default_snippet_set_id: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
+    recording_count: Optional[int] = None  # Number of recordings in this dataset
 
     class Config:
         from_attributes = True

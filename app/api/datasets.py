@@ -9,7 +9,7 @@ import csv
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 
 from app.api.deps import get_db, get_current_active_user
 from app.models.user import User, UserRole
@@ -57,8 +57,22 @@ def create_dataset(
     except Exception:
         task_id = None
 
+    # Create dataset response with recording_count
+    dataset_dict = {
+        "id": dataset.id,
+        "name": dataset.name,
+        "description": dataset.description,
+        "source_uri": dataset.source_uri,
+        "team_id": dataset.team_id,
+        "default_snippet_set_id": dataset.default_snippet_set_id,
+        "created_at": dataset.created_at,
+        "updated_at": dataset.updated_at,
+        "recording_count": 0,  # New datasets start with 0 recordings
+    }
+    dataset_response = Dataset(**dataset_dict)
+
     return DatasetCreationResponse(
-        dataset=dataset,
+        dataset=dataset_response,
         process_task_id=task_id,
         snippet_config_id=None,
         embedding_job_id=None,
@@ -73,7 +87,38 @@ def read_datasets(
         current_user: User = Depends(get_current_active_user),
 ):
     svc = DatasetService(db)
-    return svc.list_datasets(current_user=current_user, skip=skip, limit=limit)
+    datasets = svc.list_datasets(current_user=current_user, skip=skip, limit=limit)
+    
+    # Add recording count for each dataset
+    dataset_ids = [ds.id for ds in datasets]
+    if dataset_ids:
+        recording_counts = (
+            db.query(Recording.dataset_id, func.count(Recording.id).label('count'))
+            .filter(Recording.dataset_id.in_(dataset_ids))
+            .group_by(Recording.dataset_id)
+            .all()
+        )
+        count_map = {ds_id: count for ds_id, count in recording_counts}
+    else:
+        count_map = {}
+    
+    # Convert to schema and add recording_count
+    result = []
+    for dataset in datasets:
+        dataset_dict = {
+            "id": dataset.id,
+            "name": dataset.name,
+            "description": dataset.description,
+            "source_uri": dataset.source_uri,
+            "team_id": dataset.team_id,
+            "default_snippet_set_id": dataset.default_snippet_set_id,
+            "created_at": dataset.created_at,
+            "updated_at": dataset.updated_at,
+            "recording_count": count_map.get(dataset.id, 0),
+        }
+        result.append(Dataset(**dataset_dict))
+    
+    return result
 
 
 @router.get("/{dataset_id}", response_model=Dataset)
@@ -86,7 +131,26 @@ def read_dataset(
     dataset = svc.get_dataset(dataset_id)
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    return dataset
+    
+    # Add recording count
+    recording_count = (
+        db.query(func.count(Recording.id))
+        .filter(Recording.dataset_id == dataset_id)
+        .scalar()
+    ) or 0
+    
+    dataset_dict = {
+        "id": dataset.id,
+        "name": dataset.name,
+        "description": dataset.description,
+        "source_uri": dataset.source_uri,
+        "team_id": dataset.team_id,
+        "default_snippet_set_id": dataset.default_snippet_set_id,
+        "created_at": dataset.created_at,
+        "updated_at": dataset.updated_at,
+        "recording_count": recording_count,
+    }
+    return Dataset(**dataset_dict)
 
 
 @router.delete("/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
