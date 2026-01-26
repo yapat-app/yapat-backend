@@ -35,7 +35,8 @@ def suggest_species(query: str, limit: int = 10) -> List[Dict[str, Any]]:
     try:
         response = requests.get(
             f"{GBIF_API_BASE}/species/suggest",
-            params={"q": query, "limit": limit}
+            params={"q": query, "limit": limit},
+            timeout=5  # 5 second timeout to prevent hanging
         )
         response.raise_for_status()
         suggestions = response.json()
@@ -77,7 +78,8 @@ def search_species(
     try:
         response = requests.get(
             f"{GBIF_API_BASE}/species/search",
-            params=params
+            params=params,
+            timeout=10  # 10 second timeout for search queries
         )
         response.raise_for_status()
         data = response.json()
@@ -126,7 +128,10 @@ def resolve_taxon_id(taxon_id: str) -> Optional[Dict[str, Any]]:
         return None
     
     try:
-        response = requests.get(f"{GBIF_API_BASE}/species/{key}")
+        response = requests.get(
+            f"{GBIF_API_BASE}/species/{key}",
+            timeout=10  # 10 second timeout for resolution queries
+        )
         response.raise_for_status()
         data = response.json()
         
@@ -177,7 +182,8 @@ def match_species_name(name: str) -> Optional[Dict[str, Any]]:
     try:
         response = requests.get(
             f"{GBIF_API_V2_BASE}/species/match",
-            params={"name": name, "verbose": "true"}
+            params={"name": name, "verbose": "true"},
+            timeout=10  # 10 second timeout for match queries
         )
         response.raise_for_status()
         data = response.json()
