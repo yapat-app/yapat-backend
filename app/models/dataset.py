@@ -34,6 +34,12 @@ class Dataset(Base):
     source_uri = Column(String, nullable=False, index=True)  # Path to audio files directory
     team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"),
                      nullable=True)  # Nullable for admin-created datasets
+    default_snippet_set_id = Column(
+        Integer,
+        ForeignKey("snippet_sets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )  # Default SnippetSet for this dataset
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -45,7 +51,17 @@ class Dataset(Base):
         back_populates="dataset",
         cascade="all, delete-orphan"
     )
-    snippet_sets = relationship("SnippetSet", back_populates="dataset")
+    snippet_sets = relationship(
+        "SnippetSet",
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+        primaryjoin="Dataset.id == SnippetSet.dataset_id"
+    )
+    default_snippet_set = relationship(
+        "SnippetSet",
+        foreign_keys=[default_snippet_set_id],
+        post_update=True
+    )
     # Users with direct access to this dataset (via invitation, before team assignment)
     authorized_users = relationship("User", secondary=user_datasets, backref="accessible_datasets")
 

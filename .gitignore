@@ -26,3 +26,9 @@ env/
 
 # Logs
 *.log
+
+# Celery
+celerybeat-schedule
+
+# Data files
+data/test_dataset/

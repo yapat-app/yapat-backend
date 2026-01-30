@@ -40,6 +40,7 @@ class DatasetService:
             ValueError("team_id_required") if a non-admin creates dataset without team_id.
             ValueError("duplicate_dataset") if the dataset already exists.
             ValueError("team_not_found") if team_id is invalid.
+            ValueError("invalid_source_uri") if source_uri path does not exist.
         """
 
         # Non-admin users MUST supply a team_id
@@ -51,6 +52,9 @@ class DatasetService:
             team = self.db.query(TeamModel).filter(TeamModel.id == dataset_in.team_id).first()
             if not team:
                 raise ValueError("team_not_found")
+
+        # Validate source_uri path before committing
+        self.validate_source_uri(dataset_in.source_uri)
 
         # Proactive duplicate check for (team_id, source_uri)
         duplicate = (
@@ -121,6 +125,23 @@ class DatasetService:
 
     def get_dataset(self, dataset_id: int) -> Optional[DatasetModel]:
         return self.db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
+
+    # ---------------------------------------------------------
+    # Path validation
+    # ---------------------------------------------------------
+
+    def validate_source_uri(self, source_uri: str) -> None:
+        """
+        Validate that the source_uri path exists and is a directory.
+        
+        Raises:
+            ValueError("invalid_source_uri") if the path does not exist or is not a directory.
+        """
+        DATA_ROOT = settings.DATA_ROOT or "/data"
+        dataset_path = os.path.join(DATA_ROOT, source_uri)
+        
+        if not os.path.isdir(dataset_path):
+            raise ValueError("invalid_source_uri")
 
     # ---------------------------------------------------------
     # Recording discovery

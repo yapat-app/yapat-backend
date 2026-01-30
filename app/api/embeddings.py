@@ -3,17 +3,22 @@ Embedding job endpoints (updated for SnippetSet architecture)
 """
 
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_active_user
 from app.models.dataset import Dataset
 from app.services.embedding_service import EmbeddingService
+from app.services.snippet_set_service import SnippetSetService
 from app.tasks.embedding_tasks import run_embedding
 from app.schemas.embedding import (
     EmbeddingModel,
     EmbeddingJobCreateRequest,
     EmbeddingJobResponse,
+    SnippetSet,
+    SnippetSetWithStats,
+    SnippetSetDeleteRequest,
+    SnippetSetDeleteResponse,
 )
 from app.models.user import User
 
@@ -93,13 +98,20 @@ def create_embedding_job(
     # --------------------------
     # Create job (SnippetSet + EmbeddingJob)
     # --------------------------
-    job = service.create_embedding_job(
-        dataset,
-        model,
-        window_size=payload.window_size,
-        step_size=payload.step_size,
-        overlap=payload.overlap,
-    )
+    try:
+        job = service.create_embedding_job(
+            dataset,
+            model,
+            window_size=payload.window_size,
+            step_size=payload.step_size,
+            overlap=payload.overlap,
+        )
+    except ValueError as e:
+        # Handle duplicate job error
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e)
+        )
 
     # --------------------------
     # Trigger Celery worker
@@ -153,3 +165,135 @@ def get_embedding_job(
         celery_task_id=job.celery_task_id,
         status=job.status.value,
     )
+
+
+# ---------------------------------------------------------
+# SnippetSet Management
+# ---------------------------------------------------------
+
+@router.get("/datasets/{dataset_id}/snippet-sets", response_model=List[SnippetSet])
+def list_snippet_sets(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    List all snippet sets for a dataset.
+    
+    A snippet set represents a specific segmentation configuration
+    (window size, step size, overlap) for a dataset.
+    """
+    # Validate dataset exists
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    service = SnippetSetService(db)
+    return service.list_for_dataset(dataset_id)
+
+
+@router.get("/snippet-sets/{snippet_set_id}", response_model=SnippetSetWithStats)
+def get_snippet_set(
+    snippet_set_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Get a single snippet set with annotation statistics.
+    
+    Returns the snippet set configuration along with stats on:
+    - Total number of annotations
+    - Number of annotated snippets
+    - Total number of snippets
+    - Whether it has any annotations (protection flag)
+    """
+    service = SnippetSetService(db)
+    
+    try:
+        snippet_set = service.get(snippet_set_id)
+        stats = service.get_annotation_stats(snippet_set_id)
+        
+        return SnippetSetWithStats(
+            id=snippet_set.id,
+            dataset_id=snippet_set.dataset_id,
+            embedding_model_id=snippet_set.embedding_model_id,
+            window_size=snippet_set.window_size,
+            step_size=snippet_set.step_size,
+            overlap=snippet_set.overlap,
+            status=snippet_set.status.value,
+            created_at=snippet_set.created_at,
+            **stats
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete(
+    "/snippet-sets/{snippet_set_id}",
+    response_model=SnippetSetDeleteResponse,
+    status_code=status.HTTP_200_OK
+)
+def delete_snippet_set(
+    snippet_set_id: int,
+    delete_request: SnippetSetDeleteRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Delete a snippet set with annotation loss protection.
+    
+    **IMPORTANT**: Deleting a snippet set will delete all associated snippets
+    and their annotations. This operation cannot be undone.
+    
+    **Protection Mechanism**:
+    - If the snippet set contains annotations, deletion will fail unless
+      you explicitly acknowledge the data loss by setting
+      `acknowledge_annotation_loss: true` in the request body.
+    
+    **Use Case**:
+    - Safe to delete: Snippet sets with no annotations (e.g., test configurations)
+    - Requires acknowledgment: Snippet sets with any annotations
+    
+    **Example Request Body**:
+    ```json
+    {
+        "acknowledge_annotation_loss": true
+    }
+    ```
+    """
+    service = SnippetSetService(db)
+    
+    try:
+        # Check stats first to provide informative error
+        stats = service.get_annotation_stats(snippet_set_id)
+        
+        if stats["annotation_count"] > 0 and not delete_request.acknowledge_annotation_loss:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "annotation_loss_not_acknowledged",
+                    "message": (
+                        f"Cannot delete snippet set: it contains {stats['annotation_count']} "
+                        f"annotation(s) across {stats['annotated_snippet_count']} snippet(s). "
+                        f"To prevent accidental data loss, you must explicitly acknowledge this "
+                        f"by setting 'acknowledge_annotation_loss: true' in your request."
+                    ),
+                    "annotation_count": stats["annotation_count"],
+                    "annotated_snippet_count": stats["annotated_snippet_count"],
+                    "total_snippet_count": stats["total_snippet_count"],
+                }
+            )
+        
+        # Perform safe deletion
+        result = service.safe_delete(
+            snippet_set_id,
+            allow_with_annotations=delete_request.acknowledge_annotation_loss
+        )
+        
+        return SnippetSetDeleteResponse(**result)
+        
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        # This shouldn't happen due to above pre-check, but just in case
+        raise HTTPException(status_code=400, detail=str(e))

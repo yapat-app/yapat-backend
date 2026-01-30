@@ -122,6 +122,7 @@ class EmbeddingService:
         """
         Create an EmbeddingJob for a dataset × model.
         Ensures a SnippetSet exists (or creates one).
+        Prevents duplicate jobs for the same configuration.
         """
 
         snippet_set = self.get_or_create_snippet_set(
@@ -131,6 +132,26 @@ class EmbeddingService:
             step_size=step_size,
             overlap=overlap,
         )
+
+        # Check if a job already exists for this configuration
+        existing_job = (
+            self.db.query(EmbeddingJob)
+            .filter(
+                EmbeddingJob.dataset_id == dataset.id,
+                EmbeddingJob.embedding_model_id == model.id,
+                EmbeddingJob.snippet_set_id == snippet_set.id,
+            )
+            .first()
+        )
+
+        if existing_job:
+            status_msg = existing_job.status.value
+            raise ValueError(
+                f"An embedding job already exists for this configuration "
+                f"(dataset_id={dataset.id}, model_id={model.id}, snippet_set_id={snippet_set.id}). "
+                f"Existing job ID: {existing_job.id}, Status: {status_msg}. "
+                f"To create a new job, please delete the existing one first."
+            )
 
         job = EmbeddingJob(
             dataset_id=dataset.id,
@@ -208,6 +229,39 @@ class VectorStore:
         self.db.commit()
         return ev
 
+    def bulk_insert(self, embeddings: List[dict]) -> int:
+        """
+        Bulk insert multiple embedding vectors efficiently.
+        
+        Args:
+            embeddings: List of dicts with keys:
+                - snippet_id: int
+                - job_id: int
+                - model_id: int
+                - vector: list[float]
+        
+        Returns:
+            Number of embeddings inserted
+        """
+        if not embeddings:
+            return 0
+        
+        vectors = [
+            EmbeddingVector(
+                snippet_id=emb["snippet_id"],
+                embedding_job_id=emb["job_id"],
+                embedding_model_id=emb["model_id"],
+                dim=len(emb["vector"]),
+                vector=emb["vector"],
+            )
+            for emb in embeddings
+        ]
+        
+        self.db.bulk_save_objects(vectors)
+        self.db.commit()
+        
+        return len(vectors)
+
     def get(self, snippet_id: int, model_id: int):
         row = (
             self.db.query(EmbeddingVector)
@@ -216,38 +270,62 @@ class VectorStore:
         )
         return row
 
-    def search(self, model_id: int, query_vector, k: int = 10):
-        rows = (
-            self.db.query(EmbeddingVector)
-            .filter_by(embedding_model_id=model_id)
-            .all()
-        )
-
-        if not rows:
-            return []
-
-        import numpy as np
-
-        q = np.array(query_vector, dtype=float)
-        q_norm = np.linalg.norm(q)
-        if q_norm == 0:
-            return []
-
-        # Stack vectors into a matrix for vectorized computation
-        mat = np.array([r.vector for r in rows], dtype=float)
-
-        # Compute norms and cosine scores in batch
-        norms = np.linalg.norm(mat, axis=1)
-        valid = norms > 0
-
-        sims = np.zeros(len(rows))
-        sims[valid] = mat[valid].dot(q) / (norms[valid] * q_norm)
-
-        # Pair snippet_id with score
-        results = [
-            (rows[i].snippet_id, float(sims[i]))
-            for i in range(len(rows))
+    def search(
+        self, 
+        model_id: int, 
+        query_vector, 
+        k: int = 10,
+        snippet_set_id: Optional[int] = None,
+        dataset_id: Optional[int] = None
+    ):
+        """
+        Perform cosine similarity search using pgvector.
+        
+        Args:
+            model_id: Embedding model ID to search within
+            query_vector: Query embedding vector (list or array of floats)
+            k: Number of most similar results to return (default 10)
+            snippet_set_id: Optional filter to search only within a specific snippet set
+            dataset_id: Optional filter to search only within a specific dataset
+            
+        Returns:
+            List of (snippet_id, similarity_score) tuples, sorted by similarity (descending)
+        """
+        from sqlalchemy import text
+        
+        # Format vector for PostgreSQL: '[1,2,3]'
+        vector_str = '[' + ','.join(str(x) for x in query_vector) + ']'
+        
+        # Build SQL with pgvector's <=> cosine distance operator
+        sql_parts = [
+            "SELECT ev.snippet_id, ",
+            f"       (ev.vector <=> '{vector_str}'::vector) as distance ",
+            "FROM embedding_vectors ev "
         ]
-
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results[:k]
+        
+        params = {'model_id': model_id, 'limit': k}
+        
+        # Add joins if filtering by snippet_set or dataset
+        if snippet_set_id is not None or dataset_id is not None:
+            sql_parts.append("JOIN snippets s ON ev.snippet_id = s.id ")
+            if dataset_id is not None:
+                sql_parts.append("JOIN snippet_sets ss ON s.snippet_set_id = ss.id ")
+        
+        # Build WHERE clause
+        where = ["ev.embedding_model_id = :model_id"]
+        if snippet_set_id is not None:
+            where.append("s.snippet_set_id = :snippet_set_id")
+            params['snippet_set_id'] = snippet_set_id
+        if dataset_id is not None:
+            where.append("ss.dataset_id = :dataset_id")
+            params['dataset_id'] = dataset_id
+        
+        sql_parts.append("WHERE " + " AND ".join(where) + " ")
+        sql_parts.append("ORDER BY distance ASC, ev.snippet_id ASC LIMIT :limit")
+        
+        # Execute and return results
+        result = self.db.execute(text("".join(sql_parts)), params)
+        rows = result.fetchall()
+        
+        # Convert distance to similarity: similarity = 1 - distance
+        return [(int(row[0]), float(1.0 - row[1])) for row in rows]

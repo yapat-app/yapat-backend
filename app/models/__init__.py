@@ -15,6 +15,7 @@ from app.models.embedding import (
     EmbeddingVector,
     SnippetSet,
 )
+from app.models.user_feed import UserFeed
 
 __all__ = [
     "User",
@@ -28,4 +29,5 @@ __all__ = [
     "EmbeddingJob",
     "Annotation",
     "InvitationLink",
+    "UserFeed",
 ]

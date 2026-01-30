@@ -22,6 +22,32 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture
+def auth_headers(db_session):
+    """
+    Provide authentication headers for API tests.
+    Creates a test user and returns headers with a valid JWT token.
+    """
+    from app.models.user import User, UserRole
+    from app.core.security import create_access_token
+    
+    # Create test user if not exists
+    test_user = db_session.query(User).filter_by(email="test@example.com").first()
+    if not test_user:
+        test_user = User(
+            email="test@example.com",
+            hashed_password="dummy_hash",
+            role=UserRole.USER,
+        )
+        db_session.add(test_user)
+        db_session.commit()
+    
+    # Generate access token
+    access_token = create_access_token(data={"sub": test_user.email})
+    
+    return {"Authorization": f"Bearer {access_token}"}
+
+
 @pytest.fixture(autouse=True, scope="session")
 def celery_eager():
     """

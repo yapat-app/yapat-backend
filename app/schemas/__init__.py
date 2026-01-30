@@ -2,7 +2,10 @@
 Pydantic schemas (API models)
 """
 
-from app.schemas.annotation import Annotation, AnnotationCreate
+from app.schemas.annotation import (
+    Annotation, AnnotationCreate, 
+    DatasetAnnotationStats, AllDatasetsAnnotationStats
+)
 from app.schemas.dataset import Dataset, DatasetCreate, DatasetUpdate
 from app.schemas.invitation import InvitationLink, InvitationLinkCreate
 from app.schemas.recording import Recording, RecordingCreate
@@ -39,6 +42,8 @@ __all__ = [
 
     "Annotation",
     "AnnotationCreate",
+    "DatasetAnnotationStats",
+    "AllDatasetsAnnotationStats",
 
     "InvitationLink",
     "InvitationLinkCreate",
