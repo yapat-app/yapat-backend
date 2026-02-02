@@ -235,7 +235,7 @@ def freeze_label_space(
         
         return FreezeLabelSpaceResponse(
             conversation=result["conversation"],
-            taxonomy=result["taxonomy"]
+            taxonomy=CustomTaxonomyResponse.model_validate(result["taxonomy"])
         )
         
     except CustomTaxonomyServiceError as e:

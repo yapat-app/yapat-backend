@@ -6,7 +6,7 @@ This migration consolidates:
 - Label space and is_frozen columns
 - Message metadata column rename
 
-Revision ID: 2026_01_30_custom_taxonomies_consolidated
+Revision ID: 2026_01_30_custom_tax
 Revises: 2026_01_26_annotations_index
 Create Date: 2026-01-30
 
@@ -17,7 +17,7 @@ from sqlalchemy.dialects import postgresql
 
 
 # revision identifiers, used by Alembic.
-revision = '2026_01_30_custom_taxonomies_consolidated'
+revision = '2026_01_30_custom_tax'
 down_revision = '2026_01_26_annotations_index'
 branch_labels = None
 depends_on = None

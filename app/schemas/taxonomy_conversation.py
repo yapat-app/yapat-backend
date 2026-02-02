@@ -89,10 +89,19 @@ class FreezeLabelSpaceRequest(BaseModel):
 class FreezeLabelSpaceResponse(BaseModel):
     """Response after freezing label space"""
     conversation: ConversationResponse = Field(..., description="Frozen conversation")
-    taxonomy: Any = Field(..., description="Created custom taxonomy")  # Will be CustomTaxonomyResponse
+    taxonomy: "CustomTaxonomyResponse" = Field(..., description="Created custom taxonomy")
 
 
 class ConversationListResponse(BaseModel):
     """List response for conversations"""
     conversations: List[ConversationResponse]
     total: int
+
+
+# Resolve forward references after all imports are done
+def _rebuild_models():
+    """Rebuild models to resolve forward references"""
+    from app.schemas.custom_taxonomy import CustomTaxonomyResponse
+    FreezeLabelSpaceResponse.model_rebuild()
+
+_rebuild_models()
