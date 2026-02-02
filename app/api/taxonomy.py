@@ -5,8 +5,9 @@ Taxonomy endpoints for species/taxon search and resolution
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_active_user
+from app.api.deps import get_current_active_user, get_db
 from app.models.user import User
 from app.core import taxonomy
 
@@ -108,23 +109,25 @@ def search_taxa(
 
 @router.get("/resolve", response_model=TaxonDetails)
 def resolve_taxon(
-    id: str = Query(..., description="Namespaced taxon ID (e.g., 'gbif:2420576')"),
-    current_user: User = Depends(get_current_active_user)
+    id: str = Query(..., description="Namespaced taxon ID (e.g., 'gbif:2420576' or 'custom:uuid')"),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
 ):
     """
     Resolve a single taxon ID to detailed information.
     
+    Supports both GBIF taxonomies and custom taxonomies.
     Returns full taxonomic hierarchy, common names, and other metadata.
     Used for validating taxon IDs and displaying detailed information.
     """
-    # Validate format
-    if not taxonomy.TAXON_ID_PATTERN.match(id):
+    # Validate format (both GBIF and custom patterns)
+    if not taxonomy.TAXON_ID_PATTERN.match(id) and not taxonomy.CUSTOM_TAXON_ID_PATTERN.match(id):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid taxon ID format. Expected format: 'namespace:key' (e.g., 'gbif:2420576')"
+            detail=f"Invalid taxon ID format. Expected format: 'namespace:key' (e.g., 'gbif:2420576' or 'custom:uuid')"
         )
     
-    result = taxonomy.resolve_taxon_id(id)
+    result = taxonomy.resolve_taxon_id(id, db_session=db)
     if not result:
         raise HTTPException(
             status_code=404,
@@ -189,14 +192,16 @@ def match_taxon_name(
 
 @router.get("/validate", response_model=dict)
 def validate_taxon(
-    id: str = Query(..., description="Namespaced taxon ID to validate"),
-    current_user: User = Depends(get_current_active_user)
+    id: str = Query(..., description="Namespaced taxon ID to validate (e.g., 'gbif:2420576' or 'custom:uuid')"),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
 ):
     """
     Validate if a taxon ID exists and is resolvable.
     
+    Supports both GBIF taxonomies and custom taxonomies.
     Returns a simple boolean response indicating validity.
     """
-    is_valid = taxonomy.validate_taxon_id(id)
+    is_valid = taxonomy.validate_taxon_id(id, db_session=db)
     return {"taxon_id": id, "valid": is_valid}
 

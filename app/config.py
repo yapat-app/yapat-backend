@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     CELERY_TASK_TIME_LIMIT: int = 3600  # 1 hour max per task
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes limit
 
+    # OE_YAPAT Service (Custom Taxonomy Generation)
+    OE_YAPAT_SERVICE_URL: str = "http://localhost:8002"  
+    OE_YAPAT_API_KEY: Optional[str] = None
+    OE_YAPAT_TIMEOUT: int = 60  # seconds
+    OE_YAPAT_RETRY_ATTEMPTS: int = 3
+
     class Config:
         env_file = ".env"
         case_sensitive = True

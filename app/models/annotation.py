@@ -14,8 +14,9 @@ from app.database import Base
 
 # --- CHECK CONSTRAINT (PostgreSQL only) -----------------------------------
 
+# pattern to accept both GBIF (gbif:123) and custom (custom:uuid) taxonomies
 valid_taxon_constraint = CheckConstraint(
-    "taxon_id ~ '^[a-z]+:[0-9]+$'",
+    "taxon_id ~ '^([a-z]+:[0-9]+|custom:[a-f0-9-]+)$'",
     name="valid_taxon_id_format",
 )
 

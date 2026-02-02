@@ -21,3 +21,5 @@ matplotlib==3.8.2
 setuptools>=65.0.0
 pytest
 tensorflow
+httpx>=0.24.0
+tenacity>=8.0.0

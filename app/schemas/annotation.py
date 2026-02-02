@@ -8,14 +8,15 @@ from typing import Optional, Dict, Any
 import re
 
 
-TAXON_ID_PATTERN = re.compile(r'^[a-z]+:\d+$')
+# Updated pattern to accept both GBIF (gbif:123) and custom (custom:uuid) taxonomies
+TAXON_ID_PATTERN = re.compile(r'^([a-z]+:\d+|custom:[a-f0-9-]+)$')
 
 
 class AnnotationBase(BaseModel):
     taxon_id: Optional[str] = Field(
         None,
-        description="Namespaced taxon identifier (e.g., 'gbif:2420576'). Either taxon_id or species_name must be provided.",
-        pattern=r'^[a-z]+:\d+$'
+        description="Namespaced taxon identifier (e.g., 'gbif:2420576' or 'custom:uuid'). Either taxon_id or species_name must be provided.",
+        pattern=r'^([a-z]+:\d+|custom:[a-f0-9-]+)$'
     )
     species_name: Optional[str] = Field(
         None,
@@ -28,7 +29,7 @@ class AnnotationBase(BaseModel):
     def validate_taxon_id_format(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and not TAXON_ID_PATTERN.match(v):
             raise ValueError(
-                "taxon_id must be in format 'namespace:key' (e.g., 'gbif:2420576')"
+                "taxon_id must be in format 'namespace:key' (e.g., 'gbif:2420576' or 'custom:uuid')"
             )
         return v
     
