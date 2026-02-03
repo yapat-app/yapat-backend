@@ -63,21 +63,22 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    """Response for chat message with generated taxonomy"""
-    message: MessageResponse = Field(..., description="Assistant's response message")
-    generated_taxonomy: Optional[Dict[str, Any]] = Field(None, description="Generated taxonomy data if available")
-    conversation: ConversationResponse = Field(..., description="Updated conversation state")
+    """Response for chat message. Taxonomy for this turn is in message.message_metadata.taxonomy_data (nodes + metadata)."""
+    message: MessageResponse = Field(..., description="The new assistant message; use message_metadata.taxonomy_data.nodes for species list (indices 1, 2, 3...)")
+    conversation: ConversationResponse = Field(..., description="Updated conversation state (label_space, messages). Latest message in messages omits full taxonomy to avoid duplication.")
 
 
 class AddToLabelSpaceRequest(BaseModel):
-    """Request for adding a species to the label space"""
-    # No fields needed - the species info comes from the last assistant message
+    """Request for adding species to the label space"""
+    message_id: Optional[int] = Field(None, description="ID of the assistant message to add from. If not provided, uses the last assistant message.")
+    indices: Optional[List[int]] = Field(None, description="1-based indices of specific species to add (e.g., [1, 2, 3]). If not provided, adds all species from the message.")
 
 
 class AddToLabelSpaceResponse(BaseModel):
     """Response after adding to label space"""
-    conversation: ConversationResponse = Field(..., description="Updated conversation with new item in label_space")
-    added_item: LabelSpaceItem = Field(..., description="The item that was added")
+    conversation: ConversationResponse = Field(..., description="Updated conversation with new item(s) in label_space")
+    added_items: List[LabelSpaceItem] = Field(..., description="The item(s) that were added")
+    skipped_count: int = Field(0, description="Number of items that were skipped (duplicates or invalid indices)")
 
 
 class FreezeLabelSpaceRequest(BaseModel):

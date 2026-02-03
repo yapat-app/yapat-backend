@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from app.api.deps import get_current_active_user, get_db
 from app.models.user import User
-from app.models.team import TeamMembership
+from app.models.team import Team, TeamMembership
 from app.core.permissions import require_team_member, check_team_member, check_admin
 from app.schemas.custom_taxonomy import (
     CustomTaxonomyResponse,
@@ -38,6 +38,33 @@ from app.services.oe_yapat_service import OEYapatServiceError
 router = APIRouter()
 
 
+def _conversation_response_slim_message(conversation, message_id_to_slim: int) -> ConversationResponse:
+    """
+    Build ConversationResponse from conversation; for the message with the given id,
+    omit taxonomy_data from metadata so it only appears in the top-level message (no duplication).
+    """
+    conv = ConversationResponse.model_validate(conversation)
+    if not conv.messages:
+        return conv
+    new_messages = []
+    for m in conv.messages:
+        if m.id == message_id_to_slim and getattr(m, "metadata", None):
+            meta = m.metadata or {}
+            slim_meta = {k: v for k, v in meta.items() if k != "taxonomy_data"}
+            if "taxonomy_data" in meta:
+                slim_meta["_taxonomy_in_response_message"] = True
+            new_messages.append(MessageResponse(
+                id=m.id,
+                conversation_id=m.conversation_id,
+                role=m.role,
+                content=m.content,
+                metadata=slim_meta,
+            ))
+        else:
+            new_messages.append(m)
+    return conv.model_copy(update={"messages": new_messages})
+
+
 # ============================================================================
 # CHATBOT / CONVERSATION ENDPOINTS
 # ============================================================================
@@ -54,6 +81,13 @@ def start_conversation(
     Creates a new conversation context for generating a custom taxonomy.
     User must be a member of the specified team.
     """
+    # Verify team exists
+    team = db.query(Team).filter(Team.id == request.team_id).first()
+    if not team:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Team {request.team_id} not found"
+        )
     # Verify user is member of the team
     require_team_member(current_user, request.team_id, db)
     
@@ -106,11 +140,14 @@ async def send_message(
         # Refresh conversation to get updated messages
         db.refresh(conversation)
         
-        # Build response
+        # Build conversation for response: omit full taxonomy_data from the message we're returning at top level (no duplication)
+        conv_data = _conversation_response_slim_message(
+            conversation, result["assistant_message"].id
+        )
+        
         return ChatResponse(
             message=result["assistant_message"],
-            generated_taxonomy=result["taxonomy_data"],
-            conversation=conversation
+            conversation=conv_data
         )
         
     except OEYapatServiceError as e:
@@ -182,12 +219,15 @@ def add_to_label_space(
         result = custom_taxonomy_service.add_to_label_space(
             conversation_id=conversation_id,
             user_id=current_user.id,
-            db=db
+            db=db,
+            message_id=request.message_id,
+            indices=request.indices
         )
         
         return AddToLabelSpaceResponse(
             conversation=result["conversation"],
-            added_item=result["added_item"]
+            added_items=result["added_items"],
+            skipped_count=result["skipped_count"]
         )
         
     except CustomTaxonomyServiceError as e:

@@ -189,18 +189,24 @@ async def process_user_prompt(
 def add_to_label_space(
     conversation_id: int,
     user_id: int,
-    db: Session
+    db: Session,
+    message_id: Optional[int] = None,
+    indices: Optional[List[int]] = None
 ) -> Dict[str, Any]:
     """
-    Add the last assistant response to the label space list.
+    Add species from a specific assistant response to the label space list.
     
     Args:
         conversation_id: ID of the conversation
         user_id: ID of the user adding to label space
         db: Database session
+        message_id: Optional ID of the specific assistant message to add from.
+                   If not provided, uses the last assistant message.
+        indices: Optional list of 1-based indices to add specific species.
+                If not provided, adds all species from the message.
         
     Returns:
-        Dict with conversation and added item
+        Dict with conversation, added_items list, and skipped_count
         
     Raises:
         CustomTaxonomyServiceError: If conversation not found or already frozen
@@ -219,34 +225,78 @@ def add_to_label_space(
     if conversation.status != ConversationStatus.IN_PROGRESS:
         raise CustomTaxonomyServiceError("Conversation is not in progress")
     
-    # Find the last assistant message with taxonomy data
-    last_assistant_message = db.query(TaxonomyMessage).filter(
-        TaxonomyMessage.conversation_id == conversation_id,
-        TaxonomyMessage.role == MessageRole.ASSISTANT.value
-    ).order_by(TaxonomyMessage.created_at.desc()).first()
+    # Find the target assistant message
+    if message_id:
+        # Get specific message by ID
+        target_message = db.query(TaxonomyMessage).filter(
+            TaxonomyMessage.id == message_id,
+            TaxonomyMessage.conversation_id == conversation_id,
+            TaxonomyMessage.role == MessageRole.ASSISTANT.value
+        ).first()
+        
+        if not target_message:
+            raise CustomTaxonomyServiceError(f"Assistant message {message_id} not found in this conversation")
+    else:
+        # Get the last assistant message
+        target_message = db.query(TaxonomyMessage).filter(
+            TaxonomyMessage.conversation_id == conversation_id,
+            TaxonomyMessage.role == MessageRole.ASSISTANT.value
+        ).order_by(TaxonomyMessage.created_at.desc()).first()
     
-    if not last_assistant_message or not last_assistant_message.message_metadata:
-        raise CustomTaxonomyServiceError("No species data found in last message")
+    if not target_message or not target_message.message_metadata:
+        raise CustomTaxonomyServiceError("No species data found in the specified message")
     
-    taxonomy_data = last_assistant_message.message_metadata.get("taxonomy_data")
+    taxonomy_data = target_message.message_metadata.get("taxonomy_data")
     if not taxonomy_data:
         raise CustomTaxonomyServiceError("No species data found in last message")
     
     # oe_yapat returns taxonomy_data as { "nodes": [ {...}, ... ], "metadata": {...} }
     nodes = taxonomy_data.get("nodes") if isinstance(taxonomy_data.get("nodes"), list) else []
     if not nodes:
-        raise CustomTaxonomyServiceError("No species data found in last message")
+        raise CustomTaxonomyServiceError("No species data found in the specified message")
     
     # Initialize label_space if None
     if conversation.label_space is None:
         conversation.label_space = []
     
+    # Filter nodes by indices if provided
+    if indices is not None:
+        # Convert 1-based indices to 0-based and filter valid ones
+        selected_nodes = []
+        skipped = 0
+        for idx in indices:
+            zero_based = idx - 1
+            if 0 <= zero_based < len(nodes):
+                selected_nodes.append(nodes[zero_based])
+            else:
+                skipped += 1
+                logger.warning(f"Index {idx} out of range (1-{len(nodes)})")
+        nodes_to_add = selected_nodes
+        skipped_count = skipped
+    else:
+        # Add all nodes
+        nodes_to_add = nodes
+        skipped_count = 0
+    
+    if not nodes_to_add:
+        raise CustomTaxonomyServiceError("No valid indices provided or all indices were out of range")
+    
+    # Check for existing IDs to avoid duplicates
+    existing_ids = {item.get("taxon_id") for item in conversation.label_space if item.get("taxon_id")}
+    
     added_items = []
-    for node in nodes:
+    for node in nodes_to_add:
         # Each node has: id, name, scientific_name, rank, metadata (from oe_yapat)
         species_name = node.get("name") or node.get("canonical_name") or "Unknown"
         scientific_name = node.get("scientific_name")
         taxon_id = node.get("id") or node.get("taxon_id")
+        
+        # Skip duplicates
+        if taxon_id and taxon_id in existing_ids:
+            logger.info(f"Skipping duplicate: {species_name} ({taxon_id})")
+            skipped_count += 1
+            continue
+        
         node_meta = node.get("metadata") or {}
         if not isinstance(node_meta, dict):
             node_meta = {}
@@ -265,7 +315,28 @@ def add_to_label_space(
             "added_at": datetime.utcnow().isoformat()
         }
         conversation.label_space.append(new_item)
+        if taxon_id:
+            existing_ids.add(taxon_id)
         added_items.append(new_item)
+    
+    # SQLAlchemy does not detect in-place mutations of JSONB; must flag for persistence
+    flag_modified(conversation, "label_space")
+    conversation.updated_at = datetime.utcnow()
+    
+    names_added = ", ".join(i["name"] for i in added_items)
+    add_message(
+        conversation_id=conversation_id,
+        role=MessageRole.SYSTEM,
+        content=f"✓ Added '{names_added}' to your label space.",
+        db=db,
+        metadata={"action": "added_to_label_space", "item_ids": [i["id"] for i in added_items]}
+    )
+    
+    db.commit()
+    db.refresh(conversation)
+    
+    if not added_items:
+        raise CustomTaxonomyServiceError("All selected items were duplicates or invalid")
     
     # SQLAlchemy does not detect in-place mutations of JSONB; must flag for persistence
     flag_modified(conversation, "label_space")
@@ -286,7 +357,8 @@ def add_to_label_space(
     logger.info(f"Added %d item(s) to label space in conversation {conversation_id}", len(added_items))
     return {
         "conversation": conversation,
-        "added_item": added_items[0]
+        "added_items": added_items,
+        "skipped_count": skipped_count
     }
 
 
