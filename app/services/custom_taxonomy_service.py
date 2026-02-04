@@ -146,15 +146,25 @@ async def process_user_prompt(
             context={"conversation_id": conversation_id}
         )
         
-        # Extract taxonomy data
+        # Extract taxonomy data and response text
         taxonomy_data = response.get("taxonomy_data", {})
         metadata = response.get("metadata", {})
+        response_text = taxonomy_data.get("response_text") if isinstance(taxonomy_data, dict) else None
         
-        # Create assistant response message
+        # Use LLM's actual response text, or fallback to a generic message
+        if not response_text:
+            # Fallback message if no response text provided
+            if taxonomy_data and taxonomy_data.get("nodes"):
+                node_count = len(taxonomy_data.get("nodes", []))
+                response_text = f"I've found {node_count} relevant taxonomy entries based on your query. Please review them and let me know if you'd like to add them to your label space or refine the search."
+            else:
+                response_text = "I couldn't find any matching taxonomy entries for your query. Could you please rephrase or provide more details?"
+        
+        # Create assistant response message with actual LLM response
         assistant_message = add_message(
             conversation_id=conversation_id,
             role=MessageRole.ASSISTANT,
-            content="I've generated a custom taxonomy based on your requirements. Please review it and let me know if you'd like to accept it or refine it further.",
+            content=response_text,
             db=db,
             metadata={
                 "taxonomy_data": taxonomy_data,
