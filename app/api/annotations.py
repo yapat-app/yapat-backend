@@ -52,13 +52,41 @@ def create_annotation(
         taxon_id = matched['taxon_id']
         resolved = matched
     else:
-        # Validate and resolve taxon_id
-        resolved = taxonomy.resolve_taxon_id(taxon_id)
+        # Validate and resolve taxon_id (pass db session for custom taxonomies)
+        resolved = taxonomy.resolve_taxon_id(taxon_id, db_session=db)
         if not resolved:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid or unresolvable taxon_id: {taxon_id}"
             )
+        
+        # Check access for custom taxonomies
+        if resolved.get("taxonomy_type") == "custom":
+            from app.core.permissions import check_team_member, check_admin
+            from app.services.custom_taxonomy_service import get_taxonomy_by_id
+            from app.models.custom_taxonomy import TaxonomyStatus
+            
+            custom_taxonomy = get_taxonomy_by_id(taxon_id, db)
+            if not custom_taxonomy:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Custom taxonomy {taxon_id} not found"
+                )
+            
+            # Check if taxonomy is active
+            if custom_taxonomy.status != TaxonomyStatus.ACTIVE:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Taxonomy {taxon_id} is not active and cannot be used for annotation"
+                )
+            
+            # Check if user has access: must be team member or global taxonomy
+            if not custom_taxonomy.is_global:
+                if not check_team_member(current_user, custom_taxonomy.team_id, db) and not check_admin(current_user):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"You don't have access to use taxonomy {taxon_id}"
+                    )
     
     # Create annotation with resolved name snapshot
     annotation_data = annotation_in.model_dump(exclude={'species_name'})
@@ -102,13 +130,41 @@ def create_annotations_batch(
             taxon_id = matched['taxon_id']
             resolved = matched
         else:
-            # Validate and resolve taxon_id
-            resolved = taxonomy.resolve_taxon_id(taxon_id)
+            # Validate and resolve taxon_id (pass db session for custom taxonomies)
+            resolved = taxonomy.resolve_taxon_id(taxon_id, db_session=db)
             if not resolved:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid or unresolvable taxon_id: {taxon_id}"
                 )
+            
+            # Check access for custom taxonomies
+            if resolved.get("taxonomy_type") == "custom":
+                from app.core.permissions import check_team_member, check_admin
+                from app.services.custom_taxonomy_service import get_taxonomy_by_id
+                from app.models.custom_taxonomy import TaxonomyStatus
+                
+                custom_taxonomy = get_taxonomy_by_id(taxon_id, db)
+                if not custom_taxonomy:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Custom taxonomy {taxon_id} not found"
+                    )
+                
+                # Check if taxonomy is active
+                if custom_taxonomy.status != TaxonomyStatus.ACTIVE:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Taxonomy {taxon_id} is not active and cannot be used for annotation"
+                    )
+                
+                # Check if user has access: must be team member or global taxonomy
+                if not custom_taxonomy.is_global:
+                    if not check_team_member(current_user, custom_taxonomy.team_id, db) and not check_admin(current_user):
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail=f"You don't have access to use taxonomy {taxon_id}"
+                        )
         
         # Create annotation with resolved name snapshot
         annotation_data = annotation_in.model_dump(exclude={'species_name'})
