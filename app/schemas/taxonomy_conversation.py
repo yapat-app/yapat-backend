@@ -99,6 +99,14 @@ class ConversationListResponse(BaseModel):
     total: int
 
 
+class LabelSpaceResponse(BaseModel):
+    """Response for label space items"""
+    conversation_id: int = Field(..., description="ID of the conversation")
+    is_frozen: bool = Field(..., description="Whether the label space is frozen")
+    items: List[LabelSpaceItem] = Field(default_factory=list, description="List of items in the label space")
+    total: int = Field(..., description="Total number of items in the label space")
+
+
 # Resolve forward references after all imports are done
 def _rebuild_models():
     """Rebuild models to resolve forward references"""

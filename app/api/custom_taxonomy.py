@@ -29,6 +29,8 @@ from app.schemas.taxonomy_conversation import (
     FreezeLabelSpaceResponse,
     MessageResponse,
     ConversationListResponse,
+    LabelSpaceResponse,
+    LabelSpaceItem,
 )
 from app.services import custom_taxonomy_service
 from app.services.custom_taxonomy_service import CustomTaxonomyServiceError
@@ -189,6 +191,43 @@ def get_conversation(
     require_team_member(current_user, conversation.team_id, db)
     
     return conversation
+
+
+@router.get("/chat/{conversation_id}/label-space", response_model=LabelSpaceResponse)
+def get_label_space(
+    conversation_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get label space items for a conversation.
+    
+    Returns only the label space items without the full conversation data.
+    This is a convenient endpoint to fetch just the items added to the label space.
+    """
+    conversation = custom_taxonomy_service.get_conversation_by_id(conversation_id, db)
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Conversation {conversation_id} not found"
+        )
+    
+    # Verify user is member of the conversation's team
+    require_team_member(current_user, conversation.team_id, db)
+    
+    # Convert label_space from dict/list to LabelSpaceItem objects using Pydantic validation
+    label_space_items = []
+    if conversation.label_space:
+        for item in conversation.label_space:
+            # Pydantic will validate and convert dict to LabelSpaceItem
+            label_space_items.append(LabelSpaceItem.model_validate(item))
+    
+    return LabelSpaceResponse(
+        conversation_id=conversation.id,
+        is_frozen=conversation.is_frozen,
+        items=label_space_items,
+        total=len(label_space_items)
+    )
 
 
 @router.post("/chat/{conversation_id}/add", response_model=AddToLabelSpaceResponse)
