@@ -4,89 +4,145 @@ Taxonomy endpoints for species/taxon search and resolution
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_active_user, get_db
 from app.models.user import User
+from app.models.team import TeamMembership
 from app.core import taxonomy
+from app.services import custom_taxonomy_service
+from app.services.taxonomy_search_service import (
+    search_custom_taxonomies,
+    get_user_custom_taxonomy_ids,
+    sort_results_by_relevance
+)
+from app.schemas.custom_taxonomy import AvailableTaxonomy, AvailableTaxonomiesResponse
+from app.schemas.taxonomy import (
+    TaxonSuggestion,
+    TaxonSearchResult,
+    TaxonDetails,
+    BatchResolveRequest,
+    BatchResolveResponse
+)
+from app.models.custom_taxonomy import TaxonomyStatus
 
 
 router = APIRouter()
 
 
-# Response models
-class TaxonSuggestion(BaseModel):
-    taxon_id: str
-    canonical_name: Optional[str]
-    scientific_name: Optional[str]
-    rank: Optional[str]
-    kingdom: Optional[str]
-    status: Optional[str]
-
-
-class CommonName(BaseModel):
-    name: str
-    language: str
-
-
-class TaxonSearchResult(BaseModel):
-    taxon_id: str
-    canonical_name: Optional[str]
-    scientific_name: Optional[str]
-    rank: Optional[str]
-    kingdom: Optional[str]
-    status: Optional[str]
-    common_names: List[CommonName] = []
-    habitats: List[str] = []
-    taxonomic_status: Optional[str]
-
-
-class TaxonDetails(BaseModel):
-    taxon_id: str
-    canonical_name: Optional[str] = None
-    scientific_name: Optional[str] = None
-    rank: Optional[str] = None
-    status: Optional[str] = None
-    kingdom: Optional[str] = None
-    phylum: Optional[str] = None
-    class_: Optional[str] = None  # "class" is reserved keyword
-    order: Optional[str] = None
-    family: Optional[str] = None
-    genus: Optional[str] = None
-    common_names: List[CommonName] = []
-    habitats: List[str] = []
-    taxonomic_status: Optional[str] = None
-    match_type: Optional[str] = None  # For match endpoint
-    confidence: Optional[float] = None  # For match endpoint
-
-    class Config:
-        # Allow "class" field to be mapped from "class_"
-        fields = {'class_': 'class'}
-
-
-class BatchResolveRequest(BaseModel):
-    taxon_ids: List[str]
-
-
-class BatchResolveResponse(BaseModel):
-    results: dict  # taxon_id -> TaxonDetails or None
+@router.get("/available", response_model=AvailableTaxonomiesResponse)
+def get_available_taxonomies(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all taxonomies available to the current user.
+    
+    Returns both GBIF (standard) and custom taxonomies that the user has access to.
+    Custom taxonomies are filtered by:
+    - Team membership
+    - Global taxonomies (available to all)
+    - Active status only
+    """
+    taxonomies_list = []
+    
+    # Add GBIF taxonomy (always available)
+    taxonomies_list.append(AvailableTaxonomy(
+        taxonomy_id="gbif",
+        name="GBIF (Global Biodiversity Information Facility)",
+        type="gbif",
+        description="Standard global taxonomy from GBIF",
+        is_global=True
+    ))
+    
+    # Get user's team memberships
+    memberships = db.query(TeamMembership).filter(
+        TeamMembership.user_id == current_user.id
+    ).all()
+    
+    # Get custom taxonomies from user's teams and global taxonomies
+    seen_taxonomy_ids = {"gbif"}  # Track to avoid duplicates
+    for membership in memberships:
+        team_taxonomies = custom_taxonomy_service.get_available_taxonomies(
+            team_id=membership.team_id,
+            user_id=current_user.id,
+            db=db,
+            status=TaxonomyStatus.ACTIVE.value  # Only active taxonomies
+        )
+        for t in team_taxonomies:
+            if t.taxonomy_id not in seen_taxonomy_ids:
+                taxonomies_list.append(AvailableTaxonomy(
+                    taxonomy_id=t.taxonomy_id,
+                    name=t.name,
+                    type="custom",
+                    description=t.description,
+                    team_id=t.team_id,
+                    is_global=t.is_global,
+                    status=t.status
+                ))
+                seen_taxonomy_ids.add(t.taxonomy_id)
+    
+    return AvailableTaxonomiesResponse(
+        taxonomies=taxonomies_list,
+        total=len(taxonomies_list)
+    )
 
 
 @router.get("/suggest", response_model=List[TaxonSuggestion])
 def suggest_taxa(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(10, ge=1, le=50, description="Maximum number of suggestions"),
-    current_user: User = Depends(get_current_active_user)
+    taxonomy_ids: Optional[str] = Query(None, description="Comma-separated list of taxonomy IDs to filter by (e.g., 'gbif,custom:uuid1,custom:uuid2'). If not provided, searches all available taxonomies."),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
 ):
     """
     Fast autocomplete suggestions for taxon names.
     
     Optimized for real-time search as users type.
-    Returns a simplified list of matching taxa.
+    Can filter by specific taxonomies. If taxonomy_ids is provided, only searches
+    within those taxonomies. Otherwise searches all available taxonomies.
     """
-    suggestions = taxonomy.suggest_species(q, limit=limit)
-    return suggestions
+    suggestions = []
+    
+    # Parse taxonomy filter
+    selected_taxonomies = None
+    if taxonomy_ids:
+        selected_taxonomies = [tid.strip() for tid in taxonomy_ids.split(",") if tid.strip()]
+    
+    # If no filter or GBIF is included, search GBIF
+    if not selected_taxonomies or "gbif" in selected_taxonomies:
+        gbif_suggestions = taxonomy.suggest_species(q, limit=limit)
+        suggestions.extend(gbif_suggestions)
+    
+    # Search custom taxonomies if they're selected
+    if selected_taxonomies:
+        custom_taxonomy_ids = [tid for tid in selected_taxonomies if tid.startswith("custom:")]
+        if custom_taxonomy_ids:
+            custom_suggestions = search_custom_taxonomies(
+                query=q,
+                taxonomy_ids=custom_taxonomy_ids,
+                limit=limit,
+                current_user=current_user,
+                db=db
+            )
+            suggestions.extend(custom_suggestions)
+    else:
+        # Search all available custom taxonomies
+        all_custom_taxonomy_ids = get_user_custom_taxonomy_ids(current_user, db)
+        if all_custom_taxonomy_ids:
+            custom_suggestions = search_custom_taxonomies(
+                query=q,
+                taxonomy_ids=all_custom_taxonomy_ids,
+                limit=limit,
+                current_user=current_user,
+                db=db
+            )
+            suggestions.extend(custom_suggestions)
+    
+    # Sort by relevance and limit results
+    suggestions = sort_results_by_relevance(suggestions, q)
+    return suggestions[:limit]
 
 
 @router.get("/search", response_model=List[TaxonSearchResult])
@@ -95,16 +151,62 @@ def search_taxa(
     limit: int = Query(10, ge=1, le=100, description="Maximum number of results"),
     rank: Optional[str] = Query(None, description="Filter by rank (SPECIES, GENUS, FAMILY, etc.)"),
     status: str = Query("ACCEPTED", description="Filter by taxonomic status"),
-    current_user: User = Depends(get_current_active_user)
+    taxonomy_ids: Optional[str] = Query(None, description="Comma-separated list of taxonomy IDs to filter by (e.g., 'gbif,custom:uuid1,custom:uuid2'). If not provided, searches all available taxonomies."),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
 ):
     """
     Full text search over taxon names with filtering.
     
-    Supports filtering by rank and taxonomic status.
+    Supports filtering by rank, taxonomic status, and specific taxonomies.
+    Can filter by specific taxonomies. If taxonomy_ids is provided, only searches
+    within those taxonomies. Otherwise searches all available taxonomies.
     Returns detailed information including common names and habitats.
     """
-    results = taxonomy.search_species(q, limit=limit, rank=rank, status=status)
-    return results
+    results = []
+    
+    # Parse taxonomy filter
+    selected_taxonomies = None
+    if taxonomy_ids:
+        selected_taxonomies = [tid.strip() for tid in taxonomy_ids.split(",") if tid.strip()]
+    
+    # If no filter or GBIF is included, search GBIF
+    if not selected_taxonomies or "gbif" in selected_taxonomies:
+        gbif_results = taxonomy.search_species(q, limit=limit, rank=rank, status=status)
+        results.extend(gbif_results)
+    
+    # Search custom taxonomies if they're selected
+    if selected_taxonomies:
+        custom_taxonomy_ids = [tid for tid in selected_taxonomies if tid.startswith("custom:")]
+    else:
+        # Search all available custom taxonomies
+        custom_taxonomy_ids = get_user_custom_taxonomy_ids(current_user, db)
+    
+    if custom_taxonomy_ids:
+        custom_results = search_custom_taxonomies(
+            query=q,
+            taxonomy_ids=custom_taxonomy_ids,
+            limit=limit,
+            current_user=current_user,
+            db=db
+        )
+        # Convert to TaxonSearchResult format
+        for r in custom_results:
+            results.append({
+                "taxon_id": r["taxon_id"],
+                "canonical_name": r.get("canonical_name"),
+                "scientific_name": r.get("scientific_name"),
+                "rank": r.get("rank"),
+                "kingdom": r.get("kingdom"),
+                "status": r.get("status"),
+                "common_names": [],
+                "habitats": [],
+                "taxonomic_status": r.get("status")
+            })
+    
+    # Sort by relevance and limit results
+    results = sort_results_by_relevance(results, q)
+    return results[:limit]
 
 
 @router.get("/resolve", response_model=TaxonDetails)

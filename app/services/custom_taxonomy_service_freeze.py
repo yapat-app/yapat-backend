@@ -3,7 +3,7 @@ Freeze label space functionality for custom taxonomy service
 """
 
 import logging
-import uuid
+import secrets
 from typing import Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
@@ -67,8 +67,25 @@ def freeze_label_space(
     if not conversation.label_space or len(conversation.label_space) == 0:
         raise CustomTaxonomyServiceError("Label space is empty. Add at least one species before freezing.")
     
-    # Generate unique taxonomy ID
-    taxonomy_id = f"custom:{uuid.uuid4()}"
+    # Generate unique taxonomy ID using a shorter random hex string (8 characters)
+    # Keep trying until we get a unique one (very unlikely to conflict)
+    max_attempts = 10
+    for attempt in range(max_attempts):
+        short_id = secrets.token_hex(4)  # 4 bytes = 8 hex characters
+        taxonomy_id = f"custom:{short_id}"
+        
+        # Check if this ID already exists
+        existing = db.query(CustomTaxonomy).filter(
+            CustomTaxonomy.taxonomy_id == taxonomy_id
+        ).first()
+        
+        if not existing:
+            break
+        
+        if attempt == max_attempts - 1:
+            # Fallback to longer ID if we somehow hit conflicts
+            short_id = secrets.token_hex(8)  # 16 hex characters
+            taxonomy_id = f"custom:{short_id}"
     
     # Build taxonomy_data from label_space
     # Structure it as a flat list of nodes for simplicity

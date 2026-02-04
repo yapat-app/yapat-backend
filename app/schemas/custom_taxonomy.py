@@ -80,3 +80,20 @@ class TaxonResolution(BaseModel):
     taxonomy_id: str = Field(..., description="ID of the taxonomy this taxon belongs to")
     taxonomy_name: str = Field(..., description="Name of the taxonomy")
     metadata: Optional[Dict[str, Any]] = None
+
+
+class AvailableTaxonomy(BaseModel):
+    """A taxonomy available to the user"""
+    taxonomy_id: str = Field(..., description="Taxonomy identifier (e.g., 'gbif' or 'custom:uuid')")
+    name: str = Field(..., description="Taxonomy name")
+    type: str = Field(..., description="Taxonomy type: 'gbif' or 'custom'")
+    description: Optional[str] = Field(None, description="Taxonomy description")
+    team_id: Optional[int] = Field(None, description="Team ID (for custom taxonomies)")
+    is_global: bool = Field(False, description="Whether taxonomy is globally available")
+    status: Optional[str] = Field(None, description="Status (for custom taxonomies: active, draft, archived)")
+
+
+class AvailableTaxonomiesResponse(BaseModel):
+    """Response with all available taxonomies for a user"""
+    taxonomies: List[AvailableTaxonomy] = Field(..., description="List of available taxonomies")
+    total: int = Field(..., description="Total number of taxonomies")
