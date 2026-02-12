@@ -4,14 +4,21 @@ Dataset schemas
 
 from datetime import datetime
 from typing import Optional
+from enum import Enum
 
 from pydantic import BaseModel
+
+
+class DatasetType(str, Enum):
+    PAM = "PAM"
+    WEAKLY_LABELED = "WEAKLY_LABELED"
 
 
 class DatasetBase(BaseModel):
     name: str
     description: Optional[str] = None
     source_uri: Optional[str] = None
+    dataset_type: DatasetType = DatasetType.PAM
 
 
 class DatasetCreate(DatasetBase):
@@ -22,11 +29,13 @@ class DatasetUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     source_uri: Optional[str] = None
+    dataset_type: Optional[DatasetType] = None
 
 
 class Dataset(DatasetBase):
     id: int
     team_id: Optional[int] = None
+    dataset_type: Optional[DatasetType] = DatasetType.PAM
     default_snippet_set_id: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime] = None

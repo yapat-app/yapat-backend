@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     OE_YAPAT_API_KEY: Optional[str] = None
     OE_YAPAT_TIMEOUT: int = 60  # seconds
     OE_YAPAT_RETRY_ATTEMPTS: int = 3
+    
+    # WSSED GPU Server
+    WSSED_GPU_SERVER_URL: str = "http://localhost:8003"  # URL of GPU server running WSSED
+    WSSED_TIMEOUT: int = 300  # seconds (5 minutes for long operations)
+    WSSED_POLL_INTERVAL: int = 10  # seconds between status polls
 
     class Config:
         env_file = ".env"

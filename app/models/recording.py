@@ -31,3 +31,5 @@ class Recording(Base):
     # Relationships
     dataset = relationship("Dataset", back_populates="recordings")
     snippets = relationship("Snippet", back_populates="recording", cascade="all, delete-orphan")
+    wssed_predictions = relationship("WSSEDPrediction", back_populates="recording", cascade="all, delete-orphan")
+    wssed_strong_labels = relationship("WSSEDStrongLabel", back_populates="recording", cascade="all, delete-orphan")

@@ -2,11 +2,17 @@
 Dataset model
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Table, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Table, UniqueConstraint, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+import enum
 
 from app.database import Base
+
+
+class DatasetType(str, enum.Enum):
+    PAM = "PAM"
+    WEAKLY_LABELED = "WEAKLY_LABELED"
 
 
 # Association table for user-dataset direct access
@@ -32,6 +38,7 @@ class Dataset(Base):
     name = Column(String, nullable=False, index=True)
     description = Column(Text, nullable=True)
     source_uri = Column(String, nullable=False, index=True)  # Path to audio files directory
+    dataset_type = Column(SQLEnum(DatasetType), nullable=False, default=DatasetType.PAM, index=True)
     team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"),
                      nullable=True)  # Nullable for admin-created datasets
     default_snippet_set_id = Column(
@@ -64,4 +71,10 @@ class Dataset(Base):
     )
     # Users with direct access to this dataset (via invitation, before team assignment)
     authorized_users = relationship("User", secondary=user_datasets, backref="accessible_datasets")
+    # WSSED training jobs for this dataset
+    wssed_training_jobs = relationship(
+        "WSSEDTrainingJob",
+        back_populates="dataset",
+        cascade="all, delete-orphan"
+    )
 

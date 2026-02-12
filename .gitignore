@@ -31,4 +31,4 @@ env/
 celerybeat-schedule
 
 # Data files
-data/test_dataset/
+data/
