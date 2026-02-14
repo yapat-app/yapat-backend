@@ -121,6 +121,21 @@ If you prefer to run services manually:
    
    If not provided, defaults from `app/config.py` will be used.
 
+   **Species model weights (WSSED / Active Learning):**  
+   To use pre-trained species models, set `ACTIVE_LEARNING_MODELS_DIR` to the base directory that contains your `.pt` weights. Create one subdirectory per species (use lowercase, underscores for spaces), and place the checkpoint file inside it. The backend looks for filenames like `best_macro_model_segment.pt` or `best_micro_model.pt` (see `app/services/species_model_store.py`). Example:
+
+   ```text
+   models_AL/                    # ACTIVE_LEARNING_MODELS_DIR (e.g. ./models_AL or /path/to/models_AL)
+   └── my_species_name/
+       └── best_macro_model_segment.pt
+   ```
+
+   Add to `.env` (optional):
+
+   ```env
+   ACTIVE_LEARNING_MODELS_DIR=models_AL
+   ```
+
 5. **Run database migrations**
    ```bash
    alembic upgrade head
