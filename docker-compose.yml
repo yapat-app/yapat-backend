@@ -54,6 +54,8 @@ services:
       - BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
       - DATA_ROOT=/data
       - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
+      - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
+      - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
     ports:
       - "8000:8000"
     volumes:
@@ -65,12 +67,18 @@ services:
   celery-worker:
     build: .
     container_name: yapat-celery-worker
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 --queues=default,embeddings,processing,exports
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=default,embeddings,processing,exports
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -78,6 +86,8 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
       - DATA_ROOT=/data
       - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
+      - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
+      - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
@@ -100,6 +110,8 @@ services:
       - SECRET_KEY=${SECRET_KEY:-secret-key-change-in-production}
       - DATA_ROOT=/data
       - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
+      - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
+      - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro

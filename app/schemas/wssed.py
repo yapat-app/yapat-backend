@@ -200,3 +200,105 @@ class RetrainingResponse(BaseModel):
     message: str
     new_job_id: int
     feedback_labels_count: int
+
+
+# ============ ACTIVE LEARNING SCHEMAS ============
+
+class SpeciesModelCreate(BaseModel):
+    """Create or register a species-specific model"""
+    species_name: str = Field(..., description="Name of the species")
+    dataset_id: int = Field(..., description="ID of the dataset")
+    model_directory: str = Field(..., description="Base directory for species models (species-specific subdirectory will be created)")
+    metric_type: str = Field(default="macro", description="Metric type: 'macro' or 'micro'")
+    prediction_level: str = Field(default="segment", description="Prediction level: 'segment' or 'clip'")
+    model_version: Optional[str] = Field(None, description="Optional version identifier")
+    hyperparameters: Optional[Dict[str, Any]] = Field(None, description="Optional model hyperparameters")
+
+
+class SpeciesModel(BaseModel):
+    """Species-specific model response"""
+    id: int
+    species_name: str
+    dataset_id: int
+    model_directory: str
+    metric_type: str
+    prediction_level: str
+    model_version: Optional[str] = None
+    hyperparameters: Optional[Dict[str, Any]] = None
+    status: TrainingStatus
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ActiveLearningSuggestionsRequest(BaseModel):
+    """Request for active learning suggestions"""
+    snippet_set_id: int = Field(..., description="ID of the snippet set")
+    species_name: str = Field(..., description="Name of the species")
+    dataset_id: int = Field(..., description="ID of the dataset")
+    strategy: str = Field(default="uncertainty", description="Query strategy: 'uncertainty', 'diversity', 'density', 'random'")
+    k: int = Field(default=20, ge=1, le=100, description="Number of suggestions to return")
+    device: str = Field(default="cpu", description="Device for computation: 'cpu' or 'cuda'")
+    seed: int = Field(default=0, description="Random seed for reproducibility")
+
+
+class ActiveLearningSuggestion(BaseModel):
+    """Single active learning suggestion"""
+    snippet_id: int
+    predicted_probability: float
+
+
+class ActiveLearningSuggestionsResponse(BaseModel):
+    """Response with active learning suggestions"""
+    snippet_ids: List[int]
+    probs: List[float]
+    n_labeled: int
+    model_info: Dict[str, Any]
+    suggestions: List[ActiveLearningSuggestion]
+
+
+class ActiveLearningLabelSubmit(BaseModel):
+    """Submit a single label for active learning"""
+    snippet_set_id: int = Field(..., description="Snippet set ID")
+    species_name: str = Field(..., description="Species name")
+    dataset_id: int = Field(..., description="Dataset ID")
+    snippet_id: int = Field(..., description="Snippet ID to label")
+    label: int = Field(..., ge=0, le=1, description="Label: 0=reject (species not present), 1=accept (species present)")
+
+
+class ActiveLearningLabelResponse(BaseModel):
+    """Response after submitting active learning labels"""
+    added: int
+    labeled_count: int
+    retrained: bool
+    species_model_id: int
+    train_stats: Optional[Dict[str, Any]] = None
+    checkpoint: Optional[str] = None
+
+
+class ActiveLearningStats(BaseModel):
+    """Statistics for active learning"""
+    species_model_id: int
+    snippet_set_id: Optional[int] = None
+    total_predictions: int
+    labeled: int
+    unlabeled: int
+    accepted: int
+    rejected: int
+
+
+class SnippetLabelResponse(BaseModel):
+    """Response for a snippet label"""
+    id: int
+    species_model_id: int
+    snippet_id: int
+    predicted_label: float
+    confidence_score: Optional[float] = None
+    user_label: Optional[FeedbackType] = None
+    labeled_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

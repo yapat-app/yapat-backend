@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from samplers import entropy, diversity_to_labeled, knn_density
+from .samplers import entropy, diversity_to_labeled, knn_density
 
 class _LabeledDataset(Dataset):
     def __init__(self, X: np.ndarray, y: np.ndarray):

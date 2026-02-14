@@ -2,7 +2,7 @@
 WSSED models for training jobs, predictions, and strong labels
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float, Text, JSON, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float, Text, JSON, Enum as SQLEnum, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -83,3 +83,50 @@ class WSSEDStrongLabel(Base):
     # Relationships
     prediction = relationship("WSSEDPrediction", back_populates="strong_label")
     recording = relationship("Recording", back_populates="wssed_strong_labels")
+
+
+class WSSEDSpeciesModel(Base):
+    """Active Learning: Species-specific model metadata"""
+    __tablename__ = "wssed_species_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    species_name = Column(String, nullable=False, index=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True)
+    model_directory = Column(String, nullable=False)  # e.g., /path/to/models_AL
+    metric_type = Column(String, nullable=False, default="macro")  # "macro" or "micro"
+    prediction_level = Column(String, nullable=False, default="segment")  # "segment" or "clip"
+    model_version = Column(String, nullable=True)
+    hyperparameters = Column(JSON, nullable=True)
+    status = Column(SQLEnum(TrainingStatus), nullable=False, default=TrainingStatus.COMPLETED)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    # Relationships
+    dataset = relationship("Dataset", back_populates="wssed_species_models")
+    snippet_labels = relationship("WSSEDSnippetLabel", back_populates="species_model", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("species_name", "dataset_id", name="uq_species_model"),
+    )
+
+
+class WSSEDSnippetLabel(Base):
+    """Active Learning: Labels for audio snippets"""
+    __tablename__ = "wssed_snippet_labels"
+
+    id = Column(Integer, primary_key=True, index=True)
+    species_model_id = Column(Integer, ForeignKey("wssed_species_models.id", ondelete="CASCADE"), nullable=False, index=True)
+    snippet_id = Column(Integer, ForeignKey("snippets.id", ondelete="CASCADE"), nullable=False, index=True)
+    predicted_label = Column(Float, nullable=False)  # Model prediction (0-1)
+    confidence_score = Column(Float, nullable=True)  # Confidence from query strategy
+    user_label = Column(SQLEnum(FeedbackType, name='feedback_enum', create_type=False), nullable=True, index=True)  # User accept/reject
+    labeled_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # Relationships
+    species_model = relationship("WSSEDSpeciesModel", back_populates="snippet_labels")
+    snippet = relationship("Snippet", back_populates="wssed_snippet_labels")
+
+    __table_args__ = (
+        UniqueConstraint("species_model_id", "snippet_id", name="uq_species_snippet_label"),
+    )

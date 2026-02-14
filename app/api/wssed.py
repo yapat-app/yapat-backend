@@ -21,9 +21,20 @@ from app.schemas.wssed import (
     FeedbackStats,
     SpeciesList,
     DetectionResponse,
-    FeedbackType
+    FeedbackType,
+    # Active Learning schemas
+    SpeciesModelCreate,
+    SpeciesModel,
+    ActiveLearningSuggestionsRequest,
+    ActiveLearningSuggestionsResponse,
+    ActiveLearningSuggestion,
+    ActiveLearningLabelSubmit,
+    ActiveLearningLabelResponse,
+    ActiveLearningStats,
+    SnippetLabelResponse
 )
 from app.services.wssed_service import WSSEDService
+from app.services.wssed import ActiveLearningService
 from app.tasks.wssed_tasks import trigger_wssed_training, trigger_wssed_detection
 
 router = APIRouter()
@@ -325,3 +336,273 @@ def get_dataset_species(
         return service.get_dataset_species(dataset_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get species list: {str(e)}")
+
+
+# ============ ACTIVE LEARNING ENDPOINTS ============
+
+@router.post("/species-models", response_model=SpeciesModel, status_code=status.HTTP_201_CREATED)
+def register_species_model(
+    model_in: SpeciesModelCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Register a species-specific model for active learning.
+    
+    This creates or updates a species model entry. A species-specific subdirectory
+    will be created within the base model directory to store checkpoints for this species.
+    
+    Example: base_directory="/models" + species="FNJV Species" -> "/models/fnjv_species/"
+    """
+    service = ActiveLearningService(db)
+    
+    try:
+        model = service.register_species_model(
+            species_name=model_in.species_name,
+            dataset_id=model_in.dataset_id,
+            base_model_directory=model_in.model_directory,
+            metric_type=model_in.metric_type,
+            prediction_level=model_in.prediction_level,
+            model_version=model_in.model_version,
+            hyperparameters=model_in.hyperparameters
+        )
+        return model
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to register species model: {str(e)}")
+
+
+@router.get("/species-models", response_model=List[SpeciesModel])
+def list_species_models(
+    dataset_id: Optional[int] = Query(None, description="Filter by dataset ID"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    List all registered species models, optionally filtered by dataset.
+    """
+    service = ActiveLearningService(db)
+    
+    try:
+        models = service.list_species_models(dataset_id=dataset_id)
+        return models
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list species models: {str(e)}")
+
+
+@router.get("/species-models/{model_id}", response_model=SpeciesModel)
+def get_species_model(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Get a specific species model by ID.
+    """
+    service = ActiveLearningService(db)
+    
+    model = service.get_species_model(model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="Species model not found")
+    
+    return model
+
+
+@router.post("/active-learning/suggestions", response_model=ActiveLearningSuggestionsResponse)
+def get_active_learning_suggestions(
+    request: ActiveLearningSuggestionsRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Get active learning suggestions for a species and snippet set.
+    
+    This endpoint:
+    1. Loads the species-specific model
+    2. Loads embeddings for the snippet set
+    3. Applies the active learning query strategy
+    4. Returns the most informative snippets for labeling
+    
+    Query strategies:
+    - "uncertainty": Samples close to decision boundary (prob ~ 0.5)
+    - "diversity": Diverse samples using embedding space (requires Z_pool)
+    - "density": Samples in high-density regions (requires Z_pool)
+    - "random": Random sampling
+    """
+    service = ActiveLearningService(db)
+    
+    try:
+        result = service.get_suggestions(
+            snippet_set_id=request.snippet_set_id,
+            species_name=request.species_name,
+            dataset_id=request.dataset_id,
+            strategy=request.strategy,
+            k=request.k,
+            device=request.device,
+            seed=request.seed
+        )
+        
+        # Format response with suggestions (probs only)
+        suggestions = [
+            ActiveLearningSuggestion(
+                snippet_id=sid,
+                predicted_probability=prob
+            )
+            for sid, prob in zip(result["snippet_ids"], result["probs"])
+        ]
+        
+        return ActiveLearningSuggestionsResponse(
+            snippet_ids=result["snippet_ids"],
+            probs=result["probs"],
+            n_labeled=result["n_labeled"],
+            model_info=result["model_info"],
+            suggestions=suggestions
+        )
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get suggestions: {str(e)}")
+
+
+@router.post("/active-learning/labels", response_model=ActiveLearningLabelResponse)
+def submit_active_learning_labels(
+    label_data: ActiveLearningLabelSubmit,
+    device: str = Query("cpu", description="Device for training"),
+    epochs: int = Query(5, ge=1, le=100, description="Training epochs"),
+    lr: float = Query(1e-3, gt=0, description="Learning rate"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Submit a single user label for active learning and optionally trigger retraining.
+    
+    Label values:
+    - 0: Reject (species not present)
+    - 1: Accept (species present)
+    
+    The model will automatically retrain after every 5 labels.
+    """
+    service = ActiveLearningService(db)
+    
+    try:
+        # Convert single label to dict format for service
+        snippet_id_to_label = {label_data.snippet_id: label_data.label}
+        
+        result = service.submit_labels_and_maybe_retrain(
+            snippet_set_id=label_data.snippet_set_id,
+            species_name=label_data.species_name,
+            dataset_id=label_data.dataset_id,
+            snippet_id_to_label=snippet_id_to_label,
+            retrain_every=5,
+            device=device,
+            epochs=epochs,
+            lr=lr
+        )
+        
+        return ActiveLearningLabelResponse(**result)
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to submit labels: {str(e)}")
+
+
+@router.post("/active-learning/retrain", response_model=ActiveLearningLabelResponse)
+def manual_retrain_model(
+    snippet_set_id: int = Query(..., description="Snippet set ID"),
+    species_name: str = Query(..., description="Species name"),
+    dataset_id: int = Query(..., description="Dataset ID"),
+    device: str = Query("cpu", description="Device for training"),
+    epochs: int = Query(5, ge=1, le=100, description="Training epochs"),
+    lr: float = Query(1e-3, gt=0, description="Learning rate"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Manually trigger retraining for a species model.
+    
+    This endpoint allows you to retrain the model at any time,
+    regardless of the number of labels or automatic retraining schedule.
+    
+    The model will be retrained using all currently available labels
+    for the specified species in the given snippet set.
+    """
+    service = ActiveLearningService(db)
+    
+    try:
+        result = service.manual_retrain(
+            snippet_set_id=snippet_set_id,
+            species_name=species_name,
+            dataset_id=dataset_id,
+            device=device,
+            epochs=epochs,
+            lr=lr
+        )
+        
+        return ActiveLearningLabelResponse(**result)
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrain model: {str(e)}")
+
+
+@router.get("/active-learning/stats", response_model=ActiveLearningStats)
+def get_active_learning_stats(
+    species_model_id: int = Query(..., description="Species model ID"),
+    snippet_set_id: Optional[int] = Query(None, description="Optional snippet set filter"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Get statistics for active learning progress.
+    
+    Returns counts of total predictions, labeled, unlabeled, accepted, and rejected.
+    """
+    service = ActiveLearningService(db)
+    
+    try:
+        stats = service.get_statistics(
+            species_model_id=species_model_id,
+            snippet_set_id=snippet_set_id
+        )
+        return ActiveLearningStats(**stats)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
+
+
+@router.get("/species-models/{model_id}/labels", response_model=List[SnippetLabelResponse])
+def get_species_model_labels(
+    model_id: int,
+    snippet_set_id: Optional[int] = Query(None, description="Filter by snippet set"),
+    labeled_only: bool = Query(False, description="Return only labeled snippets"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Get all snippet labels for a species model.
+    
+    Useful for reviewing labeled data and monitoring active learning progress.
+    """
+    from app.models.wssed import WSSEDSnippetLabel
+    from app.models.snippet import Snippet
+    from sqlalchemy import and_
+    
+    query = db.query(WSSEDSnippetLabel).filter(
+        WSSEDSnippetLabel.species_model_id == model_id
+    )
+    
+    if snippet_set_id:
+        query = query.join(Snippet).filter(Snippet.snippet_set_id == snippet_set_id)
+    
+    if labeled_only:
+        query = query.filter(WSSEDSnippetLabel.user_label.isnot(None))
+    
+    labels = query.offset(skip).limit(limit).all()
+    
+    return labels

@@ -32,3 +32,6 @@ celerybeat-schedule
 
 # Data files
 data/
+
+# Active learning / trained model checkpoints
+models_AL/

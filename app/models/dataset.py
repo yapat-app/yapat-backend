@@ -77,4 +77,10 @@ class Dataset(Base):
         back_populates="dataset",
         cascade="all, delete-orphan"
     )
+    # WSSED species models for active learning
+    wssed_species_models = relationship(
+        "WSSEDSpeciesModel",
+        back_populates="dataset",
+        cascade="all, delete-orphan"
+    )
 

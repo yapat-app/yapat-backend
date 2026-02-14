@@ -27,6 +27,8 @@ from app.models.wssed import (
     WSSEDTrainingJob,
     WSSEDPrediction,
     WSSEDStrongLabel,
+    WSSEDSpeciesModel,
+    WSSEDSnippetLabel,
     TrainingStatus,
     FeedbackType,
 )
@@ -53,6 +55,8 @@ __all__ = [
     "WSSEDTrainingJob",
     "WSSEDPrediction",
     "WSSEDStrongLabel",
+    "WSSEDSpeciesModel",
+    "WSSEDSnippetLabel",
     "TrainingStatus",
     "FeedbackType",
 ]

@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     WSSED_GPU_SERVER_URL: str = "http://localhost:8003"  # URL of GPU server running WSSED
     WSSED_TIMEOUT: int = 300  # seconds (5 minutes for long operations)
     WSSED_POLL_INTERVAL: int = 10  # seconds between status polls
+    
+    # Active Learning - Species Models
+    ACTIVE_LEARNING_MODELS_DIR: Optional[str] = None  # Directory containing pre-trained species models
+    AUTO_REGISTER_SPECIES_MODELS: bool = True  # Automatically register species models for WEAKLY_LABELED datasets
 
     class Config:
         env_file = ".env"
