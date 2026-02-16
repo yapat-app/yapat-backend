@@ -61,6 +61,8 @@ services:
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      # Mount host directory for species models (set HOST_MODELS_AL e.g. /srv/DATA01/yapat/yapat-backend so models_AL is at /app/models_AL)
+      - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL:ro
     restart: unless-stopped
 
   # Celery worker for asynchronous task processing
@@ -91,6 +93,7 @@ services:
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL:ro
     restart: unless-stopped
 
   # Celery beat scheduler for periodic tasks
@@ -115,6 +118,7 @@ services:
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL:ro
     restart: unless-stopped
 
   # Flower monitoring dashboard for Celery

@@ -7,11 +7,15 @@ Main orchestration service for active learning with species-specific models.
 from typing import Dict, List, Any, Optional
 import logging
 from pathlib import Path
+from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 import torch
 import numpy as np
 
+import os
+
+from app.config import settings
 from app.models.wssed import WSSEDSpeciesModel, WSSEDSnippetLabel, FeedbackType
 from app.models.snippet import Snippet
 from app.models.embedding import SnippetSet
@@ -22,6 +26,24 @@ from app.services.wssed.prediction_handler import PredictionHandler
 from active_learning.active_learning import ActiveLearning
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_model_directory(species_model: WSSEDSpeciesModel) -> str:
+    """
+    Resolve the filesystem path for a species model so it works across deployments.
+
+    The database stores an absolute path (e.g. /model_AL/boaran) from when the model
+    was registered. On another server, that path may not exist. If ACTIVE_LEARNING_MODELS_DIR
+    is set, we resolve to <ACTIVE_LEARNING_MODELS_DIR>/<species_subdir> so the same
+    DB can be used with a different models directory (e.g. /srv/DATA01/.../models_AL).
+    """
+    stored = species_model.model_directory
+    if not settings.ACTIVE_LEARNING_MODELS_DIR:
+        return stored
+    # Use current base + last path component of stored path (the species subdir name)
+    species_subdir = os.path.basename(stored.rstrip(os.sep))
+    resolved = os.path.join(settings.ACTIVE_LEARNING_MODELS_DIR, species_subdir)
+    return resolved
 
 
 class ActiveLearningService:
@@ -124,9 +146,9 @@ class ActiveLearningService:
         # Load embeddings
         X_pool, Z_pool, snippet_ids = self.data_loader.load_embedding_pool(snippet_set_id)
 
-        # Load model checkpoint
+        # Load model checkpoint (resolve path so it works across deployments)
         model = self.model_store.load_model(
-            model_directory=species_model.model_directory,
+            model_directory=_resolve_model_directory(species_model),
             metric_type=species_model.metric_type,
             prediction_level=species_model.prediction_level
         )
@@ -244,9 +266,9 @@ class ActiveLearningService:
         # Load embeddings
         X_pool, Z_pool, snippet_ids = self.data_loader.load_embedding_pool(snippet_set_id)
 
-        # Load model
+        # Load model (resolve path so it works across environments)
         model = self.model_store.load_model(
-            model_directory=species_model.model_directory,
+            model_directory=_resolve_model_directory(species_model),
             metric_type=species_model.metric_type,
             prediction_level=species_model.prediction_level
         )
@@ -340,9 +362,9 @@ class ActiveLearningService:
         # Load embeddings
         X_pool, Z_pool, snippet_ids = self.data_loader.load_embedding_pool(snippet_set_id)
 
-        # Load model
+        # Load model (resolve path so it works across deployments)
         model = self.model_store.load_model(
-            model_directory=species_model.model_directory,
+            model_directory=_resolve_model_directory(species_model),
             metric_type=species_model.metric_type,
             prediction_level=species_model.prediction_level
         )
@@ -396,6 +418,9 @@ class ActiveLearningService:
     ) -> Dict[str, Any]:
         """
         Internal method to perform model retraining and save checkpoint.
+
+        Saves the main checkpoint (overwritten each time, used for loading) and
+        a timestamped copy under checkpoints/ for history.
         
         Args:
             species_model: Species model instance
@@ -408,30 +433,44 @@ class ActiveLearningService:
             version_suffix: Suffix for version string (e.g., "_manual")
             
         Returns:
-            Dictionary with retraining results
+            Dictionary with retraining results (checkpoint, checkpoint_history, train_stats, ...)
         """
         # Perform retraining
         stats = al.retrain(model, device=device, epochs=epochs, lr=lr)
-        
-        # Save the updated model
+
+        resolved_dir = _resolve_model_directory(species_model)
+        # Save the updated model (main file used for loading)
         model_path = self.model_store.get_model_path(
-            model_directory=species_model.model_directory,
+            model_directory=resolved_dir,
             metric_type=species_model.metric_type,
             prediction_level=species_model.prediction_level
         )
         model_path = Path(model_path)
         model_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save model checkpoint
-        torch.save({
+        checkpoint_payload = {
             'model_state_dict': model.state_dict(),
             'train_stats': stats,
             'labeled_count': labeled_count,
-        }, str(model_path))
+        }
+
+        # Save main checkpoint (overwrites; this is what we load)
+        torch.save(checkpoint_payload, str(model_path))
         logger.info(f"Checkpoint saved to {model_path.resolve()}")
-        
+
+        # Save a copy at each retrain for history (checkpoints/checkpoint_n{labeled_count}_{timestamp}{suffix}.pt)
+        checkpoint_dir = model_path.parent / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        safe_suffix = version_suffix.replace(" ", "_") if version_suffix else ""
+        history_name = f"checkpoint_n{labeled_count}_{ts}{safe_suffix}.pt"
+        history_path = checkpoint_dir / history_name
+        checkpoint_payload['saved_at'] = datetime.utcnow().isoformat() + "Z"
+        torch.save(checkpoint_payload, str(history_path))
+        logger.info(f"Checkpoint copy saved to {history_path.resolve()}")
+
         # Clear cache to force reload next time
-        self.model_store.clear_cache(species_model.model_directory)
+        self.model_store.clear_cache(resolved_dir)
         
         # Update model version
         version = f"v{labeled_count}{version_suffix}"
@@ -442,6 +481,7 @@ class ActiveLearningService:
             "species_model_id": species_model.id,
             "train_stats": stats,
             "checkpoint": str(model_path.resolve()),
+            "checkpoint_history": str(history_path.resolve()),
             "labeled_count": labeled_count
         }
 
@@ -552,7 +592,7 @@ class ActiveLearningService:
                     snippet_set_id
                 )
                 model = self.model_store.load_model(
-                    model_directory=species_model.model_directory,
+                    model_directory=_resolve_model_directory(species_model),
                     metric_type=species_model.metric_type,
                     prediction_level=species_model.prediction_level,
                 )
