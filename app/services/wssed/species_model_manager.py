@@ -9,7 +9,7 @@ import os
 import logging
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 
 from app.models.wssed import WSSEDSpeciesModel, TrainingStatus
 
@@ -71,10 +71,10 @@ class SpeciesModelManager:
         os.makedirs(species_model_directory, exist_ok=True)
         logger.info(f"Species model directory: {species_model_directory}")
         
-        # Check if model already exists
+        # Check if model already exists (case-insensitive species name match)
         existing_model = self.db.query(WSSEDSpeciesModel).filter(
             and_(
-                WSSEDSpeciesModel.species_name == species_name,
+                func.lower(WSSEDSpeciesModel.species_name) == species_name.lower(),
                 WSSEDSpeciesModel.dataset_id == dataset_id
             )
         ).first()
@@ -117,10 +117,10 @@ class SpeciesModelManager:
     def get_by_name(
         self, species_name: str, dataset_id: int
     ) -> Optional[WSSEDSpeciesModel]:
-        """Get a species model by name and dataset (exact match on species_name)."""
+        """Get a species model by name and dataset (case-insensitive match on species_name)."""
         return self.db.query(WSSEDSpeciesModel).filter(
             and_(
-                WSSEDSpeciesModel.species_name == species_name,
+                func.lower(WSSEDSpeciesModel.species_name) == species_name.lower(),
                 WSSEDSpeciesModel.dataset_id == dataset_id
             )
         ).first()
