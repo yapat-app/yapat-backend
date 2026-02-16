@@ -3,7 +3,7 @@ Celery tasks for dataset scanning and orchestration.
 """
 
 from contextlib import contextmanager
-from celery import shared_task
+from celery import shared_task, chain
 import os
 import logging
 
@@ -81,25 +81,22 @@ def process_dataset(self, dataset_id: int):
     - Only scanning runs at dataset creation
     - Snippet generation is triggered by embedding jobs, not datasets
     - For WEAKLY_LABELED datasets, auto-register species models after scanning
+      (chained so it runs after scan completes and recordings exist)
     """
-    # Start scanning
-    scan_result = scan_dataset.delay(dataset_id)
-    
-    # Chain auto-registration after scanning completes
-    # This will only register models if:
-    # - AUTO_REGISTER_SPECIES_MODELS is True
-    # - ACTIVE_LEARNING_MODELS_DIR is configured
-    # - Dataset type is WEAKLY_LABELED
-    auto_register_result = auto_register_species_models.apply_async(
-        args=[dataset_id],
-        link_error=None  # Don't fail the whole pipeline if auto-registration fails
+    # Chain: scan first, then auto-register so species list is available
+    pipeline = chain(
+        scan_dataset.s(dataset_id),
+        auto_register_species_models.s()
     )
+    result = pipeline.apply_async()
 
     return {
         "status": "submitted",
         "dataset_id": dataset_id,
-        "scan_task_id": scan_result.id,
-        "auto_register_task_id": auto_register_result.id,
+        "pipeline_task_id": result.id,
+        # Backward compatibility: chain runs scan then auto_register; one task id for the pipeline
+        "scan_task_id": result.id,
+        "auto_register_task_id": result.id,
     }
 
 @shared_task(bind=True)
@@ -118,23 +115,42 @@ def generate_snippets(self, dataset_id: int, snippet_set_id: int):
 # --------------------------------------------------------------------
 
 @celery_app.task(bind=True, name="app.tasks.processing_tasks.auto_register_species_models")
-def auto_register_species_models(self, dataset_id: int):
+def auto_register_species_models(self, scan_result=None):
     """
     Automatically register species models for a WEAKLY_LABELED dataset.
-    
+    Intended to be chained after scan_dataset: receives scan result and extracts dataset_id.
+    Can also be called with a single int (dataset_id) for backward compatibility.
+
     This task:
     1. Checks if dataset type is WEAKLY_LABELED
     2. Extracts species from filenames (FNJV format)
     3. Registers a species model for each unique species
-    
+
     Args:
-        dataset_id: ID of the dataset
-    
+        scan_result: When chained, the return value of scan_dataset (dict with dataset_id, status).
+                     If an int, treated as dataset_id for direct invocation.
+
     Returns:
         dict with status and registered species
     """
+    # Support both chained call (scan_result dict) and direct call (dataset_id int)
+    if isinstance(scan_result, dict):
+        if scan_result.get("status") != "ok":
+            logger.info(
+                "Skipping auto-registration: scan did not complete successfully: %s",
+                scan_result.get("message", scan_result),
+            )
+            return {"status": "skipped", "reason": "scan_failed", "scan_result": scan_result}
+        dataset_id = scan_result.get("dataset_id")
+    else:
+        dataset_id = scan_result
+
+    if dataset_id is None:
+        logger.warning("Skipping auto-registration: no dataset_id")
+        return {"status": "skipped", "reason": "no_dataset_id"}
+
     logger.info(f"Starting auto-registration of species models for dataset {dataset_id}")
-    
+
     # Check if auto-registration is enabled
     if not settings.AUTO_REGISTER_SPECIES_MODELS:
         logger.info("Auto-registration disabled in settings")

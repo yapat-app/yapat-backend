@@ -63,9 +63,9 @@ class SpeciesModelManager:
         Returns:
             WSSEDSpeciesModel instance
         """
-        # Create species-specific subdirectory
-        safe_species_name = self.get_safe_directory_name(species_name)
-        species_model_directory = os.path.join(base_model_directory, safe_species_name)
+        # Species-specific subdirectory: safe name from species (e.g. Dendropsophus_nanus -> dendropsophus_nanus)
+        dir_name = self.get_safe_directory_name(species_name)
+        species_model_directory = os.path.join(base_model_directory, dir_name)
         
         # Create directory if it doesn't exist
         os.makedirs(species_model_directory, exist_ok=True)
@@ -117,7 +117,7 @@ class SpeciesModelManager:
     def get_by_name(
         self, species_name: str, dataset_id: int
     ) -> Optional[WSSEDSpeciesModel]:
-        """Get a species model by name and dataset."""
+        """Get a species model by name and dataset (exact match on species_name)."""
         return self.db.query(WSSEDSpeciesModel).filter(
             and_(
                 WSSEDSpeciesModel.species_name == species_name,

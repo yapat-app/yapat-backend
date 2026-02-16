@@ -17,7 +17,7 @@ from app.models.wssed import WSSEDSnippetLabel
 logger = logging.getLogger(__name__)
 
 # Species to class index mapping for multi-class models
-# Based on WSSED training with 4 species: DENMIN, BOARAN, DENNAN, LEPFUS
+# Based on WSSED training; use scientific names (Genus_species) as in FNJV filenames
 SPECIES_TO_CLASS_IDX = {
     "Dendropsophus_minutus": 0,
     "Boana_raniceps": 1,
@@ -56,9 +56,9 @@ class PredictionHandler:
         model.eval()
         model.to(device)
         
-        # Get class index for this species
+        # Get class index for this species (scientific name, e.g. Dendropsophus_nanus)
         class_idx = SPECIES_TO_CLASS_IDX.get(species_name)
-        
+
         out = []
         with torch.no_grad():
             for i in range(0, len(X_np), batch_size):
