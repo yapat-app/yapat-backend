@@ -4,7 +4,7 @@ Configuration
 
 from typing import Optional, Union
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -62,9 +62,11 @@ class Settings(BaseSettings):
     OE_YAPAT_TIMEOUT: int = 60  # seconds
     OE_YAPAT_RETRY_ATTEMPTS: int = 3
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore",  # Ignore env vars not in this model (e.g. ACTIVE_LEARNING_* from other branches)
+    )
 
 
 settings = Settings()

@@ -415,11 +415,15 @@ def resolve_taxon(
     Returns full taxonomic hierarchy, common names, and other metadata.
     Used for validating taxon IDs and displaying detailed information.
     """
-    # Validate format (both GBIF and custom patterns)
-    if not taxonomy.TAXON_ID_PATTERN.match(id) and not taxonomy.CUSTOM_TAXON_ID_PATTERN.match(id):
+    # Validate format (digits key, alphanumeric key e.g. local:slug, or custom:uuid)
+    if not (
+        taxonomy.TAXON_ID_PATTERN.match(id)
+        or taxonomy.TAXON_ID_ALNUM_PATTERN.match(id)
+        or taxonomy.CUSTOM_TAXON_ID_PATTERN.match(id)
+    ):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid taxon ID format. Expected format: 'namespace:key' (e.g., 'gbif:2420576' or 'custom:uuid')"
+            detail=f"Invalid taxon ID format. Expected format: 'namespace:key' (e.g., 'gbif:2420576', 'local:species_slug', or 'custom:uuid')"
         )
     
     result = taxonomy.resolve_taxon_id(id, db_session=db)
@@ -443,10 +447,14 @@ def batch_resolve_taxa(
     Returns a dictionary mapping each taxon ID to its resolved data.
     If a taxon ID cannot be resolved, its value will be null.
     """
-    # Validate all IDs first
+    # Validate all IDs first (digits key, alphanumeric key, or custom:uuid)
     invalid_ids = []
     for taxon_id in request.taxon_ids:
-        if not taxonomy.TAXON_ID_PATTERN.match(taxon_id):
+        if not (
+            taxonomy.TAXON_ID_PATTERN.match(taxon_id)
+            or taxonomy.TAXON_ID_ALNUM_PATTERN.match(taxon_id)
+            or taxonomy.CUSTOM_TAXON_ID_PATTERN.match(taxon_id)
+        ):
             invalid_ids.append(taxon_id)
     
     if invalid_ids:

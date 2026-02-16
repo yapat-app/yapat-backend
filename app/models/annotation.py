@@ -4,7 +4,7 @@ Annotation model
 
 from sqlalchemy import (
     Column, Integer, String, DateTime, ForeignKey,
-    Text, JSON, Float, CheckConstraint, event
+    Text, JSON, Float, CheckConstraint, UniqueConstraint, event
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -14,9 +14,9 @@ from app.database import Base
 
 # --- CHECK CONSTRAINT (PostgreSQL only) -----------------------------------
 
-# pattern to accept both GBIF (gbif:123) and custom (custom:uuid) taxonomies
+# pattern: namespace:key (key = digits or alphanumeric/underscore/hyphen) or custom:uuid
 valid_taxon_constraint = CheckConstraint(
-    "taxon_id ~ '^([a-z]+:[0-9]+|custom:[a-f0-9-]+)$'",
+    "taxon_id ~ '^([a-z]+:[a-zA-Z0-9_-]+|custom:[a-f0-9-]+)$'",
     name="valid_taxon_id_format",
 )
 
@@ -53,4 +53,5 @@ class Annotation(Base):
 
     __table_args__ = (
         valid_taxon_constraint,
+        UniqueConstraint("snippet_id", "taxon_id", name="uq_annotations_snippet_taxon"),
     )

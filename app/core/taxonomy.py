@@ -12,20 +12,29 @@ import re
 
 GBIF_API_BASE = "https://api.gbif.org/v1"
 GBIF_API_V2_BASE = "https://api.gbif.org/v2"
+# Digits-only key (gbif, wiki, envo, etc.)
 TAXON_ID_PATTERN = re.compile(r'^([a-z]+):(\d+)$')
+# Alphanumeric key (e.g. local:species_slug)
+TAXON_ID_ALNUM_PATTERN = re.compile(r'^([a-z]+):([a-zA-Z0-9_-]+)$')
 CUSTOM_TAXON_ID_PATTERN = re.compile(r'^(custom:[a-f0-9-]+)$')
 
 
 def parse_taxon_id(taxon_id: str) -> Optional[Dict[str, Any]]:
-    """Parse a namespaced taxon ID (e.g., 'gbif:2420576' or 'custom:uuid') into namespace and key"""
-    # Try GBIF pattern first
+    """Parse a namespaced taxon ID (e.g., 'gbif:2420576', 'custom:uuid', 'local:species_slug') into namespace and key"""
+    # Try digits-only pattern first (gbif, wiki, envo, ols)
     match = TAXON_ID_PATTERN.match(taxon_id)
     if match:
         return {
             "namespace": match.group(1),
             "key": match.group(2)
         }
-    
+    # Try alphanumeric key (e.g. local:vesperis_iridescentis)
+    match = TAXON_ID_ALNUM_PATTERN.match(taxon_id)
+    if match:
+        return {
+            "namespace": match.group(1),
+            "key": match.group(2)
+        }
     # Try custom taxonomy pattern
     match = CUSTOM_TAXON_ID_PATTERN.match(taxon_id)
     if match:
@@ -33,7 +42,6 @@ def parse_taxon_id(taxon_id: str) -> Optional[Dict[str, Any]]:
             "namespace": "custom",
             "key": taxon_id  # Full custom:uuid
         }
-    
     return None
 
 
@@ -193,6 +201,17 @@ def resolve_taxon_id(taxon_id: str, db_session=None) -> Optional[Dict[str, Any]]
             }
         except requests.RequestException:
             return None
+
+    # Handle wiki / envo / ols / local: accept as valid IDs from OE_YAPAT taxonomy assistant.
+    # No external API resolution; use taxon_id as display name unless client sends display_name.
+    if namespace in ("wiki", "envo", "ols", "local"):
+        return {
+            "taxon_id": taxon_id,
+            "canonical_name": taxon_id,
+            "scientific_name": taxon_id,
+            "rank": "concept",
+            "taxonomy_type": namespace,
+        }
     
     return None
 
