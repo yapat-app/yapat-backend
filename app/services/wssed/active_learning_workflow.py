@@ -485,3 +485,57 @@ class ActiveLearningService:
             "accepted": accepted,
             "rejected": rejected,
         }
+
+    def get_prediction_histogram(
+        self,
+        species_model_id: int,
+        snippet_set_id: Optional[int] = None,
+        num_bins: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        Build a histogram of model predictions (0-1) for all snippets of this species.
+
+        X axis: prediction value bins in [0, 1]. Y axis: count of snippets in each bin.
+        When a species is selected (e.g. BOARAN), returns distribution of predicted_label
+        across all its snippets (optionally restricted to one snippet set / weekly set).
+
+        Args:
+            species_model_id: Species model ID (e.g. from file explorer selection).
+            snippet_set_id: Optional snippet set to restrict to (e.g. weekly labeled set).
+            num_bins: Number of bins in [0, 1] (default 10).
+
+        Returns:
+            Dict with bin_edges, counts, total_snippets, species_model_id, species_name, snippet_set_id.
+        """
+        species_model = self.get_species_model(species_model_id)
+        if not species_model:
+            raise ValueError(f"Species model not found: {species_model_id}")
+
+        query = self.db.query(WSSEDSnippetLabel.predicted_label).filter(
+            WSSEDSnippetLabel.species_model_id == species_model_id
+        )
+        if snippet_set_id is not None:
+            query = query.join(Snippet).filter(Snippet.snippet_set_id == snippet_set_id)
+
+        rows = query.all()
+        predictions = [float(r[0]) for r in rows]
+        total_snippets = len(predictions)
+
+        if num_bins < 1:
+            num_bins = 10
+        bin_edges = [i / num_bins for i in range(num_bins + 1)]
+        counts = [0] * num_bins
+        for p in predictions:
+            # Clamp to [0, 1] and assign to bin (last bin includes 1.0)
+            p = max(0.0, min(1.0, p))
+            idx = min(int(p * num_bins), num_bins - 1) if p < 1.0 else num_bins - 1
+            counts[idx] += 1
+
+        return {
+            "species_model_id": species_model_id,
+            "species_name": species_model.species_name,
+            "snippet_set_id": snippet_set_id,
+            "bin_edges": bin_edges,
+            "counts": counts,
+            "total_snippets": total_snippets,
+        }

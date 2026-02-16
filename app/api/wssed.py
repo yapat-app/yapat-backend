@@ -31,7 +31,8 @@ from app.schemas.wssed import (
     ActiveLearningLabelSubmit,
     ActiveLearningLabelResponse,
     ActiveLearningStats,
-    SnippetLabelResponse
+    SnippetLabelResponse,
+    PredictionHistogramResponse,
 )
 from app.services.wssed_service import WSSEDService
 from app.services.wssed import ActiveLearningService
@@ -586,23 +587,50 @@ def get_species_model_labels(
 ):
     """
     Get all snippet labels for a species model.
-    
+
     Useful for reviewing labeled data and monitoring active learning progress.
     """
     from app.models.wssed import WSSEDSnippetLabel
     from app.models.snippet import Snippet
     from sqlalchemy import and_
-    
+
     query = db.query(WSSEDSnippetLabel).filter(
         WSSEDSnippetLabel.species_model_id == model_id
     )
-    
+
     if snippet_set_id:
         query = query.join(Snippet).filter(Snippet.snippet_set_id == snippet_set_id)
-    
+
     if labeled_only:
         query = query.filter(WSSEDSnippetLabel.user_label.isnot(None))
-    
+
     labels = query.offset(skip).limit(limit).all()
-    
+
     return labels
+
+
+@router.get("/species-models/{model_id}/histogram", response_model=PredictionHistogramResponse)
+def get_species_prediction_histogram(
+    model_id: int,
+    snippet_set_id: Optional[int] = Query(None, description="Restrict to this snippet set (e.g. weekly labeled set)"),
+    num_bins: int = Query(10, ge=1, le=100, description="Number of bins in [0, 1] for the histogram"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Get histogram of model predictions for a species' snippets.
+
+    When a species (e.g. BOARAN) is selected from the file explorer, returns the distribution
+    of model outputs: X axis = prediction value in [0, 1], Y axis = count of snippets in each bin.
+    Uses all snippets for this species model, optionally restricted to one snippet_set_id (weekly).
+    """
+    service = ActiveLearningService(db)
+    try:
+        result = service.get_prediction_histogram(
+            species_model_id=model_id,
+            snippet_set_id=snippet_set_id,
+            num_bins=num_bins,
+        )
+        return PredictionHistogramResponse(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))

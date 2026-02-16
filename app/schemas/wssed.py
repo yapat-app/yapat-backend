@@ -302,3 +302,20 @@ class SnippetLabelResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PredictionHistogramResponse(BaseModel):
+    """Histogram of model predictions (0-1) for a species' snippets.
+    X axis: prediction bins, Y axis: count of snippets in each bin."""
+    species_model_id: int
+    species_name: str
+    snippet_set_id: Optional[int] = None
+    bin_edges: List[float] = Field(
+        ...,
+        description="Bin boundaries in [0, 1], e.g. [0, 0.1, 0.2, ..., 1.0]. Length is num_bins + 1."
+    )
+    counts: List[int] = Field(
+        ...,
+        description="Number of snippets in each bin. Length equals num_bins."
+    )
+    total_snippets: int = Field(..., description="Total number of snippets with predictions")
