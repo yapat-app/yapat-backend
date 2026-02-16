@@ -17,7 +17,14 @@ from app.models.annotation import Annotation as AnnotationModel
 from app.models.snippet import Snippet
 from app.models.recording import Recording
 from app.models.embedding import SnippetSet, SnippetSetStatus
-from app.schemas.dataset import Dataset, DatasetCreate, DatasetCreationResponse
+from app.schemas.dataset import (
+    Dataset,
+    DatasetCreate,
+    DatasetCreationResponse,
+    DatasetExplorerResponse,
+    SpeciesFolder,
+    AudioFile
+)
 from app.schemas.annotation import AnnotationExport
 from app.services.dataset_service import DatasetService
 from app.tasks.processing_tasks import process_dataset
@@ -189,6 +196,66 @@ def read_dataset(
         "is_ready_for_feed": is_ready_for_feed,
     }
     return Dataset(**dataset_dict)
+
+
+@router.get("/{dataset_id}/explorer", response_model=DatasetExplorerResponse)
+def get_dataset_explorer(
+        dataset_id: int,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_active_user),
+):
+    """
+    Get dataset structure for explorer view.
+    
+    Returns species (subfolders) and their audio files by scanning
+    the physical directory structure of the dataset.
+    
+    This endpoint is useful for:
+    - Previewing dataset contents before processing
+    - Exploring organized datasets with species in subfolders
+    - Getting a quick overview of dataset organization
+    """
+    svc = DatasetService(db)
+    dataset = svc.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    try:
+        structure = svc.get_dataset_structure(dataset)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to scan dataset structure: {str(e)}"
+        )
+    
+    # Convert to response model
+    species_list = []
+    for species_data in structure['species']:
+        files = [
+            AudioFile(
+                filename=f['filename'],
+                file_path=f['file_path'],
+                size=f['size']
+            )
+            for f in species_data['files']
+        ]
+        
+        species_list.append(
+            SpeciesFolder(
+                name=species_data['name'],
+                file_count=species_data['file_count'],
+                files=files
+            )
+        )
+    
+    return DatasetExplorerResponse(
+        dataset_id=dataset.id,
+        dataset_name=dataset.name,
+        source_uri=dataset.source_uri,
+        species=species_list
+    )
 
 
 @router.delete("/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)

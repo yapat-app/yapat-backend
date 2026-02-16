@@ -3,7 +3,7 @@ Dataset schemas
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from enum import Enum
 
 from pydantic import BaseModel
@@ -54,3 +54,25 @@ class DatasetCreationResponse(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+class AudioFile(BaseModel):
+    """Represents an audio file in the dataset explorer"""
+    filename: str
+    file_path: str  # Relative path from DATA_ROOT
+    size: Optional[int] = None  # File size in bytes
+
+
+class SpeciesFolder(BaseModel):
+    """Represents a species folder (subfolder) in a dataset"""
+    name: str
+    file_count: int
+    files: List[AudioFile]
+
+
+class DatasetExplorerResponse(BaseModel):
+    """Response for dataset explorer endpoint showing species and their files"""
+    dataset_id: int
+    dataset_name: str
+    source_uri: str
+    species: List[SpeciesFolder]

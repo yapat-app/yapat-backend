@@ -241,3 +241,102 @@ class DatasetService:
         self.db.commit()
         self.db.refresh(rec)
         return rec
+
+    # ---------------------------------------------------------
+    # Dataset explorer - scan physical directory structure
+    # ---------------------------------------------------------
+
+    def get_dataset_structure(self, dataset: DatasetModel) -> dict:
+        """
+        Scan the physical directory structure of a dataset and return
+        species (subfolders) with their audio files.
+        
+        Returns:
+            dict with structure:
+            {
+                'species': [
+                    {
+                        'name': 'species_folder_name',
+                        'file_count': 3,
+                        'files': [
+                            {'filename': 'file.wav', 'file_path': 'relative/path', 'size': 12345},
+                            ...
+                        ]
+                    },
+                    ...
+                ]
+            }
+        """
+        DATA_ROOT = settings.DATA_ROOT or "/data"
+        dataset_path = os.path.join(DATA_ROOT, dataset.source_uri)
+        
+        if not os.path.isdir(dataset_path):
+            raise ValueError(f"Invalid dataset path: {dataset_path}")
+        
+        species_list = []
+        
+        # Scan immediate subdirectories as species folders
+        try:
+            entries = sorted(os.listdir(dataset_path))
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to list directory {dataset_path}: {e}")
+            return {'species': []}
+        
+        for entry in entries:
+            entry_path = os.path.join(dataset_path, entry)
+            
+            # Skip files in root directory, only process subdirectories
+            if not os.path.isdir(entry_path):
+                continue
+            
+            # Skip hidden directories
+            if entry.startswith('.'):
+                continue
+            
+            # This is a species folder - scan for audio files
+            audio_files = []
+            try:
+                for filename in sorted(os.listdir(entry_path)):
+                    file_path = os.path.join(entry_path, filename)
+                    
+                    # Check if it's a file (not directory)
+                    if not os.path.isfile(file_path):
+                        continue
+                    
+                    # Check if it's an audio file
+                    _, ext = os.path.splitext(filename.lower())
+                    if ext not in AUDIO_EXTENSIONS:
+                        continue
+                    
+                    # Get file size
+                    try:
+                        file_size = os.path.getsize(file_path)
+                    except Exception:
+                        file_size = None
+                    
+                    # Store relative path from DATA_ROOT
+                    relative_path = os.path.relpath(file_path, DATA_ROOT)
+                    
+                    audio_files.append({
+                        'filename': filename,
+                        'file_path': relative_path,
+                        'size': file_size
+                    })
+            
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to scan species folder {entry_path}: {e}")
+                continue
+            
+            # Only include species folders that have audio files
+            if audio_files:
+                species_list.append({
+                    'name': entry,
+                    'file_count': len(audio_files),
+                    'files': audio_files
+                })
+        
+        return {'species': species_list}
