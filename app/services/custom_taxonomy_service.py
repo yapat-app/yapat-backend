@@ -139,10 +139,14 @@ async def process_user_prompt(
     )
     
     try:
-        # Call OE_YAPAT service
+        # Call OE_YAPAT service with domain context
+        system_context = (
+            "We are going to annotate an audio dataset in the domain of wildlife monitoring. "
+        )
+        effective_prompt = f"{system_context}User request: {sanitized_prompt}"
         logger.info(f"Processing prompt for conversation {conversation_id}")
         response = await oe_yapat_service.generate_taxonomy(
-            prompt=sanitized_prompt,
+            prompt=effective_prompt,
             context={"conversation_id": conversation_id}
         )
         
