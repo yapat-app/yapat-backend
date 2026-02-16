@@ -290,10 +290,10 @@ def add_to_label_space(
     
     if not nodes_to_add:
         raise CustomTaxonomyServiceError("No valid indices provided or all indices were out of range")
-    
+
     # Check for existing IDs to avoid duplicates
     existing_ids = {item.get("taxon_id") for item in conversation.label_space if item.get("taxon_id")}
-    
+
     added_items = []
     for node in nodes_to_add:
         # Each node has: id, name, scientific_name, rank, metadata (from oe_yapat)
@@ -328,47 +328,40 @@ def add_to_label_space(
         if taxon_id:
             existing_ids.add(taxon_id)
         added_items.append(new_item)
-    
-    # SQLAlchemy does not detect in-place mutations of JSONB; must flag for persistence
-    flag_modified(conversation, "label_space")
-    conversation.updated_at = datetime.utcnow()
-    
-    names_added = ", ".join(i["name"] for i in added_items)
-    add_message(
-        conversation_id=conversation_id,
-        role=MessageRole.SYSTEM,
-        content=f"✓ Added '{names_added}' to your label space.",
-        db=db,
-        metadata={"action": "added_to_label_space", "item_ids": [i["id"] for i in added_items]}
-    )
-    
-    db.commit()
-    db.refresh(conversation)
-    
+
     if not added_items:
-        raise CustomTaxonomyServiceError("All selected items were duplicates or invalid")
-    
-    # SQLAlchemy does not detect in-place mutations of JSONB; must flag for persistence
+        # All selected items were duplicates: return success so UI keeps label space and can show "Already in label space"
+        db.refresh(conversation)
+        logger.info(
+            "Add to label space: all %d item(s) already in label space (conversation %s)",
+            len(nodes_to_add),
+            conversation_id,
+        )
+        return {
+            "conversation": conversation,
+            "added_items": [],
+            "skipped_count": skipped_count,
+        }
+
+    # Persist new items and add system message
     flag_modified(conversation, "label_space")
     conversation.updated_at = datetime.utcnow()
-    
     names_added = ", ".join(i["name"] for i in added_items)
     add_message(
         conversation_id=conversation_id,
         role=MessageRole.SYSTEM,
         content=f"✓ Added '{names_added}' to your label space.",
         db=db,
-        metadata={"action": "added_to_label_space", "item_ids": [i["id"] for i in added_items]}
+        metadata={"action": "added_to_label_space", "item_ids": [i["id"] for i in added_items]},
     )
-    
     db.commit()
     db.refresh(conversation)
-    
+
     logger.info(f"Added %d item(s) to label space in conversation {conversation_id}", len(added_items))
     return {
         "conversation": conversation,
         "added_items": added_items,
-        "skipped_count": skipped_count
+        "skipped_count": skipped_count,
     }
 
 
