@@ -19,7 +19,7 @@ class TaxonomyNode(BaseModel):
 
 class TaxonomyGenerationRequest(BaseModel):
     """Request for generating a custom taxonomy"""
-    prompt: str = Field(..., min_length=1, max_length=2000, description="User prompt describing desired taxonomy")
+    prompt: str = Field(..., min_length=10, max_length=2000, description="User prompt describing desired taxonomy")
     context: Optional[Dict[str, Any]] = Field(None, description="Additional context for generation")
 
 

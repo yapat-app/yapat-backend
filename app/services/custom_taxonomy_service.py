@@ -130,13 +130,6 @@ async def process_user_prompt(
     # Sanitize prompt
     sanitized_prompt = oe_yapat_service.sanitize_prompt(prompt)
     
-    # Check if this is the first user message (context-setting only, no taxonomy generation yet)
-    existing_user_message_count = db.query(TaxonomyMessage).filter(
-        TaxonomyMessage.conversation_id == conversation_id,
-        TaxonomyMessage.role == MessageRole.USER.value,
-    ).count()
-    is_first_user_message = existing_user_message_count == 0
-
     # Add user message
     user_message = add_message(
         conversation_id=conversation_id,
@@ -144,50 +137,13 @@ async def process_user_prompt(
         content=sanitized_prompt,
         db=db
     )
-
-    # First message only sets context: acknowledge and ask user to request taxonomies next
-    if is_first_user_message:
-        context_label = sanitized_prompt.strip() or "your dataset"
-        confirmation_content = (
-            f"Okay, you can now ask me to generate taxonomies related to \"{context_label}\". "
-            "Tell me what you want to annotate (e.g. species, sounds, concepts) and I'll suggest relevant concepts."
-        )
-        assistant_message = add_message(
-            conversation_id=conversation_id,
-            role=MessageRole.ASSISTANT,
-            content=confirmation_content,
-            db=db,
-            metadata=None,
-        )
-        conversation.updated_at = datetime.utcnow()
-        db.commit()
-        return {
-            "user_message": user_message,
-            "assistant_message": assistant_message,
-            "taxonomy_data": {},
-            "metadata": {},
-        }
-
+    
     try:
-        # Pass dataset domain (first user message) to OE_YAPAT so it can set context for taxonomy generation
-        first_user_msg = (
-            db.query(TaxonomyMessage)
-            .filter(
-                TaxonomyMessage.conversation_id == conversation_id,
-                TaxonomyMessage.role == MessageRole.USER.value,
-            )
-            .order_by(TaxonomyMessage.id.asc())
-            .first()
-        )
-        dataset_domain = (first_user_msg.content or "").strip() or None
-
-        logger.info(f"Processing prompt for conversation {conversation_id}" + (f" (dataset context: {dataset_domain!r})" if dataset_domain else ""))
+        # Call OE_YAPAT service
+        logger.info(f"Processing prompt for conversation {conversation_id}")
         response = await oe_yapat_service.generate_taxonomy(
             prompt=sanitized_prompt,
-            context={
-                "conversation_id": conversation_id,
-                "dataset_domain": dataset_domain,
-            }
+            context={"conversation_id": conversation_id}
         )
         
         # Extract taxonomy data and response text

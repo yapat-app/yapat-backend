@@ -59,7 +59,7 @@ class ConversationResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     """Request for sending a chat message"""
-    prompt: str = Field(..., min_length=1, max_length=2000, description="User prompt for taxonomy generation")
+    prompt: str = Field(..., min_length=10, max_length=2000, description="User prompt for taxonomy generation")
 
 
 class ChatResponse(BaseModel):
