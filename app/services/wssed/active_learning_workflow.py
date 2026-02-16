@@ -8,11 +8,13 @@ from typing import Dict, List, Any, Optional
 import logging
 from pathlib import Path
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 import torch
 import numpy as np
 
 from app.models.wssed import WSSEDSpeciesModel, WSSEDSnippetLabel, FeedbackType
 from app.models.snippet import Snippet
+from app.models.embedding import SnippetSet
 from app.services.species_model_store import get_species_model_store, SpeciesModelStore
 from app.services.wssed.species_model_manager import SpeciesModelManager
 from app.services.wssed.data_loader import DataLoader
@@ -443,19 +445,40 @@ class ActiveLearningService:
             "labeled_count": labeled_count
         }
 
+    def _count_snippets_for_species(
+        self,
+        species_model_id: int,
+        snippet_set_id: Optional[int] = None,
+    ) -> int:
+        """
+        Count total snippets for this species (dataset), optionally restricted to a snippet set.
+        This is the stable count that does not change on retraining.
+        """
+        species_model = self.get_species_model(species_model_id)
+        if not species_model:
+            return 0
+        q = (
+            self.db.query(func.count(Snippet.id))
+            .join(SnippetSet, Snippet.snippet_set_id == SnippetSet.id)
+            .filter(SnippetSet.dataset_id == species_model.dataset_id)
+        )
+        if snippet_set_id is not None:
+            q = q.filter(Snippet.snippet_set_id == snippet_set_id)
+        return (q.scalar()) or 0
+
     def get_statistics(
         self, species_model_id: int, snippet_set_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Get statistics for a species model.
 
-        Args:
-            species_model_id: Species model ID
-            snippet_set_id: Optional snippet set to filter by
-
-        Returns:
-            Dictionary with statistics
+        total_snippets: all snippets in the species' dataset (or snippet set); stable across retrains.
+        total_predictions: snippets that have a prediction (WSSEDSnippetLabel row); can change on retrain.
         """
+        total_snippets = self._count_snippets_for_species(
+            species_model_id, snippet_set_id
+        )
+
         query = self.db.query(WSSEDSnippetLabel).filter(
             WSSEDSnippetLabel.species_model_id == species_model_id
         )
@@ -465,7 +488,7 @@ class ActiveLearningService:
 
         all_labels = query.all()
 
-        total = len(all_labels)
+        total_predictions = len(all_labels)
         labeled = sum(1 for label in all_labels if label.user_label is not None)
         accepted = sum(
             1 for label in all_labels
@@ -479,9 +502,10 @@ class ActiveLearningService:
         return {
             "species_model_id": species_model_id,
             "snippet_set_id": snippet_set_id,
-            "total_predictions": total,
+            "total_snippets": total_snippets,
+            "total_predictions": total_predictions,
             "labeled": labeled,
-            "unlabeled": total - labeled,
+            "unlabeled": total_predictions - labeled,
             "accepted": accepted,
             "rejected": rejected,
         }
@@ -491,45 +515,89 @@ class ActiveLearningService:
         species_model_id: int,
         snippet_set_id: Optional[int] = None,
         num_bins: int = 10,
+        device: str = "cpu",
     ) -> Dict[str, Any]:
         """
-        Build a histogram of model predictions (0-1) for all snippets of this species.
+        Build a histogram of model predictions (0-1) for the species (or snippet set).
 
-        X axis: prediction value bins in [0, 1]. Y axis: count of snippets in each bin.
-        When a species is selected (e.g. BOARAN), returns distribution of predicted_label
-        across all its snippets (optionally restricted to one snippet set / weekly set).
+        When snippet_set_id is provided: runs the model on the full embedding pool for that
+        set so the histogram reflects all snippets in the set (not just previously stored
+        predictions), and stores those predictions for consistency.
+        When snippet_set_id is None: uses only already-stored predictions (may be partial).
+
+        total_snippets is always the full count of snippets for this species/set (stable).
 
         Args:
-            species_model_id: Species model ID (e.g. from file explorer selection).
-            snippet_set_id: Optional snippet set to restrict to (e.g. weekly labeled set).
+            species_model_id: Species model ID.
+            snippet_set_id: Optional snippet set. If set, we run model on full pool for that set.
             num_bins: Number of bins in [0, 1] (default 10).
+            device: Device for inference ("cpu" or "cuda").
 
         Returns:
-            Dict with bin_edges, counts, total_snippets, species_model_id, species_name, snippet_set_id.
+            Dict with bin_edges, counts, total_snippets, snippets_with_predictions.
         """
         species_model = self.get_species_model(species_model_id)
         if not species_model:
             raise ValueError(f"Species model not found: {species_model_id}")
 
-        query = self.db.query(WSSEDSnippetLabel.predicted_label).filter(
-            WSSEDSnippetLabel.species_model_id == species_model_id
+        total_snippets = self._count_snippets_for_species(
+            species_model_id, snippet_set_id
         )
-        if snippet_set_id is not None:
-            query = query.join(Snippet).filter(Snippet.snippet_set_id == snippet_set_id)
 
-        rows = query.all()
-        predictions = [float(r[0]) for r in rows]
-        total_snippets = len(predictions)
+        predictions = np.array([], dtype=np.float64)
+        # When a snippet set is specified, run model on full pool so histogram is for entire set
+        if snippet_set_id is not None:
+            try:
+                X_pool, _, snippet_ids = self.data_loader.load_embedding_pool(
+                    snippet_set_id
+                )
+                model = self.model_store.load_model(
+                    model_directory=species_model.model_directory,
+                    metric_type=species_model.metric_type,
+                    prediction_level=species_model.prediction_level,
+                )
+                p_np = self.prediction_handler.predict_probs_for_species(
+                    model, X_pool, species_model.species_name, device=device
+                )
+                predictions = p_np
+                # Store all predictions so stats and future histogram use full set
+                probs = [float(p) for p in predictions]
+                confidences = [None] * len(probs)
+                self.prediction_handler.store_predictions(
+                    species_model_id=species_model_id,
+                    snippet_ids=snippet_ids,
+                    probs=probs,
+                    confidences=confidences,
+                )
+            except ValueError as e:
+                # No embeddings for this set (e.g. pool not ready): fall back to stored only
+                logger.debug(
+                    "Could not load embedding pool for histogram, using stored predictions: %s",
+                    e,
+                )
+                pass
+
+        if len(predictions) == 0:
+            # Use stored predictions only (snippet_set_id was None or pool load failed)
+            query = self.db.query(WSSEDSnippetLabel.predicted_label).filter(
+                WSSEDSnippetLabel.species_model_id == species_model_id
+            )
+            if snippet_set_id is not None:
+                query = query.join(Snippet).filter(
+                    Snippet.snippet_set_id == snippet_set_id
+                )
+            rows = query.all()
+            predictions = np.array([float(r[0]) for r in rows], dtype=np.float64)
+
+        snippets_with_predictions = len(predictions)
 
         if num_bins < 1:
             num_bins = 10
-        bin_edges = [i / num_bins for i in range(num_bins + 1)]
-        counts = [0] * num_bins
-        for p in predictions:
-            # Clamp to [0, 1] and assign to bin (last bin includes 1.0)
-            p = max(0.0, min(1.0, p))
-            idx = min(int(p * num_bins), num_bins - 1) if p < 1.0 else num_bins - 1
-            counts[idx] += 1
+        bins = np.linspace(0, 1, num_bins + 1)
+        predictions = np.clip(predictions, 0.0, 1.0)
+        counts, bin_edges = np.histogram(predictions, bins=bins)
+        bin_edges = bin_edges.tolist()
+        counts = counts.tolist()
 
         return {
             "species_model_id": species_model_id,
@@ -538,4 +606,5 @@ class ActiveLearningService:
             "bin_edges": bin_edges,
             "counts": counts,
             "total_snippets": total_snippets,
+            "snippets_with_predictions": snippets_with_predictions,
         }

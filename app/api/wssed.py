@@ -612,17 +612,18 @@ def get_species_model_labels(
 @router.get("/species-models/{model_id}/histogram", response_model=PredictionHistogramResponse)
 def get_species_prediction_histogram(
     model_id: int,
-    snippet_set_id: Optional[int] = Query(None, description="Restrict to this snippet set (e.g. weekly labeled set)"),
+    snippet_set_id: Optional[int] = Query(None, description="Restrict to this snippet set. When set, model is run on the full pool so histogram covers all snippets in the set."),
     num_bins: int = Query(10, ge=1, le=100, description="Number of bins in [0, 1] for the histogram"),
+    device: str = Query("cpu", description="Device for inference when running on full pool (cpu or cuda)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """
     Get histogram of model predictions for a species' snippets.
 
-    When a species (e.g. BOARAN) is selected from the file explorer, returns the distribution
-    of model outputs: X axis = prediction value in [0, 1], Y axis = count of snippets in each bin.
-    Uses all snippets for this species model, optionally restricted to one snippet_set_id (weekly).
+    When snippet_set_id is provided, runs the model on the full embedding pool for that set
+    so the histogram is over all snippets (e.g. 20k); predictions are stored for consistency.
+    When snippet_set_id is omitted, uses only already-stored predictions (may be partial).
     """
     service = ActiveLearningService(db)
     try:
@@ -630,6 +631,7 @@ def get_species_prediction_histogram(
             species_model_id=model_id,
             snippet_set_id=snippet_set_id,
             num_bins=num_bins,
+            device=device,
         )
         return PredictionHistogramResponse(**result)
     except ValueError as e:

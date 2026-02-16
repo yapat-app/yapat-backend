@@ -279,10 +279,14 @@ class ActiveLearningLabelResponse(BaseModel):
 
 
 class ActiveLearningStats(BaseModel):
-    """Statistics for active learning"""
+    """Statistics for active learning.
+    total_snippets: all snippets in species/set (stable on retrain).
+    total_predictions: snippets that have a prediction (can change on retrain).
+    """
     species_model_id: int
     snippet_set_id: Optional[int] = None
-    total_predictions: int
+    total_snippets: int = Field(..., description="Total snippets in this species/set (stable)")
+    total_predictions: int = Field(..., description="Snippets with a model prediction")
     labeled: int
     unlabeled: int
     accepted: int
@@ -306,7 +310,8 @@ class SnippetLabelResponse(BaseModel):
 
 class PredictionHistogramResponse(BaseModel):
     """Histogram of model predictions (0-1) for a species' snippets.
-    X axis: prediction bins, Y axis: count of snippets in each bin."""
+    X axis: prediction bins, Y axis: count of snippets in each bin.
+    total_snippets is the full count for the species/set (stable on retrain)."""
     species_model_id: int
     species_name: str
     snippet_set_id: Optional[int] = None
@@ -318,4 +323,11 @@ class PredictionHistogramResponse(BaseModel):
         ...,
         description="Number of snippets in each bin. Length equals num_bins."
     )
-    total_snippets: int = Field(..., description="Total number of snippets with predictions")
+    total_snippets: int = Field(
+        ...,
+        description="Total number of snippets in this species/set (stable, does not change on retrain)."
+    )
+    snippets_with_predictions: int = Field(
+        ...,
+        description="Number of snippets that have a prediction (sum of counts)."
+    )
