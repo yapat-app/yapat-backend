@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "YAPAT Backend"
     DATA_ROOT: Optional[str] = "/data"
     HOST_DATA_ROOT: str | None = None  # host path (optional)
+    HOST_MODELS_AL: str | None = None  # host path for models; used by docker-compose for mounts only
     
     # CORS - can be set as comma-separated string or list
     BACKEND_CORS_ORIGINS: Union[str, list] = [
