@@ -63,7 +63,7 @@ services:
       - ${HOST_DATA_ROOT}:/data:ro
       # Mount host directory for species models (read-write so retraining can save checkpoints)
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
-      - /srv/DATA01/yapat/yapat-backend/models_AL:/app/assets/models/single_species_models:ro
+      - ${HOST_MODELS_AL:-./models_AL}:/app/assets/models/single_species_models:ro
     restart: unless-stopped
 
   # Celery worker for asynchronous task processing
