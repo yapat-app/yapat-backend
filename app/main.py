@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api import auth, teams, datasets, recordings, snippets, annotations, feed, invitations, tasks, taxonomy, embeddings, custom_taxonomy, wssed
+from app.api import auth, teams, datasets, recordings, snippets, annotations, feed, invitations, tasks, taxonomy, embeddings, custom_taxonomy, pam_active_learning
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -39,7 +39,7 @@ app.include_router(tasks.router, prefix=f"{settings.API_STR}/tasks", tags=["task
 app.include_router(taxonomy.router, prefix=f"{settings.API_STR}/taxonomy", tags=["taxonomy"])
 app.include_router(custom_taxonomy.router, prefix=f"{settings.API_STR}/taxonomy", tags=["custom-taxonomy"])
 app.include_router(embeddings.router, prefix=f"{settings.API_STR}", tags=["embeddings"])
-app.include_router(wssed.router, prefix=f"{settings.API_STR}/wssed", tags=["wssed"])
+app.include_router(pam_active_learning.router, prefix=f"{settings.API_STR}/pam-al", tags=["pam-active-learning"])
 
 
 @app.get("/")

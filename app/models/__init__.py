@@ -32,6 +32,15 @@ from app.models.wssed import (
     TrainingStatus,
     FeedbackType,
 )
+from app.models.pam_active_learning import (
+    PAMModelCheckpoint,
+    PAMPrediction,
+    PAMFeedbackEvent,
+    PAMRetrainJob,
+    PAMModelStatus,
+    PAMFeedbackAction,
+    PAMRetrainStatus,
+)
 
 __all__ = [
     "User",
@@ -59,4 +68,12 @@ __all__ = [
     "WSSEDSnippetLabel",
     "TrainingStatus",
     "FeedbackType",
+    # PAM Active Learning
+    "PAMModelCheckpoint",
+    "PAMPrediction",
+    "PAMFeedbackEvent",
+    "PAMRetrainJob",
+    "PAMModelStatus",
+    "PAMFeedbackAction",
+    "PAMRetrainStatus",
 ]

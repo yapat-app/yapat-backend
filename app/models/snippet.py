@@ -48,3 +48,9 @@ class Snippet(Base):
         back_populates="snippet",
         cascade="all, delete-orphan",
     )
+    # PAM active learning predictions
+    pam_predictions = relationship(
+        "PAMPrediction",
+        back_populates="snippet",
+        cascade="all, delete-orphan",
+    )

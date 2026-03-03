@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     ACTIVE_LEARNING_MODELS_DIR: Optional[str] = None  # Directory containing pre-trained species models
     AUTO_REGISTER_SPECIES_MODELS: bool = True  # Automatically register species models for WEAKLY_LABELED datasets
 
+    # PAM Active Learning
+    PAM_AUTO_RETRAIN_THRESHOLD: int = 5  # Auto-retrain after N feedback events
+    PAM_DEFAULT_DEVICE: str = "cpu"      # Default device for PAM inference/training
+    PAM_BASE_MODEL_PATH: str = "models_AL/pam/base/base_pam_model.pt"  # Physical base model file
+    PAM_CHECKPOINTS_DIR: str = "models_AL/pam/checkpoints"              # Versioned checkpoint storage
+
     class Config:
         env_file = ".env"
         case_sensitive = True

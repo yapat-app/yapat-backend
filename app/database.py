@@ -2,7 +2,7 @@
 Database connection
 """
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -17,6 +17,17 @@ engine = create_engine(
     pool_recycle=3600,  # Recycle connections after 1 hour
     echo=False  # Set to True for SQL query logging
 )
+
+# Register pgvector type adapter with psycopg2 so that vector columns
+# are properly decoded instead of raising "Unknown PG numeric type".
+try:
+    from pgvector.psycopg2 import register_vector
+
+    @event.listens_for(engine, "connect")
+    def _register_pgvector(dbapi_connection, connection_record):
+        register_vector(dbapi_connection)
+except ImportError:
+    pass  # pgvector not installed – skip
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

@@ -71,16 +71,22 @@ class Dataset(Base):
     )
     # Users with direct access to this dataset (via invitation, before team assignment)
     authorized_users = relationship("User", secondary=user_datasets, backref="accessible_datasets")
-    # WSSED training jobs for this dataset
+    # PAM Active Learning model checkpoints
+    pam_model_checkpoints = relationship(
+        "PAMModelCheckpoint",
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+    )
+    # WSSED training jobs
     wssed_training_jobs = relationship(
         "WSSEDTrainingJob",
         back_populates="dataset",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
-    # WSSED species models for active learning
+    # WSSED species models
     wssed_species_models = relationship(
         "WSSEDSpeciesModel",
         back_populates="dataset",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
