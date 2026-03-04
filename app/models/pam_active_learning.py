@@ -125,7 +125,6 @@ class PAMPrediction(Base):
     )
     predicted_label = Column(String, nullable=False)   # e.g. "bird", "frog"
     confidence = Column(Float, nullable=False)          # model confidence [0,1]
-    ranking_score = Column(Float, nullable=True)        # combined scoring output
     extra_scores = Column(JSON, nullable=True)          # per-factor breakdown
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

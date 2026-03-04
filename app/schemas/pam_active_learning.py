@@ -79,7 +79,6 @@ class PAMPredictionResponse(BaseModel):
     snippet_id: int
     predicted_label: str
     confidence: float
-    ranking_score: Optional[float] = None
     created_at: datetime
 
     class Config:

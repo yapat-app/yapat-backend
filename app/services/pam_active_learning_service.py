@@ -255,7 +255,6 @@ class PAMActiveLearningService:
                 snippet_id=snippet_ids[idx],
                 predicted_label=labels[idx],
                 confidence=float(confidences[idx]),
-                ranking_score=float(scores[idx]),
             )
             predictions_out.append(pred)
 
@@ -294,7 +293,6 @@ class PAMActiveLearningService:
         snippet_id: int,
         predicted_label: str,
         confidence: float,
-        ranking_score: float,
     ) -> PAMPrediction:
         existing = (
             self.db.query(PAMPrediction)
@@ -309,7 +307,6 @@ class PAMActiveLearningService:
         if existing:
             existing.predicted_label = predicted_label
             existing.confidence = confidence
-            existing.ranking_score = ranking_score
             return existing
 
         pred = PAMPrediction(
@@ -317,7 +314,6 @@ class PAMActiveLearningService:
             snippet_id=snippet_id,
             predicted_label=predicted_label,
             confidence=confidence,
-            ranking_score=ranking_score,
         )
         self.db.add(pred)
         return pred
