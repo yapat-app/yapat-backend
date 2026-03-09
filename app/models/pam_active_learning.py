@@ -13,6 +13,7 @@ from sqlalchemy import (
     Enum as SQLEnum, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.sql import func
 import enum
 
@@ -21,19 +22,19 @@ from app.database import Base
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
-class PAMModelStatus(str, enum.Enum):
+class ALModelStatus(str, enum.Enum):
     AVAILABLE = "AVAILABLE"
     LOADING = "LOADING"
     ERROR = "ERROR"
 
 
-class PAMFeedbackAction(str, enum.Enum):
+class ALFeedbackAction(str, enum.Enum):
     ACCEPT = "ACCEPT"
     REJECT = "REJECT"
     MODIFY = "MODIFY"
 
 
-class PAMRetrainStatus(str, enum.Enum):
+class ALRetrainStatus(str, enum.Enum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
@@ -42,7 +43,7 @@ class PAMRetrainStatus(str, enum.Enum):
 
 # ── Model Checkpoint ───────────────────────────────────────────────────
 
-class PAMModelCheckpoint(Base):
+class ALModelCheckpoint(Base):
     """
     Tracks model versions / checkpoints used for PAM active learning.
 
@@ -50,7 +51,7 @@ class PAMModelCheckpoint(Base):
     The first checkpoint (``is_base=True``) points to the shared base model;
     subsequent retrained versions reference their parent via ``parent_checkpoint_id``.
     """
-    __tablename__ = "pam_model_checkpoints"
+    __tablename__ = "al_model_checkpoints"
 
     id = Column(Integer, primary_key=True, index=True)
     dataset_id = Column(
@@ -62,34 +63,34 @@ class PAMModelCheckpoint(Base):
     name = Column(String, nullable=False)
     version = Column(String, nullable=False, default="v0")
     checkpoint_path = Column(String, nullable=True)  # filesystem path to weights
-    model_type = Column(String, nullable=False, default="pam_classifier")
+    model_type = Column(String, nullable=False, default="al_classifier")
     hyperparameters = Column(JSON, nullable=True)
     is_base = Column(Integer, nullable=False, default=0)  # 1 = base model entry
     parent_checkpoint_id = Column(
         Integer,
-        ForeignKey("pam_model_checkpoints.id", ondelete="SET NULL"),
+        ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
     status = Column(
-        SQLEnum(PAMModelStatus, name="pam_model_status_enum", create_type=True),
+        SQLEnum(ALModelStatus, name="al_model_status_enum", create_type=True),
         nullable=False,
-        default=PAMModelStatus.AVAILABLE,
+        default=ALModelStatus.AVAILABLE,
     )
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
 
     # Relationships
-    dataset = relationship("Dataset", back_populates="pam_model_checkpoints")
+    dataset = relationship("Dataset", back_populates="al_model_checkpoints")
     predictions = relationship(
-        "PAMPrediction", back_populates="model_checkpoint", cascade="all, delete-orphan"
+        "ALprediction", back_populates="model_checkpoint", cascade="all, delete-orphan"
     )
     retrain_jobs = relationship(
-        "PAMRetrainJob", back_populates="model_checkpoint", cascade="all, delete-orphan"
+        "ALRetrainJob", back_populates="model_checkpoint", cascade="all, delete-orphan"
     )
     parent_checkpoint = relationship(
-        "PAMModelCheckpoint",
-        remote_side="PAMModelCheckpoint.id",
+        "ALModelCheckpoint",
+        remote_side="ALModelCheckpoint.id",
         foreign_keys=[parent_checkpoint_id],
         uselist=False,
     )
@@ -101,19 +102,19 @@ class PAMModelCheckpoint(Base):
 
 # ── Prediction ─────────────────────────────────────────────────────────
 
-class PAMPrediction(Base):
+class ALPrediction(Base):
     """
     A single classifier prediction on a snippet.
 
     Stores the predicted label string, numeric score, and a composite
     ranking score produced by the combined scoring module.
     """
-    __tablename__ = "pam_predictions"
+    __tablename__ = "al_predictions"
 
     id = Column(Integer, primary_key=True, index=True)
     model_checkpoint_id = Column(
         Integer,
-        ForeignKey("pam_model_checkpoints.id", ondelete="CASCADE"),
+        ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -124,15 +125,21 @@ class PAMPrediction(Base):
         index=True,
     )
     predicted_label = Column(String, nullable=False)   # e.g. "bird", "frog"
-    confidence = Column(Float, nullable=False)          # model confidence [0,1]
-    extra_scores = Column(JSON, nullable=True)          # per-factor breakdown
+    # Active learning scores
+    uncertainty = Column(Float, nullable=True)
+    diversity = Column(Float, nullable=True)
+    density = Column(Float, nullable=True)
+    composite_score = Column(Float, nullable=True)
+
+    # Intermediate representation
+    embedding = Column(Vector(512), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # Relationships
-    model_checkpoint = relationship("PAMModelCheckpoint", back_populates="predictions")
+    model_checkpoint = relationship("ALModelCheckpoint", back_populates="predictions")
     snippet = relationship("Snippet", back_populates="pam_predictions")
     feedback_events = relationship(
-        "PAMFeedbackEvent", back_populates="prediction", cascade="all, delete-orphan"
+        "ALFeedbackEvent", back_populates="prediction", cascade="all, delete-orphan"
     )
 
     __table_args__ = (
@@ -142,19 +149,19 @@ class PAMPrediction(Base):
 
 # ── Feedback Event ─────────────────────────────────────────────────────
 
-class PAMFeedbackEvent(Base):
+class ALFeedbackEvent(Base):
     """
     A single human-in-the-loop feedback event.
 
     action = ACCEPT | REJECT | MODIFY
     When action == MODIFY, *modified_label* holds the corrected label.
     """
-    __tablename__ = "pam_feedback_events"
+    __tablename__ = "al_feedback_events"
 
     id = Column(Integer, primary_key=True, index=True)
     prediction_id = Column(
         Integer,
-        ForeignKey("pam_predictions.id", ondelete="CASCADE"),
+        ForeignKey("al_predictions.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -165,7 +172,7 @@ class PAMFeedbackEvent(Base):
         index=True,
     )
     action = Column(
-        SQLEnum(PAMFeedbackAction, name="pam_feedback_action_enum", create_type=True),
+        SQLEnum(ALFeedbackAction, name="al_feedback_action_enum", create_type=True),
         nullable=False,
     )
     modified_label = Column(String, nullable=True)  # only when action == MODIFY
@@ -173,31 +180,31 @@ class PAMFeedbackEvent(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # Relationships
-    prediction = relationship("PAMPrediction", back_populates="feedback_events")
+    prediction = relationship("ALPrediction", back_populates="feedback_events")
     user = relationship("User")
 
 
 # ── Retrain Job ────────────────────────────────────────────────────────
 
-class PAMRetrainJob(Base):
+class ALRetrainJob(Base):
     """
     Metadata for a retraining run triggered either automatically or manually.
     """
-    __tablename__ = "pam_retrain_jobs"
+    __tablename__ = "al_retrain_jobs"
 
     id = Column(Integer, primary_key=True, index=True)
     model_checkpoint_id = Column(
         Integer,
-        ForeignKey("pam_model_checkpoints.id", ondelete="CASCADE"),
+        ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
     trigger = Column(String, nullable=False, default="auto")  # "auto" | "manual"
     feedback_count = Column(Integer, nullable=False, default=0)
     status = Column(
-        SQLEnum(PAMRetrainStatus, name="pam_retrain_status_enum", create_type=True),
+        SQLEnum(ALRetrainStatus, name="al_retrain_status_enum", create_type=True),
         nullable=False,
-        default=PAMRetrainStatus.PENDING,
+        default=ALRetrainStatus.PENDING,
     )
     result_metrics = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
@@ -206,4 +213,4 @@ class PAMRetrainJob(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # Relationships
-    model_checkpoint = relationship("PAMModelCheckpoint", back_populates="retrain_jobs")
+    model_checkpoint = relationship("ALModelCheckpoint", back_populates="retrain_jobs")

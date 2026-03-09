@@ -206,9 +206,8 @@ class PAMActiveLearningService:
         Steps:
           1. Load embeddings for the snippet set.
           2. Check out the model and load the classifier.
-          3. Run classifier inference (labels + confidences).
-          4. Compute combined ranking scores.
-          5. Select top-k and persist predictions.
+          3. Run classifier inference (labels + sampling scores).
+          4. Select top-k and persist predictions.
 
         Returns:
             dict with ``predictions``, ``total_scored``, ``model_info``.

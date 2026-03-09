@@ -55,7 +55,7 @@ class ALCheckpointResponse(BaseModel):
     hyperparameters: Optional[Dict[str, Any]] = None
     is_base: int = 0
     parent_checkpoint_id: Optional[int] = None
-    status: PAMModelStatusSchema
+    status: ALModelStatusSchema
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -88,7 +88,7 @@ class ALPredictionResponse(BaseModel):
         from_attributes = True
 
 
-class PAMInferenceResult(BaseModel):
+class ALInferenceResult(BaseModel):
     """Result returned after running inference + scoring."""
     predictions: List[ALPredictionResponse]
     total_scored: int
