@@ -62,7 +62,8 @@ class ALModelCheckpoint(Base):
     )
     name = Column(String, nullable=False)
     version = Column(String, nullable=False, default="v0")
-    checkpoint_path = Column(String, nullable=True)  # filesystem path to weights
+    checkpoint_path = Column(String, nullable=False)  # filesystem path to weights
+    label_config_path = Column(String, nullable=False)
     model_type = Column(String, nullable=False, default="al_classifier")
     hyperparameters = Column(JSON, nullable=True)
     is_base = Column(Integer, nullable=False, default=0)  # 1 = base model entry
