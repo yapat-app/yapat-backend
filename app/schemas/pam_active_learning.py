@@ -69,7 +69,7 @@ class ALRunInferenceRequest(BaseModel):
     """Trigger inference on a snippet set using a checked-out model."""
     model_checkpoint_id: int = Field(..., description="Checked-out model checkpoint ID")
     snippet_set_id: int = Field(..., description="Snippet set to run inference on")
-    k: int = Field(default=20, ge=1, le=500, description="Number of top-ranked predictions to return")
+    k: int = Field(default=20, ge=1, le=500, description="Number of top-ranked informative samples to return")
     device: str = Field(default="cpu", description="cpu or cuda")
 
 
@@ -81,7 +81,7 @@ class ALPredictionResponse(BaseModel):
     uncertainty: Optional[float] = None
     diversity: Optional[float] = None
     density: Optional[float] = None
-    composite: Optional[float] = None
+    composite_score: Optional[float] = None
     created_at: datetime
 
     class Config:
@@ -91,7 +91,8 @@ class ALPredictionResponse(BaseModel):
 class ALInferenceResult(BaseModel):
     """Result returned after running inference + scoring."""
     predictions: List[ALPredictionResponse]
-    total_scored: int
+    total_labeled: int
+    total_unlabeled: int
     model_info: Dict[str, Any]
 
 

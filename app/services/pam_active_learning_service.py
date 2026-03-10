@@ -32,14 +32,15 @@ from app.models.dataset import Dataset, DatasetType
 from app.models.snippet import Snippet
 from app.models.embedding import EmbeddingVector, SnippetSet
 from app.models.pam_active_learning import (
-    PAMModelCheckpoint,
-    PAMModelStatus,
-    PAMPrediction,
-    PAMFeedbackEvent,
-    PAMFeedbackAction,
-    PAMRetrainJob,
-    PAMRetrainStatus,
+    ALModelCheckpoint,
+    ALModelStatus,
+    ALPrediction,
+    ALFeedbackEvent,
+    ALFeedbackAction,
+    ALRetrainJob,
+    ALRetrainStatus
 )
+from app.schemas.pam_active_learning import ALInferenceResult
 from active_learning.pam_model_checkout import checkout_model, PAMModelHandle
 from active_learning.pam_classifier import load_pam_classifier
 from active_learning.pam_scoring import combined_score, select_top_k
@@ -98,7 +99,7 @@ class PAMActiveLearningService:
         hyperparameters: Optional[Dict[str, Any]] = None,
         is_base: bool = False,
         parent_checkpoint_id: Optional[int] = None,
-    ) -> PAMModelCheckpoint:
+    ) -> ALModelCheckpoint:
         """
         Create or update a model checkpoint record for a PAM dataset.
 
@@ -110,12 +111,12 @@ class PAMActiveLearningService:
         self.get_pam_dataset(dataset_id)  # validate
 
         existing = (
-            self.db.query(PAMModelCheckpoint)
+            self.db.query(ALModelCheckpoint)
             .filter(
                 and_(
-                    PAMModelCheckpoint.dataset_id == dataset_id,
-                    PAMModelCheckpoint.name == name,
-                    PAMModelCheckpoint.version == version,
+                    ALModelCheckpoint.dataset_id == dataset_id,
+                    ALModelCheckpoint.name == name,
+                    ALModelCheckpoint.version == version,
                 )
             )
             .first()
@@ -133,7 +134,7 @@ class PAMActiveLearningService:
             logger.info("Updated PAM checkpoint id=%d", existing.id)
             return existing
 
-        ckpt = PAMModelCheckpoint(
+        ckpt = ALModelCheckpoint(
             dataset_id=dataset_id,
             name=name,
             version=version,
@@ -142,7 +143,7 @@ class PAMActiveLearningService:
             hyperparameters=hyperparameters,
             is_base=int(is_base),
             parent_checkpoint_id=parent_checkpoint_id,
-            status=PAMModelStatus.AVAILABLE,
+            status=ALModelStatus.AVAILABLE,
         )
         self.db.add(ckpt)
         self.db.commit()
@@ -199,7 +200,7 @@ class PAMActiveLearningService:
         snippet_set_id: int,
         k: int = 20,
         device: str = "cpu",
-    ) -> Dict[str, Any]:
+    ) ->    AL:
         """
         Run the full inference → scoring → ranking pipeline.
 
