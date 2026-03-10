@@ -39,7 +39,7 @@ class ALCheckpointCreate(BaseModel):
     name: str = Field(..., description="Human-readable model name")
     version: str = Field(default="v0", description="Version tag")
     checkpoint_path: Optional[str] = Field(None, description="Filesystem path to weights (optional)")
-    model_type: str = Field(default="pam_classifier", description="Classifier type identifier")
+    model_type: str = Field(default="pam_multi_label_classifier", description="Classifier type identifier")
     hyperparameters: Optional[Dict[str, Any]] = None
     is_base: bool = Field(default=False, description="Mark as base model entry (uses shared base weights)")
     parent_checkpoint_id: Optional[int] = Field(None, description="Parent checkpoint ID for version lineage")
