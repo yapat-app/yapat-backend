@@ -125,7 +125,8 @@ class ALPrediction(Base):
         nullable=False,
         index=True,
     )
-    predicted_label = Column(String, nullable=False)   # e.g. "bird", "frog"
+    predicted_labels = Column(JSON, nullable=False)
+    predicted_probabilities = Column(JSON, nullable=True)
     # Active learning scores
     uncertainty = Column(Float, nullable=True)
     diversity = Column(Float, nullable=True)
@@ -197,6 +198,12 @@ class ALRetrainJob(Base):
     model_checkpoint_id = Column(
         Integer,
         ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    dataset_id = Column(
+        Integer,
+        ForeignKey("datasets.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
