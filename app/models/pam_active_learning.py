@@ -148,6 +148,19 @@ class ALPrediction(Base):
         UniqueConstraint("model_checkpoint_id", "snippet_id", name="uq_pam_prediction"),
     )
 
+class ALSnippetAnnotationState(Base):
+    __tablename__ = "al_snippet_annotation_state"
+
+    id = Column(Integer, primary_key=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True)
+    snippet_id = Column(Integer, ForeignKey("snippets.id", ondelete="CASCADE"), nullable=False, index=True)
+    is_labeled = Column(Integer, nullable=False, default=1)
+    model_checkpoint_id = Column(Integer, ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "snippet_id", name="uq_al_labeled_snippet"),
+    )
 
 # ── Feedback Event ─────────────────────────────────────────────────────
 
