@@ -248,22 +248,26 @@ def train_from_scratch(
         )
 
 
-
-# ============ STATS ============
-
-@router.get("/stats", response_model=ALStats)
-def get_stats(
-    model_checkpoint_id: int = Query(..., description="Checkpoint ID"),
+@router.post("/inference", response_model=ALInferenceResult)
+def run_inference(
+    body: ALRunInferenceRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """
-    Get active learning statistics for a PAM model checkpoint.
-
-    Includes counts of predictions, feedback breakdown, and retrain jobs.
-    """
     svc = PAMActiveLearningService(db)
     try:
-        return ALStats(**svc.get_stats(model_checkpoint_id))
+        result = svc.run_inference(body)
+        return ALInferenceResult(
+            predictions=[
+                ALPredictionResponse.model_validate(p, from_attributes=True)
+                for p in result["predictions"]
+            ],
+            total_scored=result["total_scored"],
+            model_info=result["model_info"],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Stats retrieval failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
+
+
