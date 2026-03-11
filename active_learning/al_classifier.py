@@ -1,162 +1,269 @@
-"""
-PAM Custom Classifier
-
-Provides inference over audio snippet embeddings and produces
-per-snippet predictions (label + confidence score).
-
-When a valid checkpoint file is supplied the factory will attempt to
-load weights via ``torch.load``; if torch is unavailable or the file
-cannot be loaded it falls back to the stub so the pipeline never
-crashes.
-"""
-
 from __future__ import annotations
 
-import os
-from typing import List, Tuple, Optional, Protocol
-import numpy as np
 import logging
+from typing import Dict, List, Optional, Union
+
+import numpy as np
+import torch
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
 
-# ── Classifier Protocol ────────────────────────────────────────────────
-
-class PAMClassifierProtocol(Protocol):
+class MultiLabelMLPClassifier(nn.Module):
     """
-    Any object satisfying this protocol can be used as the PAM classifier.
-    """
-
-    def predict(
-        self, embeddings: np.ndarray
-    ) -> Tuple[List[str], np.ndarray]:
-        """
-        Run inference on a batch of embeddings.
-
-        Args:
-            embeddings: [N, D] float32 embedding matrix.
-
-        Returns:
-            labels:      length-N list of predicted label strings.
-            confidences: [N] float array of confidence scores in [0, 1].
-        """
-        ...
-
-
-# ── Placeholder Implementation ─────────────────────────────────────────
-
-class PAMClassifierStub:
-    """
-    Stub classifier that returns a fixed label with random confidence.
-
-    Replace this class with a real model once the checkpoint format and
-    inference logic are finalised.
+    Multi-label MLP classifier with:
+    - one hidden layer
+    - dropout for regularization
+    - prediction method returning both probabilities and binary predictions
     """
 
-    def __init__(
+    def __init__(self):
+        super().__init__()
+        self.model = None
+        self.n_dim = None
+        self.num_classes = None
+        self.hidden_dim = None
+        self.dropout = None
+
+    def create_classifier(
         self,
-        default_label: str = "unknown",
-        seed: int = 42,
-        checkpoint_path: Optional[str] = None,
-    ):
-        self.default_label = default_label
-        self.checkpoint_path = checkpoint_path
-        self._rng = np.random.default_rng(seed)
-        logger.info(
-            "PAMClassifierStub initialised (placeholder)  weights=%s",
-            checkpoint_path or "<none>",
+        n_dim: int,
+        num_classes: int,
+        hidden_dim: int = 128,
+        dropout: float = 0.5,
+    ) -> None:
+        """
+        Create the classifier architecture.
+
+        Parameters
+        ----------
+        n_dim : int
+            Input embedding dimension.
+        num_classes : int
+            Number of species / labels.
+        hidden_dim : int
+            Size of the single hidden layer.
+        dropout : float
+            Dropout probability.
+        """
+        self.n_dim = n_dim
+        self.num_classes = num_classes
+        self.hidden_dim = hidden_dim
+        self.dropout = dropout
+
+        self.model = nn.Sequential(
+            nn.Linear(n_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_classes),
         )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Return raw logits.
+        """
+        if self.model is None:
+            raise ValueError("Classifier has not been created yet. Call create_classifier() first.")
+        return self.model(x)
 
     def predict(
-        self, embeddings: np.ndarray
-    ) -> Tuple[List[str], np.ndarray]:
+        self,
+        x: torch.Tensor,
+        threshold: Union[float, torch.Tensor] = 0.3,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Return placeholder predictions.
+        Return both probabilities and binary predictions.
 
-        Confidences are drawn from U(0,1) so the combined scoring module
-        has non-trivial uncertainty to rank on.
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape [batch_size, n_dim].
+        threshold : float or torch.Tensor
+            Either:
+            - a single global threshold
+            - a tensor of shape [num_classes] for per-class thresholds
+
+        Returns
+        -------
+        probs : torch.Tensor
+            Sigmoid probabilities of shape [batch_size, num_classes].
+        preds : torch.Tensor
+            Binary multi-label predictions of shape [batch_size, num_classes].
         """
-        n = embeddings.shape[0]
-        labels = [self.default_label] * n
-        confidences = self._rng.uniform(0.0, 1.0, size=n).astype(np.float32)
-        logger.info(f"PAMClassifierStub.predict: {n} samples → label='{self.default_label}'")
-        return labels, confidences
+        self.eval()
 
+        with torch.no_grad():
+            logits = self.forward(x)
+            probs = torch.sigmoid(logits)
 
-# ── Factory ────────────────────────────────────────────────────────────
+            if isinstance(threshold, (float, int)):
+                preds = (probs >= threshold).int()
+            else:
+                threshold = threshold.to(probs.device)
+                preds = (probs >= threshold).int()
 
-def _try_torch_load(checkpoint_path: str, device: str) -> Optional[object]:
-    """
-    Attempt to load a state_dict from *checkpoint_path* using torch.
+        return probs, preds
 
-    Returns the loaded object (usually ``OrderedDict``) on success,
-    or ``None`` when torch is unavailable / loading fails.
-    """
-    try:
-        import torch  # type: ignore[import-unresolved]
-    except ImportError:
-        logger.warning("torch not installed — cannot load checkpoint from '%s'", checkpoint_path)
-        return None
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        epochs: int,
+        learning_rate: float,
+        batch_size: int,
+        device: str,
+    ) -> Dict[str, float]:
+        """
+        Train the classifier on multi-label targets.
+        """
+        if self.model is None:
+            raise ValueError("Classifier has not been created yet. Call create_classifier() first.")
 
-    try:
-        state = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        logger.info("Successfully loaded checkpoint from '%s'", checkpoint_path)
-        return state
-    except Exception as exc:
-        logger.warning("Failed to load checkpoint '%s': %s", checkpoint_path, exc)
-        return None
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        y_tensor = torch.tensor(y, dtype=torch.float32)
 
+        dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
+        loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-def load_pam_classifier(
-    checkpoint_path: Optional[str] = None,
-    model_type: str = "pam_classifier",
-    device: str = "cpu",
-) -> PAMClassifierProtocol:
-    """
-    Load (or create) a PAM classifier.
+        pos_counts = y.sum(axis=0)
+        neg_counts = y.shape[0] - pos_counts
+        pos_weight = np.where(pos_counts > 0, neg_counts / np.maximum(pos_counts, 1), 1.0)
+        pos_weight = torch.tensor(pos_weight, dtype=torch.float32, device=device)
 
-    Resolution logic:
-      1. If *checkpoint_path* is ``None`` or the file doesn't exist →
-         return stub.
-      2. Try ``torch.load`` on the file.  If successful, wrap the loaded
-         state into a real model class (TODO once architecture is
-         finalised).  For now the state is loaded to verify the file is
-         valid and the stub is returned with an acknowledgement.
-      3. On any failure → return stub so the pipeline never crashes.
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
 
-    Args:
-        checkpoint_path: optional filesystem path to model weights.
-        model_type:      identifier for model architecture dispatch.
-        device:          'cpu' or 'cuda'.
+        self.model.train()
+        epoch_losses: List[float] = []
 
-    Returns:
-        An object implementing :class:`PAMClassifierProtocol`.
-    """
-    if checkpoint_path is None:
-        logger.warning("No checkpoint_path provided — using PAMClassifierStub")
-        return PAMClassifierStub()
+        for epoch in range(epochs):
+            running_loss = 0.0
+            num_batches = 0
 
-    if not os.path.isfile(checkpoint_path):
-        logger.warning(
-            "Checkpoint file does not exist at '%s' — using PAMClassifierStub",
-            checkpoint_path,
+            for xb, yb in loader:
+                xb = xb.to(device)
+                yb = yb.to(device)
+
+                optimizer.zero_grad()
+                logits = self.model(xb)
+                loss = criterion(logits, yb)
+                loss.backward()
+                optimizer.step()
+
+                running_loss += float(loss.item())
+                num_batches += 1
+
+            avg_loss = running_loss / max(num_batches, 1)
+            epoch_losses.append(avg_loss)
+            logger.info(
+                "Cold-start train epoch %d/%d - loss=%.6f",
+                epoch + 1,
+                epochs,
+                avg_loss,
+            )
+
+        return {
+            "final_train_loss": float(epoch_losses[-1]) if epoch_losses else 0.0,
+            "best_train_loss": float(min(epoch_losses)) if epoch_losses else 0.0,
+            "epochs": int(epochs),
+        }
+
+    def filter_and_balance_classes(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        species_list: List[str],
+        min_samples_per_class: int,
+        max_samples_per_class: Optional[int] = None,
+    ) -> tuple[np.ndarray, np.ndarray, List[str], List[str], Dict[str, int]]:
+        """
+        Filter out under-supported classes and optionally cap samples per class.
+
+        Notes
+        -----
+        In multi-label data, balancing is approximate because a single sample
+        can belong to multiple classes.
+        """
+        class_support = y.sum(axis=0).astype(int)
+
+        keep_class_indices = [
+            i for i, count in enumerate(class_support)
+            if count >= min_samples_per_class
+        ]
+        excluded_class_indices = [
+            i for i, count in enumerate(class_support)
+            if count < min_samples_per_class
+        ]
+
+        used_species = [species_list[i] for i in keep_class_indices]
+        excluded_species = [species_list[i] for i in excluded_class_indices]
+
+        if not keep_class_indices:
+            return (
+                np.empty((0, X.shape[1]), dtype=np.float32),
+                np.empty((0, 0), dtype=np.float32),
+                [],
+                excluded_species,
+                {},
+            )
+
+        y = y[:, keep_class_indices]
+
+        keep_rows = y.sum(axis=1) > 0
+        X = X[keep_rows]
+        y = y[keep_rows]
+
+        if X.shape[0] == 0:
+            return (
+                np.empty((0, X.shape[1]), dtype=np.float32),
+                np.empty((0, len(used_species)), dtype=np.float32),
+                used_species,
+                excluded_species,
+                {},
+            )
+
+        if max_samples_per_class is not None:
+            selected_indices: List[int] = []
+            per_class_counts = np.zeros(y.shape[1], dtype=int)
+            row_order = np.random.permutation(y.shape[0])
+
+            for idx in row_order:
+                labels = np.where(y[idx] > 0)[0]
+                if len(labels) == 0:
+                    continue
+
+                if any(per_class_counts[c] < max_samples_per_class for c in labels):
+                    selected_indices.append(idx)
+                    for c in labels:
+                        if per_class_counts[c] < max_samples_per_class:
+                            per_class_counts[c] += 1
+
+            if selected_indices:
+                X = X[selected_indices]
+                y = y[selected_indices]
+
+        final_counts = y.sum(axis=0).astype(int)
+        class_counts = {
+            used_species[i]: int(final_counts[i])
+            for i in range(len(used_species))
+        }
+
+        return X, y, used_species, excluded_species, class_counts
+
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path: str, device: str = "cpu"):
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+        model = cls()
+        model.create_classifier(
+            n_dim=checkpoint["n_dim"],
+            num_classes=checkpoint["num_classes"],
+            hidden_dim=checkpoint["hidden_dim"],
+            dropout=checkpoint["dropout"],
         )
-        return PAMClassifierStub()
+        model.load_state_dict(checkpoint["state_dict"])
+        model.to(device)
+        model.eval()
 
-    # Attempt to load the weights to validate the file
-    state = _try_torch_load(checkpoint_path, device)
-    if state is not None:
-        # TODO: construct real model from state_dict once architecture is locked
-        logger.info(
-            "Checkpoint loaded successfully from '%s' (model_type='%s'). "
-            "Real model wrapping not yet implemented — using stub with weights acknowledged.",
-            checkpoint_path, model_type,
-        )
-        return PAMClassifierStub(checkpoint_path=checkpoint_path)
-
-    # Fallback
-    logger.warning(
-        "Could not load checkpoint from '%s' — using PAMClassifierStub",
-        checkpoint_path,
-    )
-    return PAMClassifierStub(checkpoint_path=checkpoint_path)
+        return model
