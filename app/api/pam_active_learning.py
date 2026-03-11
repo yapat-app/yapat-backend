@@ -16,16 +16,17 @@ from typing import List, Optional
 from app.api.deps import get_db, get_current_active_user
 from app.models.user import User
 from app.schemas.pam_active_learning import (
-    PAMCheckpointCreate,
-    PAMCheckpointResponse,
-    PAMRunInferenceRequest,
-    PAMPredictionResponse,
-    PAMInferenceResult,
-    PAMFeedbackSubmit,
-    PAMFeedbackResponse,
-    PAMRetrainRequest,
-    PAMRetrainJobResponse,
-    PAMActiveLearningStats,
+    ALCheckpointCreate,
+    ALCheckpointResponse,
+    ALRunInferenceRequest,
+    ALPredictionResponse,
+    ALInferenceResult,
+    ALFeedbackSubmit,
+    ALFeedbackResponse,
+    ALRetrainRequest,
+    ALRetrainJobResponse,
+    ALStats,
+    ALTrainFromScratchRequest
 )
 from app.services.pam_active_learning_service import PAMActiveLearningService
 
@@ -177,11 +178,11 @@ def submit_feedback(
 
 @router.post(
     "/retrain",
-    response_model=PAMRetrainJobResponse,
+    response_model=ALRetrainJobResponse,
     status_code=status.HTTP_201_CREATED,
 )
 def manual_retrain(
-    body: PAMRetrainRequest,
+    body: ALRetrainRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -200,7 +201,7 @@ def manual_retrain(
         )
         # Enrich response with new checkpoint info from result_metrics
         metrics = job.result_metrics or {}
-        return PAMRetrainJobResponse(
+        return ALRetrainJobResponse(
             id=job.id,
             model_checkpoint_id=job.model_checkpoint_id,
             trigger=job.trigger,
@@ -222,9 +223,35 @@ def manual_retrain(
         )
 
 
+# ============ TRAIN FROM SCRATCH / COLD START TRAINING ============
+
+@router.post(
+    "/train-from-scratch",
+    response_model=ALCheckpointResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def train_from_scratch(
+    body: ALTrainFromScratchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    svc = PAMActiveLearningService(db)
+    try:
+        ckpt = svc.train_from_scratch(body)
+        return ckpt
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cold-start training failed: {e}",
+        )
+
+
+
 # ============ STATS ============
 
-@router.get("/stats", response_model=PAMActiveLearningStats)
+@router.get("/stats", response_model=ALStats)
 def get_stats(
     model_checkpoint_id: int = Query(..., description="Checkpoint ID"),
     db: Session = Depends(get_db),
@@ -237,6 +264,6 @@ def get_stats(
     """
     svc = PAMActiveLearningService(db)
     try:
-        return PAMActiveLearningStats(**svc.get_stats(model_checkpoint_id))
+        return ALStats(**svc.get_stats(model_checkpoint_id))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stats retrieval failed: {e}")
