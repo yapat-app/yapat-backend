@@ -44,6 +44,31 @@ class ALCheckpointCreate(BaseModel):
     is_base: bool = Field(default=False, description="Mark as base model entry (uses shared base weights)")
     parent_checkpoint_id: Optional[int] = Field(None, description="Parent checkpoint ID for version lineage")
 
+class ALCheckpointHyperparameters(BaseModel):
+    training_mode: Optional[str] = None
+
+    embedding_model_id: Optional[int] = None
+    metadata_path: Optional[str] = None
+    label_config_path: Optional[str] = None
+
+    min_samples_per_class: Optional[int] = None
+    max_samples_per_class: Optional[int] = None
+
+    epochs: Optional[int] = None
+    learning_rate: Optional[float] = None
+    batch_size: Optional[int] = None
+    hidden_dim: Optional[int] = None
+    dropout: Optional[float] = None
+    device: Optional[str] = None
+
+    resolved_snippet_set_id: Optional[int] = None
+    n_dim: Optional[int] = None
+    num_classes: Optional[int] = None
+    train_samples: Optional[int] = None
+
+    used_species: Optional[List[str]] = None
+    excluded_species: Optional[List[str]] = None
+    class_counts: Optional[Dict[str, int]] = None
 
 class ALCheckpointResponse(BaseModel):
     id: int
@@ -52,7 +77,7 @@ class ALCheckpointResponse(BaseModel):
     version: str
     checkpoint_path: Optional[str] = None
     model_type: str
-    hyperparameters: Optional[Dict[str, Any]] = None
+    hyperparameters: Optional[ALCheckpointHyperparameters] = None
     is_base: int = 0
     parent_checkpoint_id: Optional[int] = None
     status: ALModelStatusSchema
@@ -151,10 +176,51 @@ class ALRetrainJobResponse(BaseModel):
     class Config:
         from_attributes = True
 
+# ── Train from scratch ────────────────────────────────────────────────────────────
+
+class ALTrainFromScratchRequest(BaseModel):
+    """Train a fresh classifier from ground-truth labels to mitigate cold start."""
+    dataset_id: int = Field(..., description="Dataset to train on")
+    snippet_set_id: Optional[int] = Field(
+        None,
+        description="Snippet set to use; defaults to dataset.default_snippet_set_id",
+    )
+    embedding_model_id: int = Field(
+        ...,
+        description="Embedding model whose vectors should be used for training",
+    )
+    metadata_path: str = Field(
+        ...,
+        description="Path to metadata file containing ground-truth labels",
+    )
+    label_config_path: str = Field(..., description="Path to label config file consisting of class names to train on")
+    min_samples_per_class: int = Field(
+        default=5,
+        ge=1,
+        description="Minimum number of labeled samples required for a class to be included",
+    )
+    max_samples_per_class: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional cap on samples per class for balancing",
+    )
+    checkpoint_name: str = Field(
+        default="cold_start_base",
+        description="Human-readable name for the new base checkpoint",
+    )
+    version: str = Field(default="v0", description="Version tag for the new checkpoint")
+    model_type: str = Field(default="pam_multilabel_classifier", description="Classifier type identifier")
+    epochs: int = Field(default=20, ge=1, le=500)
+    learning_rate: float = Field(default=1e-3, gt=0)
+    batch_size: int = Field(default=32, ge=1, le=4096)
+    hidden_dim: int = Field(default=128, ge=1)
+    dropout: float = Field(default=0.5, ge=0.0, le=0.9)
+    device: str = Field(default="cpu", description="cpu or cuda")
+
 
 # ── Stats ──────────────────────────────────────────────────────────────
 
-class ALActiveLearningStats(BaseModel):
+class ALStats(BaseModel):
     model_checkpoint_id: int
     total_predictions: int
     total_feedback: int
@@ -163,3 +229,4 @@ class ALActiveLearningStats(BaseModel):
     modified: int
     feedback_since_last_retrain: int
     retrain_jobs: int
+
