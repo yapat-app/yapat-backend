@@ -97,7 +97,7 @@ class ALRunInferenceRequest(BaseModel):
     k: int = Field(default=20, ge=1, le=500, description="Number of top-ranked informative samples to return")
     device: str = Field(default="cpu", description="cpu or cuda")
     sampler: str = Field(default="composite", description="Sampler used for ranking")
-    threshold: float = Field(default=0.3, ge=0.0, le=1.0, description="Prediction threshold for multi-label outputs")
+    threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="Prediction threshold for multi-label outputs")
 
 
 class ALPredictionResponse(BaseModel):
