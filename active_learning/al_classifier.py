@@ -170,15 +170,31 @@ class MultiLabelMLPClassifier(nn.Module):
         }
 
     def filter_and_balance_classes(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        species_list: List[str],
-        min_samples_per_class: int,
-        max_samples_per_class: Optional[int] = None,
-    ) -> tuple[np.ndarray, np.ndarray, List[str], List[str], Dict[str, int]]:
+            self,
+            X: np.ndarray,
+            y: np.ndarray,
+            snippet_ids: List[int],
+            species_list: List[str],
+            min_samples_per_class: int,
+            max_samples_per_class: Optional[int] = None,
+    ) -> tuple[np.ndarray, np.ndarray, List[int], List[str], List[str], Dict[str, int]]:
         """
         Filter out under-supported classes and optionally cap samples per class.
+
+        Returns
+        -------
+        X : np.ndarray
+            Filtered embedding matrix.
+        y : np.ndarray
+            Filtered multi-hot label matrix.
+        snippet_ids : List[int]
+            Final snippet ids used for training.
+        used_species : List[str]
+            Species retained after min-sample filtering.
+        excluded_species : List[str]
+            Species removed for insufficient support.
+        class_counts : Dict[str, int]
+            Final per-class sample counts after filtering/balancing.
 
         Notes
         -----
@@ -204,6 +220,7 @@ class MultiLabelMLPClassifier(nn.Module):
                 np.empty((0, X.shape[1]), dtype=np.float32),
                 np.empty((0, 0), dtype=np.float32),
                 [],
+                [],
                 excluded_species,
                 {},
             )
@@ -213,11 +230,13 @@ class MultiLabelMLPClassifier(nn.Module):
         keep_rows = y.sum(axis=1) > 0
         X = X[keep_rows]
         y = y[keep_rows]
+        snippet_ids = [sid for sid, keep in zip(snippet_ids, keep_rows) if keep]
 
         if X.shape[0] == 0:
             return (
                 np.empty((0, X.shape[1]), dtype=np.float32),
                 np.empty((0, len(used_species)), dtype=np.float32),
+                [],
                 used_species,
                 excluded_species,
                 {},
@@ -242,6 +261,7 @@ class MultiLabelMLPClassifier(nn.Module):
             if selected_indices:
                 X = X[selected_indices]
                 y = y[selected_indices]
+                snippet_ids = [snippet_ids[i] for i in selected_indices]
 
         final_counts = y.sum(axis=0).astype(int)
         class_counts = {
@@ -249,7 +269,7 @@ class MultiLabelMLPClassifier(nn.Module):
             for i in range(len(used_species))
         }
 
-        return X, y, used_species, excluded_species, class_counts
+        return X, y, snippet_ids, used_species, excluded_species, class_counts
 
     @classmethod
     def load_from_checkpoint(cls, checkpoint_path: str, device: str = "cpu"):
