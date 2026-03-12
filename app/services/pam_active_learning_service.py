@@ -22,6 +22,7 @@ from app.models.pam_active_learning import (
     ALRetrainJob,
     ALModelStatus,
     ALRetrainStatus,
+    ALSnipperAnnotationState
 )
 from app.schemas.pam_active_learning import ALTrainFromScratchRequest
 from app.services.pam_classifier import MultiLabelMLPClassifier
@@ -32,16 +33,6 @@ logger = logging.getLogger(__name__)
 class PAMActiveLearningService:
     def __init__(self, db: Session):
         self.db = db
-
-    def get_pam_dataset(self, dataset_id: int) -> Dataset:
-        ds = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
-        if ds is None:
-            raise ValueError(f"Dataset {dataset_id} not found")
-        if ds.dataset_type != DatasetType.PAM:
-            raise ValueError(
-                f"Dataset {dataset_id} is of type '{ds.dataset_type.value}', expected 'PAM'"
-            )
-        return ds
 
     def register_checkpoint(
         self,
@@ -100,320 +91,8 @@ class PAMActiveLearningService:
         logger.info("Registered PAM checkpoint id=%d name=%s is_base=%s", ckpt.id, name, is_base)
         return ckpt
 
-    def get_checkpoint(self, checkpoint_id: int) -> Optional[ALModelCheckpoint]:
-        return (
-            self.db.query(ALModelCheckpoint)
-            .filter(ALModelCheckpoint.id == checkpoint_id)
-            .first()
-        )
 
-    def _checkout(self, ckpt: ALModelCheckpoint) -> PAMModelHandle:
-        return checkout_model(
-            checkpoint_id=ckpt.id,
-            dataset_id=ckpt.dataset_id,
-            name=ckpt.name,
-            version=ckpt.version,
-            checkpoint_path=ckpt.checkpoint_path,
-            model_type=ckpt.model_type,
-            hyperparameters=ckpt.hyperparameters or {},
-            is_base=bool(ckpt.is_base),
-            parent_checkpoint_id=ckpt.parent_checkpoint_id,
-            base_model_path_setting=settings.PAM_BASE_MODEL_PATH,
-        )
 
-    def _ensure_dir(self, dir_path: str) -> str:
-        os.makedirs(dir_path, exist_ok=True)
-        return dir_path
-
-    def _load_embeddings(
-            self,
-            snippet_set_id: int,
-            embedding_model_id: int,
-    ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
-        """
-        Load embeddings for a snippet set using embedding_model_id.
-
-        Returns
-        -------
-        X : np.ndarray
-            Embedding matrix [N, D]
-        snippet_rows : List[Dict[str, Any]]
-            Per-snippet metadata needed for alignment with ground truth
-        """
-        rows = (
-            self.db.query(
-                Snippet.id,
-                Snippet.recording_id,
-                Snippet.start_time,
-                Snippet.end_time,
-                Recording.file_name,
-                Recording.file_path,
-                EmbeddingVector.vector,
-                EmbeddingVector.dim,
-            )
-            .join(Recording, Snippet.recording_id == Recording.id)
-            .join(EmbeddingVector, Snippet.id == EmbeddingVector.snippet_id)
-            .filter(Snippet.snippet_set_id == snippet_set_id)
-            .filter(EmbeddingVector.embedding_model_id == embedding_model_id)
-            .order_by(Snippet.id)
-            .all()
-        )
-
-        if not rows:
-            raise ValueError(
-                f"No embeddings found for snippet_set_id={snippet_set_id}, "
-                f"embedding_model_id={embedding_model_id}"
-            )
-
-        dims = {row[7] for row in rows}
-        if len(dims) != 1:
-            raise ValueError(f"Inconsistent embedding dimensions found: {dims}")
-
-        X = np.asarray([row[6] for row in rows], dtype=np.float32)
-
-        snippet_rows = [
-            {
-                "snippet_id": row[0],
-                "recording_id": row[1],
-                "start_time": float(row[2]),
-                "end_time": float(row[3]),
-                "file_name": row[4],
-                "file_path": row[5],
-            }
-            for row in rows
-        ]
-
-        return X, snippet_rows
-
-    def _load_species_from_label_config(self, label_config_path: str) -> List[str]:
-        if not label_config_path:
-            raise ValueError("label_config_path is required.")
-        if not os.path.isfile(label_config_path):
-            raise ValueError(f"Label config file not found: {label_config_path}")
-
-        with open(label_config_path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-
-        species_list = payload.get("species_list")
-        if not isinstance(species_list, list) or len(species_list) == 0:
-            raise ValueError("Label config must contain a non-empty 'species_list' field.")
-
-        return [str(s) for s in species_list]
-
-# TODO: This function is suitable for AnuraSet and will need adaptation in future
-
-    def _load_ground_truth_metadata(
-            self,
-            metadata_path: str,
-            species_list: List[str],
-            allowed_subsets: Optional[List[str]] = None,
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Load recording-level ground truth metadata.
-
-        Returns
-        -------
-        gt_index : Dict[str, List[Dict[str, Any]]]
-            Indexed by recording identifier (sample_name / fname / file_name / file_path),
-            each value is a list of annotation events:
-                {
-                    "labels": np.ndarray,          # multi-hot label vector
-                    "start_time": Optional[float],
-                    "end_time": Optional[float],
-                }
-
-        Supported formats
-        -----------------
-        Format A: event-style
-            Required:
-              - recording identifier: file_name | recording_file | recording_name | file_path | sample_name | fname
-              - species column: species | label
-            Optional:
-              - start_time / end_time
-              - onset / offset
-              - min_t / max_t
-
-        Format B: wide multi-label
-            Required:
-              - recording identifier: sample_name | fname | file_name | file_path
-              - one column per species in species_list
-            Optional:
-              - min_t / max_t
-              - start_time / end_time
-              - onset / offset
-        """
-        if not os.path.isfile(metadata_path):
-            raise ValueError(f"Metadata file not found: {metadata_path}")
-
-        species_to_idx = {species: i for i, species in enumerate(species_list)}
-        gt_index: Dict[str, List[Dict[str, Any]]] = {}
-
-        with open(metadata_path, "r", encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames or []
-
-            # recording identifier column
-            id_col = None
-            for candidate in [
-                "sample_name",
-                "fname",
-                "file_name",
-                "recording_file",
-                "recording_name",
-                "file_path",
-            ]:
-                if candidate in fieldnames:
-                    id_col = candidate
-                    break
-
-            if id_col is None:
-                raise ValueError(
-                    "Metadata must contain one of: "
-                    "'sample_name', 'fname', 'file_name', 'recording_file', "
-                    "'recording_name', or 'file_path'."
-                )
-
-            # time columns
-            start_col = None
-            end_col = None
-            if "min_t" in fieldnames and "max_t" in fieldnames:
-                start_col = "min_t"
-                end_col = "max_t"
-            elif "start_time" in fieldnames and "end_time" in fieldnames:
-                start_col = "start_time"
-                end_col = "end_time"
-            elif "onset" in fieldnames and "offset" in fieldnames:
-                start_col = "onset"
-                end_col = "offset"
-
-            # format detection
-            has_species_columns = all(sp in fieldnames for sp in species_list)
-            species_col = None
-            for candidate in ["species", "label"]:
-                if candidate in fieldnames:
-                    species_col = candidate
-                    break
-
-            if not has_species_columns and species_col is None:
-                raise ValueError(
-                    "Metadata must contain either:\n"
-                    "- one binary column per species in species_list, or\n"
-                    "- a 'species' / 'label' column."
-                )
-
-            subset_col = "subset" if "subset" in fieldnames else None
-
-            for row in reader:
-                if subset_col and allowed_subsets is not None:
-                    subset_value = str(row.get(subset_col, "")).strip().lower()
-                    if subset_value not in allowed_subsets:
-                        continue
-                recording_key = str(row[id_col]).strip()
-                if not recording_key:
-                    continue
-
-                start_time = None
-                end_time = None
-                if start_col is not None and end_col is not None:
-                    raw_start = row.get(start_col)
-                    raw_end = row.get(end_col)
-                    if raw_start not in (None, "") and raw_end not in (None, ""):
-                        start_time = float(raw_start)
-                        end_time = float(raw_end)
-
-                y = np.zeros(len(species_list), dtype=np.float32)
-
-                # Format B: wide multi-label row
-                if has_species_columns:
-                    for sp in species_list:
-                        value = str(row.get(sp, "0")).strip().lower()
-                        y[species_to_idx[sp]] = 1.0 if value in {"1", "true", "yes"} else 0.0
-
-                # Format A: one species per row
-                else:
-                    species_value = str(row[species_col]).strip()
-                    if species_value in species_to_idx:
-                        y[species_to_idx[species_value]] = 1.0
-
-                # skip empty rows
-                if y.sum() == 0:
-                    continue
-
-                gt_index.setdefault(recording_key, []).append(
-                    {
-                        "labels": y,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                    }
-                )
-
-        if not gt_index:
-            raise ValueError(f"No usable ground-truth rows found in metadata file: {metadata_path}")
-
-        return gt_index
-
-    # Align indices of embeddings, labels and snippet ids
-
-    def _align_embeddings_and_labels(
-            self,
-            X: np.ndarray,
-            snippet_rows: List[Dict[str, Any]],
-            gt_index: Dict[str, List[Dict[str, Any]]],
-            species_list: List[str],
-    ) -> Tuple[np.ndarray, np.ndarray, List[int]]:
-        """
-        Align snippet embeddings with recording-level or segment-level ground truth.
-
-        Matching strategy
-        -----------------
-        1. Match snippet recording by file_name
-        2. If not found, try file_path
-        3. For matching metadata rows:
-           - if row has no time interval: applies to whole recording
-           - else include labels if metadata interval overlaps snippet interval
-        """
-        keep_indices: List[int] = []
-        y_rows: List[np.ndarray] = []
-        used_snippet_ids: List[int] = []
-
-        for i, snippet in enumerate(snippet_rows):
-            snippet_start = float(snippet["start_time"])
-            snippet_end = float(snippet["end_time"])
-
-            events = gt_index.get(snippet["file_name"])
-            if events is None:
-                events = gt_index.get(snippet["file_path"], [])
-
-            y = np.zeros(len(species_list), dtype=np.float32)
-
-            for event in events:
-                event_labels = event["labels"]
-                event_start = event["start_time"]
-                event_end = event["end_time"]
-
-                # recording-level label
-                if event_start is None or event_end is None:
-                    y = np.maximum(y, event_labels)
-                    continue
-
-                # interval overlap
-                overlaps = (event_start < snippet_end) and (event_end > snippet_start)
-                if overlaps:
-                    y = np.maximum(y, event_labels)
-
-            if y.sum() > 0:
-                keep_indices.append(i)
-                y_rows.append(y)
-                used_snippet_ids.append(snippet["snippet_id"])
-
-        if not keep_indices:
-            raise ValueError(
-                "No overlap found between snippet embeddings and ground-truth metadata."
-            )
-
-        X_aligned = X[keep_indices]
-        y_aligned = np.stack(y_rows, axis=0).astype(np.float32)
-        return X_aligned, y_aligned, used_snippet_ids
 
     def _save_classifier_checkpoint(
         self,
@@ -435,15 +114,11 @@ class PAMActiveLearningService:
         }
         torch.save(checkpoint, checkpoint_path)
 
-# To update the species list if some species have to be eliminated during min max check
-    def _save_label_config(self, label_config_path: str, species_list: List[str]) -> None:
-        payload = {"species_list": species_list}
-        with open(label_config_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+
 
     # Train from scratch (COLD START)
 
-    def train_from_scratch(self, body: ALTrainFromScratchRequest) -> ALRetrainJob:
+    def train_from_scratch(self, body: ALTrainFromScratchRequest) -> ALModelCheckpoint:
         ds = self.get_pam_dataset(body.dataset_id)
 
         snippet_set_id = body.snippet_set_id or ds.default_snippet_set_id
@@ -527,10 +202,11 @@ class PAMActiveLearningService:
 
             model = MultiLabelMLPClassifier()
 
-            X_train, y_train, used_species, excluded_species, class_counts = (
+            X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
                 model.filter_and_balance_classes(
                     X=X_train,
                     y=y_train,
+                    snippet_ids=used_snippet_ids,
                     species_list=species_list,
                     min_samples_per_class=body.min_samples_per_class,
                     max_samples_per_class=body.max_samples_per_class,
@@ -609,7 +285,11 @@ class PAMActiveLearningService:
                 "excluded_species": excluded_species,
                 "class_counts": class_counts,
             }
-
+            self._mark_snippets_as_labeled(
+                dataset_id=body.dataset_id,
+                snippet_ids=labeled_snippet_ids,
+                model_checkpoint_id=model_ckpt.id,
+            )
             job.status = ALRetrainStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
             job.result_metrics = {
@@ -624,11 +304,10 @@ class PAMActiveLearningService:
                 "class_counts": class_counts,
                 **train_metrics,
             }
-
             self.db.commit()
             self.db.refresh(model_ckpt)
             self.db.refresh(job)
-            return job
+            return model_ckpt
 
         except Exception as e:
             logger.exception("Cold-start training failed.")
@@ -1052,6 +731,26 @@ class PAMActiveLearningService:
         return pred
 
 
+
+    def list_checkpoints(
+        self, dataset_id: Optional[int] = None
+    ) -> List[ALModelCheckpoint]:
+        q = self.db.query(ALModelCheckpoint)
+        if dataset_id is not None:
+            q = q.filter(ALModelCheckpoint.dataset_id == dataset_id)
+        return q.order_by(ALModelCheckpoint.created_at.desc()).all()
+
+
+    def _get_pam_dataset(self, dataset_id: int) -> Dataset:
+        ds = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if ds is None:
+            raise ValueError(f"Dataset {dataset_id} not found")
+        if ds.dataset_type != DatasetType.PAM:
+            raise ValueError(
+                f"Dataset {dataset_id} is of type '{ds.dataset_type.value}', expected 'PAM'"
+            )
+        return ds
+
     def _feedback_count_since_retrain(self, checkpoint_id: int) -> int:
         """Count feedback events after the most recent completed retrain."""
         last_retrain = (
@@ -1076,11 +775,363 @@ class PAMActiveLearningService:
         )
         return count or 0
 
+    def _align_embeddings_and_labels(
+            self,
+            X: np.ndarray,
+            snippet_rows: List[Dict[str, Any]],
+            gt_index: Dict[str, List[Dict[str, Any]]],
+            species_list: List[str],
+    ) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+        """
+        Align snippet embeddings with recording-level or segment-level ground truth.
 
-    def list_checkpoints(
-        self, dataset_id: Optional[int] = None
-    ) -> List[ALModelCheckpoint]:
-        q = self.db.query(ALModelCheckpoint)
-        if dataset_id is not None:
-            q = q.filter(ALModelCheckpoint.dataset_id == dataset_id)
-        return q.order_by(ALModelCheckpoint.created_at.desc()).all()
+        Matching strategy
+        -----------------
+        1. Match snippet recording by file_name
+        2. If not found, try file_path
+        3. For matching metadata rows:
+           - if row has no time interval: applies to whole recording
+           - else include labels if metadata interval overlaps snippet interval
+        """
+        keep_indices: List[int] = []
+        y_rows: List[np.ndarray] = []
+        used_snippet_ids: List[int] = []
+
+        for i, snippet in enumerate(snippet_rows):
+            snippet_start = float(snippet["start_time"])
+            snippet_end = float(snippet["end_time"])
+
+            events = gt_index.get(snippet["file_name"])
+            if events is None:
+                events = gt_index.get(snippet["file_path"], [])
+
+            y = np.zeros(len(species_list), dtype=np.float32)
+
+            for event in events:
+                event_labels = event["labels"]
+                event_start = event["start_time"]
+                event_end = event["end_time"]
+
+                # recording-level label
+                if event_start is None or event_end is None:
+                    y = np.maximum(y, event_labels)
+                    continue
+
+                # interval overlap
+                overlaps = (event_start < snippet_end) and (event_end > snippet_start)
+                if overlaps:
+                    y = np.maximum(y, event_labels)
+
+            if y.sum() > 0:
+                keep_indices.append(i)
+                y_rows.append(y)
+                used_snippet_ids.append(snippet["snippet_id"])
+
+        if not keep_indices:
+            raise ValueError(
+                "No overlap found between snippet embeddings and ground-truth metadata."
+            )
+
+        X_aligned = X[keep_indices]
+        y_aligned = np.stack(y_rows, axis=0).astype(np.float32)
+        return X_aligned, y_aligned, used_snippet_ids
+
+    # TODO: This function is suitable for AnuraSet and will need adaptation in future
+
+    def _load_ground_truth_metadata(
+            self,
+            metadata_path: str,
+            species_list: List[str],
+            allowed_subsets: Optional[List[str]] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Load recording-level ground truth metadata.
+
+        Returns
+        -------
+        gt_index : Dict[str, List[Dict[str, Any]]]
+            Indexed by recording identifier (sample_name / fname / file_name / file_path),
+            each value is a list of annotation events:
+                {
+                    "labels": np.ndarray,          # multi-hot label vector
+                    "start_time": Optional[float],
+                    "end_time": Optional[float],
+                }
+
+        Supported formats
+        -----------------
+        Format A: event-style
+            Required:
+              - recording identifier: file_name | recording_file | recording_name | file_path | sample_name | fname
+              - species column: species | label
+            Optional:
+              - start_time / end_time
+              - onset / offset
+              - min_t / max_t
+
+        Format B: wide multi-label
+            Required:
+              - recording identifier: sample_name | fname | file_name | file_path
+              - one column per species in species_list
+            Optional:
+              - min_t / max_t
+              - start_time / end_time
+              - onset / offset
+        """
+        if not os.path.isfile(metadata_path):
+            raise ValueError(f"Metadata file not found: {metadata_path}")
+
+        species_to_idx = {species: i for i, species in enumerate(species_list)}
+        gt_index: Dict[str, List[Dict[str, Any]]] = {}
+
+        with open(metadata_path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+
+            # recording identifier column
+            id_col = None
+            for candidate in [
+                "sample_name",
+                "fname",
+                "file_name",
+                "recording_file",
+                "recording_name",
+                "file_path",
+            ]:
+                if candidate in fieldnames:
+                    id_col = candidate
+                    break
+
+            if id_col is None:
+                raise ValueError(
+                    "Metadata must contain one of: "
+                    "'sample_name', 'fname', 'file_name', 'recording_file', "
+                    "'recording_name', or 'file_path'."
+                )
+
+            # time columns
+            start_col = None
+            end_col = None
+            if "min_t" in fieldnames and "max_t" in fieldnames:
+                start_col = "min_t"
+                end_col = "max_t"
+            elif "start_time" in fieldnames and "end_time" in fieldnames:
+                start_col = "start_time"
+                end_col = "end_time"
+            elif "onset" in fieldnames and "offset" in fieldnames:
+                start_col = "onset"
+                end_col = "offset"
+
+            # format detection
+            has_species_columns = all(sp in fieldnames for sp in species_list)
+            species_col = None
+            for candidate in ["species", "label"]:
+                if candidate in fieldnames:
+                    species_col = candidate
+                    break
+
+            if not has_species_columns and species_col is None:
+                raise ValueError(
+                    "Metadata must contain either:\n"
+                    "- one binary column per species in species_list, or\n"
+                    "- a 'species' / 'label' column."
+                )
+
+            subset_col = "subset" if "subset" in fieldnames else None
+
+            for row in reader:
+                if subset_col and allowed_subsets is not None:
+                    subset_value = str(row.get(subset_col, "")).strip().lower()
+                    if subset_value not in allowed_subsets:
+                        continue
+                recording_key = str(row[id_col]).strip()
+                if not recording_key:
+                    continue
+
+                start_time = None
+                end_time = None
+                if start_col is not None and end_col is not None:
+                    raw_start = row.get(start_col)
+                    raw_end = row.get(end_col)
+                    if raw_start not in (None, "") and raw_end not in (None, ""):
+                        start_time = float(raw_start)
+                        end_time = float(raw_end)
+
+                y = np.zeros(len(species_list), dtype=np.float32)
+
+                # Format B: wide multi-label row
+                if has_species_columns:
+                    for sp in species_list:
+                        value = str(row.get(sp, "0")).strip().lower()
+                        y[species_to_idx[sp]] = 1.0 if value in {"1", "true", "yes"} else 0.0
+
+                # Format A: one species per row
+                else:
+                    species_value = str(row[species_col]).strip()
+                    if species_value in species_to_idx:
+                        y[species_to_idx[species_value]] = 1.0
+
+                # skip empty rows
+                if y.sum() == 0:
+                    continue
+
+                gt_index.setdefault(recording_key, []).append(
+                    {
+                        "labels": y,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                    }
+                )
+
+        if not gt_index:
+            raise ValueError(f"No usable ground-truth rows found in metadata file: {metadata_path}")
+
+        return gt_index
+
+    def _get_checkpoint(self, checkpoint_id: int) -> Optional[ALModelCheckpoint]:
+        return (
+            self.db.query(ALModelCheckpoint)
+            .filter(ALModelCheckpoint.id == checkpoint_id)
+            .first()
+        )
+
+
+    def _ensure_dir(self, dir_path: str) -> str:
+        os.makedirs(dir_path, exist_ok=True)
+        return dir_path
+
+    def _load_embeddings(
+            self,
+            snippet_set_id: int,
+            embedding_model_id: int,
+    ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        """
+        Load embeddings for a snippet set using embedding_model_id.
+
+        Returns
+        -------
+        X : np.ndarray
+            Embedding matrix [N, D]
+        snippet_rows : List[Dict[str, Any]]
+            Per-snippet metadata needed for alignment with ground truth
+        """
+        rows = (
+            self.db.query(
+                Snippet.id,
+                Snippet.recording_id,
+                Snippet.start_time,
+                Snippet.end_time,
+                Recording.file_name,
+                Recording.file_path,
+                EmbeddingVector.vector,
+                EmbeddingVector.dim,
+            )
+            .join(Recording, Snippet.recording_id == Recording.id)
+            .join(EmbeddingVector, Snippet.id == EmbeddingVector.snippet_id)
+            .filter(Snippet.snippet_set_id == snippet_set_id)
+            .filter(EmbeddingVector.embedding_model_id == embedding_model_id)
+            .order_by(Snippet.id)
+            .all()
+        )
+
+        if not rows:
+            raise ValueError(
+                f"No embeddings found for snippet_set_id={snippet_set_id}, "
+                f"embedding_model_id={embedding_model_id}"
+            )
+
+        dims = {row[7] for row in rows}
+        if len(dims) != 1:
+            raise ValueError(f"Inconsistent embedding dimensions found: {dims}")
+
+        X = np.asarray([row[6] for row in rows], dtype=np.float32)
+
+        snippet_rows = [
+            {
+                "snippet_id": row[0],
+                "recording_id": row[1],
+                "start_time": float(row[2]),
+                "end_time": float(row[3]),
+                "file_name": row[4],
+                "file_path": row[5],
+            }
+            for row in rows
+        ]
+
+        return X, snippet_rows
+
+    # To update the species list if some species have to be eliminated during min max check
+    def _save_label_config(self, label_config_path: str, species_list: List[str]) -> None:
+        payload = {"species_list": species_list}
+        with open(label_config_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def _load_species_from_label_config(self, label_config_path: str) -> List[str]:
+        if not label_config_path:
+            raise ValueError("label_config_path is required.")
+        if not os.path.isfile(label_config_path):
+            raise ValueError(f"Label config file not found: {label_config_path}")
+
+        with open(label_config_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        species_list = payload.get("species_list")
+        if not isinstance(species_list, list) or len(species_list) == 0:
+            raise ValueError("Label config must contain a non-empty 'species_list' field.")
+
+        return [str(s) for s in species_list]
+
+    def _mark_snippets_as_labeled(
+            self,
+            dataset_id: int,
+            snippet_ids: List[int],
+            model_checkpoint_id: Optional[int] = None,
+    ) -> None:
+        """
+        Mark snippets as part of the labeled pool for active learning.
+
+        If a row already exists for (dataset_id, snippet_id), update it.
+        Otherwise create it.
+        """
+        if not snippet_ids:
+            return
+
+        existing_rows = (
+            self.db.query(ALSnippetAnnotationState)
+            .filter(
+                ALSnippetAnnotationState.dataset_id == dataset_id,
+                ALSnippetAnnotationState.snippet_id.in_(snippet_ids),
+            )
+            .all()
+        )
+
+        existing_by_snippet = {row.snippet_id: row for row in existing_rows}
+
+        for snippet_id in snippet_ids:
+            row = existing_by_snippet.get(snippet_id)
+            if row is not None:
+                row.is_labeled = 1
+                row.model_checkpoint_id = model_checkpoint_id
+            else:
+                self.db.add(
+                    ALSnippetAnnotationState(
+                        dataset_id=dataset_id,
+                        snippet_id=snippet_id,
+                        is_labeled=1,
+                        model_checkpoint_id=model_checkpoint_id,
+                    )
+                )
+
+    # def _checkout(self, ckpt: ALModelCheckpoint) -> PAMModelHandle:
+    #     return checkout_model(
+    #         checkpoint_id=ckpt.id,
+    #         dataset_id=ckpt.dataset_id,
+    #         name=ckpt.name,
+    #         version=ckpt.version,
+    #         checkpoint_path=ckpt.checkpoint_path,
+    #         model_type=ckpt.model_type,
+    #         hyperparameters=ckpt.hyperparameters or {},
+    #         is_base=bool(ckpt.is_base),
+    #         parent_checkpoint_id=ckpt.parent_checkpoint_id,
+    #         base_model_path_setting=settings.PAM_BASE_MODEL_PATH,
+    #     )
