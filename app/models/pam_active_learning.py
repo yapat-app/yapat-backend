@@ -40,6 +40,9 @@ class ALRetrainStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
+class ALAnnotationSource(str, enum.Enum):
+    GROUND_TRUTH = "ground_truth"
+    USER = "user"
 
 # ── Model Checkpoint ───────────────────────────────────────────────────
 
@@ -84,7 +87,7 @@ class ALModelCheckpoint(Base):
     # Relationships
     dataset = relationship("Dataset", back_populates="al_model_checkpoints")
     predictions = relationship(
-        "ALprediction", back_populates="model_checkpoint", cascade="all, delete-orphan"
+        "ALPrediction", back_populates="model_checkpoint", cascade="all, delete-orphan"
     )
     retrain_jobs = relationship(
         "ALRetrainJob", back_populates="model_checkpoint", cascade="all, delete-orphan"
@@ -148,14 +151,24 @@ class ALPrediction(Base):
         UniqueConstraint("model_checkpoint_id", "snippet_id", name="uq_pam_prediction"),
     )
 
-class ALSnippetAnnotationState(Base):
-    __tablename__ = "al_snippet_annotation_state"
+class ALSnippetAnnotation(Base):
+    __tablename__ = "al_snippet_annotation"
 
     id = Column(Integer, primary_key=True)
     dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True)
     snippet_id = Column(Integer, ForeignKey("snippets.id", ondelete="CASCADE"), nullable=False, index=True)
-    is_labeled = Column(Integer, nullable=False, default=1)
-    model_checkpoint_id = Column(Integer, ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"), nullable=True)
+    label = Column(String, nullable=False, index=True)
+    source = Column(
+        SQLEnum(ALAnnotationSource, name="al_annotation_source_enum", create_type=True),
+        nullable=False,
+    )
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    model_checkpoint_id = Column(Integer, ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (

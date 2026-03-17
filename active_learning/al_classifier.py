@@ -285,5 +285,6 @@ class MultiLabelMLPClassifier(nn.Module):
         model.load_state_dict(checkpoint["state_dict"])
         model.to(device)
         model.eval()
+        model.label_order = checkpoint.get("label_order", None)
 
         return model
