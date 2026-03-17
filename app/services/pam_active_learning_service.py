@@ -22,7 +22,8 @@ from app.models.pam_active_learning import (
     ALRetrainJob,
     ALModelStatus,
     ALRetrainStatus,
-    ALSnipperAnnotationState
+    ALSnippetAnnotation,
+    ALAnnotationSource
 )
 from app.schemas.pam_active_learning import ALTrainFromScratchRequest
 from app.services.pam_classifier import MultiLabelMLPClassifier
@@ -100,6 +101,7 @@ class PAMActiveLearningService:
         checkpoint_path: str,
         hidden_dim: int,
         dropout: float,
+        label_order:list[str]
     ) -> None:
         if model.model is None:
             raise ValueError("Cannot save checkpoint: classifier architecture has not been created.")
@@ -111,6 +113,7 @@ class PAMActiveLearningService:
             "hidden_dim": hidden_dim,
             "dropout": dropout,
             "state_dict": model.state_dict(),
+            "label_order": label_order,
         }
         torch.save(checkpoint, checkpoint_path)
 
@@ -270,6 +273,7 @@ class PAMActiveLearningService:
                 checkpoint_path=checkpoint_path,
                 hidden_dim=body.hidden_dim,
                 dropout=body.dropout,
+                label_order=used_species
             )
 
             model_ckpt.checkpoint_path = checkpoint_path
@@ -281,14 +285,20 @@ class PAMActiveLearningService:
                 "n_dim": n_dim,
                 "num_classes": num_classes,
                 "train_samples": int(X_train.shape[0]),
+                "label_order": used_species,
                 "used_species": used_species,
                 "excluded_species": excluded_species,
                 "class_counts": class_counts,
             }
-            self._mark_snippets_as_labeled(
+            self._store_snippet_annotations(
                 dataset_id=body.dataset_id,
                 snippet_ids=labeled_snippet_ids,
+                y=y_train,
+                label_order=used_species,
+                # Hardcoding source as groundtruth as this service would only be called for cold start
+                source=ALAnnotationSource.GROUND_TRUTH,
                 model_checkpoint_id=model_ckpt.id,
+                user_id=None,
             )
             job.status = ALRetrainStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
@@ -320,7 +330,7 @@ class PAMActiveLearningService:
             self.db.refresh(job)
             raise
 
-    def manual_retrain(
+    def retrain(
         self,
         model_checkpoint_id: int,
         epochs: int = 5,
@@ -1081,46 +1091,58 @@ class PAMActiveLearningService:
 
         return [str(s) for s in species_list]
 
-    def _mark_snippets_as_labeled(
+    def _store_snippet_annotations(
             self,
             dataset_id: int,
-            snippet_ids: List[int],
-            model_checkpoint_id: Optional[int] = None,
+            snippet_ids: list[int],
+            y: np.ndarray,
+            label_order: list[str],
+            source: ALAnnotationSource,
+            model_checkpoint_id: int | None = None,
+            user_id: int | None = None,
     ) -> None:
         """
-        Mark snippets as part of the labeled pool for active learning.
-
-        If a row already exists for (dataset_id, snippet_id), update it.
-        Otherwise create it.
+        Store one annotation row per positive label per snippet.
         """
-        if not snippet_ids:
-            return
-
-        existing_rows = (
-            self.db.query(ALSnippetAnnotationState)
-            .filter(
-                ALSnippetAnnotationState.dataset_id == dataset_id,
-                ALSnippetAnnotationState.snippet_id.in_(snippet_ids),
+        if len(snippet_ids) != y.shape[0]:
+            raise ValueError(
+                f"Mismatch: {len(snippet_ids)=} but y has {y.shape[0]} rows."
             )
-            .all()
-        )
 
-        existing_by_snippet = {row.snippet_id: row for row in existing_rows}
+        if len(label_order) != y.shape[1]:
+            raise ValueError(
+                f"Mismatch: {len(label_order)=} but y has {y.shape[1]} columns."
+            )
 
-        for snippet_id in snippet_ids:
-            row = existing_by_snippet.get(snippet_id)
-            if row is not None:
-                row.is_labeled = 1
-                row.model_checkpoint_id = model_checkpoint_id
-            else:
-                self.db.add(
-                    ALSnippetAnnotationState(
-                        dataset_id=dataset_id,
-                        snippet_id=snippet_id,
-                        is_labeled=1,
-                        model_checkpoint_id=model_checkpoint_id,
+        for row_idx, snippet_id in enumerate(snippet_ids):
+            positive_indices = np.where(y[row_idx] > 0)[0]
+
+            for class_idx in positive_indices:
+                label = label_order[class_idx]
+
+                exists = (
+                    self.db.query(ALSnippetAnnotation)
+                    .filter(
+                        ALSnippetAnnotation.snippet_id == snippet_id,
+                        ALSnippetAnnotation.label == label,
+                        ALSnippetAnnotation.source == source,
+                        ALSnippetAnnotation.user_id == user_id,
+                        ALSnippetAnnotation.model_checkpoint_id == model_checkpoint_id,
                     )
+                    .first()
                 )
+
+                if exists is None:
+                    self.db.add(
+                        ALSnippetAnnotation(
+                            dataset_id=dataset_id,
+                            snippet_id=snippet_id,
+                            label=label,
+                            source=source,
+                            user_id=user_id,
+                            model_checkpoint_id=model_checkpoint_id,
+                        )
+                    )
 
     # def _checkout(self, ckpt: ALModelCheckpoint) -> PAMModelHandle:
     #     return checkout_model(
