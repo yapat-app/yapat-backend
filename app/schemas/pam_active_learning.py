@@ -235,14 +235,33 @@ class ALTrainFromScratchRequest(BaseModel):
     dropout: float = Field(default=0.5, ge=0.0, le=0.9)
     device: str = Field(default="cpu", description="cpu or cuda")
 
-    run_inference: bool = False
-    # These below should be optional
-    inference_threshold: float = 0.3
-    density_k: int = 15
-    composite_wu: float = 0.5
-    composite_wd: float = 0.25
-    composite_wr: float = 0.25
-
+    run_inference: bool = Field(
+        default=False,
+        description="Whether to run inference and store predictions immediately after training",
+    )
+    inference_threshold: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Optional prediction threshold for post-training inference. Uses default when omitted.",
+    )
+    density_k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional k for density scoring during post-training inference. Uses default when omitted.",
+    )
+    composite_wu: Optional[float] = Field(
+        default=None,
+        description="Optional uncertainty weight for composite scoring during post-training inference.",
+    )
+    composite_wd: Optional[float] = Field(
+        default=None,
+        description="Optional diversity weight for composite scoring during post-training inference.",
+    )
+    composite_wr: Optional[float] = Field(
+        default=None,
+        description="Optional density weight for composite scoring during post-training inference.",
+    )
 
 # ── Stats ──────────────────────────────────────────────────────────────
 
