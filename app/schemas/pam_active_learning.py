@@ -89,15 +89,30 @@ class ALCheckpointResponse(BaseModel):
 
 
 # ── Inference / Predictions ────────────────────────────────────────────
-
 class ALRunInferenceRequest(BaseModel):
-    """Trigger inference on a snippet set using a checked-out model."""
-    model_checkpoint_id: int = Field(..., description="Checked-out model checkpoint ID")
+    """Run inference and store predictions/acquisition scores for a checkpoint on a snippet set."""
+
+    model_checkpoint_id: int = Field(..., description="Model checkpoint ID to use for inference")
     snippet_set_id: int = Field(..., description="Snippet set to run inference on")
-    k: int = Field(default=20, ge=1, le=500, description="Number of top-ranked informative samples to return")
-    device: str = Field(default="cpu", description="cpu or cuda")
-    sampler: str = Field(default="composite", description="Sampler used for ranking")
-    threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="Prediction threshold for multi-label outputs")
+    device: str = Field(default="cpu", description="Device for inference, e.g. 'cpu' or 'cuda'",)
+    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Optional prediction threshold for multi-label outputs. Uses service/model default when omitted.",)
+    density_k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional k for density scoring. Uses service default when omitted.",
+    )
+    composite_wu: Optional[float] = Field(
+        default=None,
+        description="Optional uncertainty weight for composite scoring. Uses service default when omitted.",
+    )
+    composite_wd: Optional[float] = Field(
+        default=None,
+        description="Optional diversity weight for composite scoring. Uses service default when omitted.",
+    )
+    composite_wr: Optional[float] = Field(
+        default=None,
+        description="Optional density weight for composite scoring. Uses service default when omitted.",
+    )
 
 
 class ALPredictionResponse(BaseModel):
@@ -219,6 +234,14 @@ class ALTrainFromScratchRequest(BaseModel):
     hidden_dim: int = Field(default=128, ge=1)
     dropout: float = Field(default=0.5, ge=0.0, le=0.9)
     device: str = Field(default="cpu", description="cpu or cuda")
+
+    run_inference: bool = False
+    # These below should be optional
+    inference_threshold: float = 0.3
+    density_k: int = 15
+    composite_wu: float = 0.5
+    composite_wd: float = 0.25
+    composite_wr: float = 0.25
 
 
 # ── Stats ──────────────────────────────────────────────────────────────
