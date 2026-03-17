@@ -118,6 +118,7 @@ class ALPredictionResponse(BaseModel):
 class ALInferenceResult(BaseModel):
     """Result returned after running inference + scoring."""
     predictions: List[ALPredictionResponse]
+    total_scored: int
     total_labeled: int
     total_unlabeled: int
     model_info: Dict[str, Any]
