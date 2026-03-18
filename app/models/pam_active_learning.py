@@ -172,7 +172,7 @@ class ALSnippetAnnotation(Base):
         nullable=True,
         index=True,
     )
-    model_checkpoint_id = Column(Integer, ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"), nullable=False, index=True)
+    model_checkpoint_id = Column(Integer, ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     snippet = relationship("Snippet", back_populates="al_annotations")
@@ -217,7 +217,7 @@ class ALFeedbackEvent(Base):
         SQLEnum(ALFeedbackAction, name="al_feedback_action_enum", create_type=True),
         nullable=False,
     )
-    modified_label = Column(String, nullable=True)  # only when action == MODIFY
+    modified_labels = Column(JSON, nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

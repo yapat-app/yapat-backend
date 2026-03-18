@@ -127,25 +127,37 @@ class ALInferenceRow(BaseModel):
 
 
 # ── Feedback ───────────────────────────────────────────────────────────
-
 class ALFeedbackSubmit(BaseModel):
-    """Submit feedback on a single prediction."""
-    prediction_id: int = Field(..., description="Prediction to give feedback on")
-    action: ALFeedbackActionSchema = Field(..., description="ACCEPT, REJECT, or MODIFY")
-    modified_label: Optional[str] = Field(
-        None, description="Corrected label (required when action=MODIFY)"
+    dataset_id: int = Field(..., description="Dataset ID")
+    model_checkpoint_id: int = Field(..., description="Checkpoint under which the snippet was reviewed")
+    snippet_id: int = Field(..., description="Snippet being reviewed")
+
+    action: ALFeedbackActionSchema = Field(
+        ...,
+        description="ACCEPT, REJECT, or MODIFY",
     )
+
+    labels: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Final labels provided by the user. "
+            "For ACCEPT this may be omitted to use predicted labels. "
+            "For MODIFY this should contain replacement labels. "
+            "For REJECT this is usually omitted."
+        ),
+    )
+
     notes: Optional[str] = None
+    user_id: Optional[int] = None
 
 
 class ALFeedbackResponse(BaseModel):
     id: int
     prediction_id: int
     action: ALFeedbackActionSchema
-    modified_label: Optional[str] = None
+    modified_labels: Optional[List[str]] = None
     notes: Optional[str] = None
     created_at: datetime
-    # auto-retrain status
     feedback_count_since_retrain: int
     retrain_triggered: bool
 

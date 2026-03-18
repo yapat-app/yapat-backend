@@ -245,6 +245,32 @@ def train_from_scratch(
             detail=f"Cold-start training failed: {e}",
         )
 
+@router.post(
+    "/feedback",
+    response_model=ALFeedbackResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def submit_feedback(
+    body: ALFeedbackSubmit,
+    db: Session = Depends(get_db),
+):
+    service = PAMActiveLearningService(db)
+
+    try:
+        result = service.submit_feedback(body)
+        return result
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to submit feedback: {str(e)}",
+        )
 
 # @router.post("/inference", response_model=ALInferenceResult)
 # def run_inference(

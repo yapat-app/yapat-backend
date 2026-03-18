@@ -24,9 +24,15 @@ from app.models.pam_active_learning import (
     ALRetrainStatus,
     ALSnippetAnnotation,
     ALAnnotationSource,
-    ALPrediction
+    ALPrediction,
+    ALFeedbackEvent,
+    ALFeedbackAction,
 )
-from app.schemas.pam_active_learning import ALTrainFromScratchRequest, ALInferenceRow
+from app.schemas.pam_active_learning import (
+    ALTrainFromScratchRequest,
+    ALInferenceRow,
+    ALFeedbackSubmit,
+)
 from app.services.pam_classifier import MultiLabelMLPClassifier
 
 from active_learning.config import (
@@ -35,8 +41,8 @@ from active_learning.config import (
     DEFAULT_COMPOSITE_WU,
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
+    RETRAIN_AFTER,
 )
-
 logger = logging.getLogger(__name__)
 
 
@@ -356,6 +362,279 @@ class PAMActiveLearningService:
             self.db.refresh(job)
             raise
 
+    def submit_feedback(self, body: ALFeedbackSubmit) -> dict:
+        """
+        Save snippet-level user feedback.
+
+        Flow
+        ----
+        1. Resolve the prediction row for (model_checkpoint_id, snippet_id)
+        2. Store an ALFeedbackEvent
+        3. If ACCEPT or MODIFY, store trusted labels into ALSnippetAnnotation
+        4. Count feedback since last retrain
+        5. If threshold reached, retrain and run inference
+        """
+        #TODO: See if there is already a model training going on using last feedback. We don't want parallel retrainings.
+        model_ckpt = self._get_checkpoint(body.model_checkpoint_id)
+        if model_ckpt is None:
+            raise ValueError(f"Model checkpoint {body.model_checkpoint_id} not found.")
+
+        if model_ckpt.dataset_id != body.dataset_id:
+            raise ValueError(
+                f"Checkpoint {body.model_checkpoint_id} does not belong to dataset {body.dataset_id}."
+            )
+
+        prediction = (
+            self.db.query(ALPrediction)
+            .filter(
+                ALPrediction.model_checkpoint_id == body.model_checkpoint_id,
+                ALPrediction.snippet_id == body.snippet_id,
+            )
+            .one_or_none()
+        )
+        if prediction is None:
+            raise ValueError(
+                f"No prediction found for checkpoint={body.model_checkpoint_id}, snippet={body.snippet_id}."
+            )
+
+        modified_labels = None
+        if body.action == "MODIFY" or getattr(body.action, "value", None) == "MODIFY":
+            if not body.labels:
+                raise ValueError("labels are required when action=MODIFY")
+            modified_labels = body.labels
+
+        feedback = ALFeedbackEvent(
+            prediction_id=prediction.id,
+            user_id=body.user_id,
+            action=body.action.value if hasattr(body.action, "value") else body.action,
+            modified_labels=modified_labels,
+            notes=body.notes,
+        )
+        self.db.add(feedback)
+        self.db.flush()
+
+        labels_to_store: list[str] = []
+
+        action_value = body.action.value if hasattr(body.action, "value") else body.action
+
+        if action_value == "ACCEPT":
+            labels_to_store = body.labels if body.labels else (prediction.predicted_labels or [])
+
+        elif action_value == "MODIFY":
+            labels_to_store = body.labels or []
+
+        elif action_value == "REJECT":
+            labels_to_store = []
+
+        if labels_to_store:
+            self._store_user_labels_for_snippet(
+                dataset_id=body.dataset_id,
+                snippet_id=body.snippet_id,
+                labels=labels_to_store,
+                model_checkpoint_id=body.model_checkpoint_id,
+                user_id=body.user_id,
+            )
+
+        self.db.commit()
+        self.db.refresh(feedback)
+
+        feedback_count = self._feedback_count_since_retrain(body.model_checkpoint_id)
+        retrain_triggered = False
+
+        if feedback_count >= RETRAIN_AFTER:
+            retrain_triggered = True
+            self._auto_retrain_from_feedback(body.model_checkpoint_id)
+
+            # refresh count after retrain, optional
+            feedback_count = self._feedback_count_since_retrain(body.model_checkpoint_id)
+
+        return {
+            "id": feedback.id,
+            "prediction_id": feedback.prediction_id,
+            "action": feedback.action,
+            "modified_labels": feedback.modified_labels,
+            "notes": feedback.notes,
+            "created_at": feedback.created_at,
+            "feedback_count_since_retrain": feedback_count,
+            "retrain_triggered": retrain_triggered,
+        }
+
+    def _auto_retrain_from_feedback(self, parent_checkpoint_id: int) -> ALModelCheckpoint:
+        parent_ckpt = self._get_checkpoint(parent_checkpoint_id)
+        if parent_ckpt is None:
+            raise ValueError(f"Parent checkpoint {parent_checkpoint_id} not found.")
+
+        hyper = parent_ckpt.hyperparameters or {}
+
+        dataset_id = parent_ckpt.dataset_id
+        snippet_set_id = hyper.get("resolved_snippet_set_id")
+        embedding_model_id = hyper.get("embedding_model_id")
+        label_order = hyper.get("label_order")
+
+        if snippet_set_id is None:
+            raise ValueError("Parent checkpoint missing resolved_snippet_set_id in hyperparameters.")
+        if embedding_model_id is None:
+            raise ValueError("Parent checkpoint missing embedding_model_id in hyperparameters.")
+        if not label_order:
+            raise ValueError("Parent checkpoint missing label_order in hyperparameters.")
+
+        new_version = f"{parent_ckpt.version}_r{int(datetime.now(timezone.utc).timestamp())}"
+
+        new_ckpt = ALModelCheckpoint(
+            dataset_id=dataset_id,
+            name=parent_ckpt.name,
+            version=new_version,
+            checkpoint_path="",
+            label_config_path=parent_ckpt.label_config_path,
+            model_type=parent_ckpt.model_type,
+            hyperparameters={
+                **hyper,
+                "training_mode": "feedback_retrain",
+                "parent_checkpoint_id": parent_checkpoint_id,
+            },
+            is_base=0,
+            parent_checkpoint_id=parent_checkpoint_id,
+            status=ALModelStatus.LOADING,
+        )
+        self.db.add(new_ckpt)
+        self.db.flush()
+
+        job = ALRetrainJob(
+            model_checkpoint_id=new_ckpt.id,
+            dataset_id=dataset_id,
+            trigger="auto_feedback",
+            feedback_count=self._feedback_count_since_retrain(parent_checkpoint_id),
+            status=ALRetrainStatus.PENDING,
+            result_metrics=None,
+            error_message=None,
+            started_at=datetime.now(timezone.utc),
+        )
+        self.db.add(job)
+        self.db.commit()
+        self.db.refresh(new_ckpt)
+        self.db.refresh(job)
+
+        try:
+            job.status = ALRetrainStatus.RUNNING
+            self.db.commit()
+
+            X, snippet_rows = self._load_embeddings(
+                snippet_set_id=snippet_set_id,
+                embedding_model_id=embedding_model_id,
+            )
+
+            snippet_ids = [row["snippet_id"] for row in snippet_rows]
+
+            annotations_by_snippet = self._get_trusted_annotations(dataset_id=dataset_id)
+
+            keep_indices = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
+            if not keep_indices:
+                raise ValueError("No trusted annotations available for retraining.")
+
+            X_train = X[keep_indices]
+            train_snippet_ids = [snippet_ids[i] for i in keep_indices]
+            y_train = self._build_multihot_from_annotations(
+                snippet_ids=train_snippet_ids,
+                label_order=label_order,
+                annotations_by_snippet=annotations_by_snippet,
+            )
+
+            keep_rows = y_train.sum(axis=1) > 0
+            X_train = X_train[keep_rows]
+            y_train = y_train[keep_rows]
+            train_snippet_ids = [sid for sid, keep in zip(train_snippet_ids, keep_rows) if keep]
+
+            if X_train.shape[0] == 0:
+                raise ValueError("No training rows remain after filtering empty annotation rows.")
+
+            model = MultiLabelMLPClassifier()
+            model.create_classifier(
+                n_dim=X_train.shape[1],
+                num_classes=y_train.shape[1],
+                hidden_dim=int(hyper.get("hidden_dim", 128)),
+                dropout=float(hyper.get("dropout", 0.5)),
+            )
+            model.to(hyper.get("device", "cpu"))
+
+            train_metrics = model.fit(
+                X=X_train,
+                y=y_train,
+                epochs=int(hyper.get("epochs", 20)),
+                learning_rate=float(hyper.get("learning_rate", 1e-3)),
+                batch_size=int(hyper.get("batch_size", 32)),
+                device=hyper.get("device", "cpu"),
+            )
+
+            checkpoint_dir = self._ensure_dir(
+                os.path.join(
+                    settings.MODEL_ARTIFACTS_DIR,
+                    "pam_active_learning",
+                    str(dataset_id),
+                )
+            )
+
+            checkpoint_path = os.path.join(
+                checkpoint_dir,
+                f"{new_ckpt.name}_{new_ckpt.version}_ckpt_{new_ckpt.id}.pt",
+            )
+
+            self._save_classifier_checkpoint(
+                model=model,
+                checkpoint_path=checkpoint_path,
+                hidden_dim=int(hyper.get("hidden_dim", 128)),
+                dropout=float(hyper.get("dropout", 0.5)),
+                label_order=label_order,
+            )
+
+            new_ckpt.checkpoint_path = checkpoint_path
+            new_ckpt.status = ALModelStatus.AVAILABLE
+            new_ckpt.hyperparameters = {
+                **(new_ckpt.hyperparameters or {}),
+                "n_dim": int(X_train.shape[1]),
+                "num_classes": int(y_train.shape[1]),
+                "train_samples": int(X_train.shape[0]),
+            }
+
+            inference_metrics = self._run_and_store_inference(
+                dataset_id=dataset_id,
+                model_ckpt=new_ckpt,
+                model=model,
+                X=X,
+                snippet_rows=snippet_rows,
+                label_order=label_order,
+                threshold=hyper.get("threshold"),
+                density_k=hyper.get("density_k"),
+                wu=hyper.get("composite_wu"),
+                wd=hyper.get("composite_wd"),
+                wr=hyper.get("composite_wr"),
+            )
+
+            job.status = ALRetrainStatus.COMPLETED
+            job.completed_at = datetime.now(timezone.utc)
+            job.result_metrics = {
+                "new_checkpoint_id": new_ckpt.id,
+                "new_checkpoint_path": checkpoint_path,
+                "train_samples": int(X_train.shape[0]),
+                "num_classes": int(y_train.shape[1]),
+                "inference_metrics": inference_metrics,
+                **train_metrics,
+            }
+
+            self.db.commit()
+            self.db.refresh(new_ckpt)
+            self.db.refresh(job)
+            return new_ckpt
+
+        except Exception as e:
+            logger.exception("Auto retraining from feedback failed.")
+            new_ckpt.status = ALModelStatus.ERROR
+            job.status = ALRetrainStatus.FAILED
+            job.completed_at = datetime.now(timezone.utc)
+            job.error_message = str(e)
+            self.db.commit()
+            self.db.refresh(new_ckpt)
+            self.db.refresh(job)
+            raise
 
     def build_inference_rows(
             self,
@@ -453,7 +732,10 @@ class PAMActiveLearningService:
         return ds
 
     def _feedback_count_since_retrain(self, checkpoint_id: int) -> int:
-        """Count feedback events after the most recent completed retrain."""
+        """
+        Count feedback events created after the most recent completed retrain
+        for the given checkpoint.
+        """
         last_retrain = (
             self.db.query(ALRetrainJob.completed_at)
             .filter(
@@ -463,18 +745,20 @@ class PAMActiveLearningService:
             .order_by(ALRetrainJob.completed_at.desc())
             .first()
         )
-        cutoff = last_retrain[0] if last_retrain else datetime.min
+
+        cutoff = last_retrain[0] if last_retrain and last_retrain[0] is not None else datetime.min.replace(
+            tzinfo=timezone.utc)
 
         count = (
             self.db.query(func.count(ALFeedbackEvent.id))
-            .join(ALPrediction)
+            .join(ALPrediction, ALPrediction.id == ALFeedbackEvent.prediction_id)
             .filter(
                 ALPrediction.model_checkpoint_id == checkpoint_id,
                 ALFeedbackEvent.created_at > cutoff,
             )
             .scalar()
         )
-        return count or 0
+        return int(count or 0)
 
     def _align_embeddings_and_labels(
             self,
@@ -945,6 +1229,77 @@ class PAMActiveLearningService:
             "composite_wd": wd,
             "composite_wr": wr,
         }
+
+    def _store_user_labels_for_snippet(
+            self,
+            dataset_id: int,
+            snippet_id: int,
+            labels: list[str],
+            model_checkpoint_id: int,
+            user_id: int | None = None,
+    ) -> None:
+        for label in labels:
+            exists = (
+                self.db.query(ALSnippetAnnotation)
+                .filter(
+                    ALSnippetAnnotation.dataset_id == dataset_id,
+                    ALSnippetAnnotation.snippet_id == snippet_id,
+                    ALSnippetAnnotation.label == label,
+                    ALSnippetAnnotation.source == ALAnnotationSource.USER,
+                    ALSnippetAnnotation.user_id == user_id,
+                    ALSnippetAnnotation.model_checkpoint_id == model_checkpoint_id,
+                )
+                .one_or_none()
+            )
+
+            if exists is None:
+                self.db.add(
+                    ALSnippetAnnotation(
+                        dataset_id=dataset_id,
+                        snippet_id=snippet_id,
+                        label=label,
+                        source=ALAnnotationSource.USER,
+                        user_id=user_id,
+                        model_checkpoint_id=model_checkpoint_id,
+                    )
+                )
+
+    def _get_trusted_annotations(
+            self,
+            dataset_id: int,
+    ) -> dict[int, set[str]]:
+        rows = (
+            self.db.query(ALSnippetAnnotation.snippet_id, ALSnippetAnnotation.label)
+            .filter(
+                ALSnippetAnnotation.dataset_id == dataset_id,
+                ALSnippetAnnotation.source.in_([
+                    ALAnnotationSource.GROUND_TRUTH,
+                    ALAnnotationSource.USER,
+                ]),
+            )
+            .all()
+        )
+
+        result: dict[int, set[str]] = {}
+        for snippet_id, label in rows:
+            result.setdefault(snippet_id, set()).add(label)
+        return result
+
+    def _build_multihot_from_annotations(
+            self,
+            snippet_ids: list[int],
+            label_order: list[str],
+            annotations_by_snippet: dict[int, set[str]],
+    ) -> np.ndarray:
+        label_to_idx = {label: i for i, label in enumerate(label_order)}
+        y = np.zeros((len(snippet_ids), len(label_order)), dtype=np.float32)
+
+        for row_idx, snippet_id in enumerate(snippet_ids):
+            for label in annotations_by_snippet.get(snippet_id, set()):
+                if label in label_to_idx:
+                    y[row_idx, label_to_idx[label]] = 1.0
+
+        return y
 
     # def _checkout(self, ckpt: ALModelCheckpoint) -> PAMModelHandle:
     #     return checkout_model(
