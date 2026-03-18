@@ -92,6 +92,10 @@ class ALModelCheckpoint(Base):
     retrain_jobs = relationship(
         "ALRetrainJob", back_populates="model_checkpoint", cascade="all, delete-orphan"
     )
+    annotations = relationship(
+        "ALSnippetAnnotation",
+        back_populates="model_checkpoint",
+    )
     parent_checkpoint = relationship(
         "ALModelCheckpoint",
         remote_side="ALModelCheckpoint.id",
@@ -100,7 +104,7 @@ class ALModelCheckpoint(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("dataset_id", "name", "version", name="uq_pam_checkpoint"),
+        UniqueConstraint("dataset_id", "name", "version", name="uq_al_checkpoint"),
     )
 
 
@@ -142,13 +146,13 @@ class ALPrediction(Base):
 
     # Relationships
     model_checkpoint = relationship("ALModelCheckpoint", back_populates="predictions")
-    snippet = relationship("Snippet", back_populates="pam_predictions")
+    snippet = relationship("Snippet", back_populates="al_predictions")
     feedback_events = relationship(
         "ALFeedbackEvent", back_populates="prediction", cascade="all, delete-orphan"
     )
 
     __table_args__ = (
-        UniqueConstraint("model_checkpoint_id", "snippet_id", name="uq_pam_prediction"),
+        UniqueConstraint("model_checkpoint_id", "snippet_id", name="uq_al_prediction"),
     )
 
 class ALSnippetAnnotation(Base):
@@ -171,8 +175,18 @@ class ALSnippetAnnotation(Base):
     model_checkpoint_id = Column(Integer, ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
+    snippet = relationship("Snippet", back_populates="al_annotations")
+    model_checkpoint = relationship("ALModelCheckpoint", back_populates="annotations")
+
     __table_args__ = (
-        UniqueConstraint("dataset_id", "snippet_id", name="uq_al_labeled_snippet"),
+        UniqueConstraint(
+            "snippet_id",
+            "label",
+            "source",
+            "user_id",
+            "model_checkpoint_id",
+            name="uq_al_snippet_label_source_user_ckpt",
+        ),
     )
 
 # ── Feedback Event ─────────────────────────────────────────────────────

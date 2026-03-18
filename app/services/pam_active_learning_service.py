@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Sequence
 
 import numpy as np
 import torch
@@ -23,10 +23,19 @@ from app.models.pam_active_learning import (
     ALModelStatus,
     ALRetrainStatus,
     ALSnippetAnnotation,
-    ALAnnotationSource
+    ALAnnotationSource,
+    ALPrediction
 )
-from app.schemas.pam_active_learning import ALTrainFromScratchRequest
+from app.schemas.pam_active_learning import ALTrainFromScratchRequest, ALInferenceRow
 from app.services.pam_classifier import MultiLabelMLPClassifier
+
+from active_learning.config import (
+    DEFAULT_INFERENCE_THRESHOLD,
+    DEFAULT_DENSITY_K,
+    DEFAULT_COMPOSITE_WU,
+    DEFAULT_COMPOSITE_WD,
+    DEFAULT_COMPOSITE_WR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +106,7 @@ class PAMActiveLearningService:
 
     def _save_classifier_checkpoint(
         self,
-        model: MultiLabelMLPClassifier,
+        model,
         checkpoint_path: str,
         hidden_dim: int,
         dropout: float,
@@ -122,7 +131,7 @@ class PAMActiveLearningService:
     # Train from scratch (COLD START)
 
     def train_from_scratch(self, body: ALTrainFromScratchRequest) -> ALModelCheckpoint:
-        ds = self.get_pam_dataset(body.dataset_id)
+        ds = self._get_pam_dataset(body.dataset_id)
 
         snippet_set_id = body.snippet_set_id or ds.default_snippet_set_id
         if snippet_set_id is None:
@@ -169,6 +178,7 @@ class PAMActiveLearningService:
 
         job = ALRetrainJob(
             model_checkpoint_id=model_ckpt.id,
+            dataset_id=body.dataset_id,
             trigger="cold_start",
             feedback_count=0,
             status=ALRetrainStatus.PENDING,
@@ -300,6 +310,22 @@ class PAMActiveLearningService:
                 model_checkpoint_id=model_ckpt.id,
                 user_id=None,
             )
+
+            inference_metrics = None
+            if body.run_inference:
+                inference_metrics = self._run_and_store_inference(
+                    dataset_id=body.dataset_id,
+                    model_ckpt=model_ckpt,
+                    model=model,
+                    X=X,
+                    snippet_rows=snippet_rows,
+                    label_order=used_species,
+                    threshold=body.threshold,
+                    density_k=body.density_k,
+                    wu=body.composite_wu,
+                    wd=body.composite_wd,
+                    wr=body.composite_wr,
+                )
             job.status = ALRetrainStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
             job.result_metrics = {
@@ -330,415 +356,80 @@ class PAMActiveLearningService:
             self.db.refresh(job)
             raise
 
-    def retrain(
-        self,
-        model_checkpoint_id: int,
-        epochs: int = 5,
-        learning_rate: float = 1e-3,
-        device: str = "cpu",
-    ) -> ALRetrainJob:
+
+    def build_inference_rows(
+            self,
+            probs: torch.Tensor,
+            preds: torch.Tensor,
+            embeddings: torch.Tensor,
+            snippet_ids: Sequence[int],
+            labeled_snippet_ids: set[int],
+            label_order: List[str],
+            density_k: int,
+            wu: float,
+            wd: float,
+            wr: float,
+    ) -> list[ALInferenceRow]:
         """
-        Manually trigger a retrain regardless of interaction count.
+        Compute prediction rows for all snippets and attach acquisition scores
+        for unlabeled snippets.
         """
-        fb_count = self._feedback_count_since_retrain(model_checkpoint_id)
-        self._trigger_retrain(
-            checkpoint_id=model_checkpoint_id,
-            trigger="manual",
-            feedback_count=fb_count,
-            epochs=epochs,
-            learning_rate=learning_rate,
-            device=device,
-        )
-        # Return the latest job
-        return (
-            self.db.query(ALRetrainJob)
-            .filter(ALRetrainJob.model_checkpoint_id == model_checkpoint_id)
-            .order_by(ALRetrainJob.created_at.desc())
-            .first()
-        )
+        uncertainty_scores = uncertainty(probs)
 
-    def _next_version(self, checkpoint_id: int) -> str:
-        """
-        Compute the next version tag for a checkpoint lineage.
+        unlabeled_indices = [i for i, sid in enumerate(snippet_ids) if sid not in labeled_snippet_ids]
+        labeled_indices = [i for i, sid in enumerate(snippet_ids) if sid in labeled_snippet_ids]
 
-        Inspects existing versions for the same (dataset, name) and
-        returns "v{max+1}".
-        """
-        ckpt = self.get_checkpoint(checkpoint_id)
-        siblings = (
-            self.db.query(ALModelCheckpoint.version)
-            .filter(
-                ALModelCheckpoint.dataset_id == ckpt.dataset_id,
-                ALModelCheckpoint.name == ckpt.name,
-            )
-            .all()
-        )
-        max_num = 0
-        for (v,) in siblings:
-            # Parse "v0", "v1", … "vN"
-            try:
-                num = int(v.lstrip("v"))
-                max_num = max(max_num, num)
-            except (ValueError, AttributeError):
-                pass
-        return f"v{max_num + 1}"
+        z_u = embeddings[unlabeled_indices] if unlabeled_indices else torch.empty((0, embeddings.shape[1]),
+                                                                                  device=embeddings.device)
+        z_l = embeddings[labeled_indices] if labeled_indices else torch.empty((0, embeddings.shape[1]),
+                                                                              device=embeddings.device)
 
-    def _trigger_retrain(
-        self,
-        checkpoint_id: int,
-        trigger: str,
-        feedback_count: int,
-        epochs: int = 5,
-        learning_rate: float = 1e-3,
-        device: str = "cpu",
-    ) -> bool:
-        """
-        Create a PAMRetrainJob, invoke the training entrypoint, and on
-        success persist a **new versioned checkpoint** to disk and DB.
-
-        Returns True on success, False on error.
-        """
-        ckpt = self.get_checkpoint(checkpoint_id)
-        handle = self._checkout(ckpt)
-        new_version = self._next_version(checkpoint_id)
-
-        job = ALRetrainJob(
-            model_checkpoint_id=checkpoint_id,
-            trigger=trigger,
-            feedback_count=feedback_count,
-            status=ALRetrainStatus.RUNNING,
-            started_at=datetime.utcnow(),
-        )
-        self.db.add(job)
-        self.db.commit()
-        self.db.refresh(job)
-
-        try:
-            metrics = run_retrain(
-                checkpoint_id=checkpoint_id,
-                trigger=trigger,
-                epochs=epochs,
-                learning_rate=learning_rate,
-                device=device,
-                feedback_count=feedback_count,
-                model_name=ckpt.name,
-                new_version=new_version,
-                parent_checkpoint_path=handle.effective_path,
-                checkpoints_dir=settings.PAM_CHECKPOINTS_DIR,
-            )
-            job.status = ALRetrainStatus.COMPLETED
-            job.result_metrics = metrics
-            job.completed_at = datetime.utcnow()
-
-            # ── Create a new checkpoint record for the retrained version ──
-            new_checkpoint_path = metrics.get("new_checkpoint_path")
-            new_ckpt = ALModelCheckpoint(
-                dataset_id=ckpt.dataset_id,
-                name=ckpt.name,
-                version=new_version,
-                checkpoint_path=new_checkpoint_path,
-                model_type=ckpt.model_type,
-                hyperparameters=ckpt.hyperparameters,
-                is_base=0,
-                parent_checkpoint_id=checkpoint_id,
-                status=ALModelStatus.AVAILABLE,
-            )
-            self.db.add(new_ckpt)
-            self.db.flush()  # get new_ckpt.id
-
-            # Store references in the job metrics for the API layer
-            metrics["new_checkpoint_id"] = new_ckpt.id
-            job.result_metrics = metrics
-
-            # Reset interaction counter
-            counter = get_interaction_counter()
-            counter.reset(checkpoint_id)
-
-            logger.info(
-                "PAM retrain job %d completed → new checkpoint id=%d version=%s path=%s",
-                job.id, new_ckpt.id, new_version, new_checkpoint_path,
-            )
-        except Exception as exc:
-            job.status = ALRetrainStatus.FAILED
-            job.error_message = str(exc)
-            job.completed_at = datetime.utcnow()
-            logger.error("PAM retrain job %d failed: %s", job.id, exc)
-
-        self.db.commit()
-        self.db.refresh(job)
-        return job.status == ALRetrainStatus.COMPLETED
-
-    # ================================================================
-    # 6. Statistics
-    # ================================================================
-
-    def get_stats(self, model_checkpoint_id: int) -> Dict[str, Any]:
-        """Aggregate statistics for a checkpoint."""
-        total_preds = (
-            self.db.query(func.count(ALPrediction.id))
-            .filter(ALPrediction.model_checkpoint_id == model_checkpoint_id)
-            .scalar()
-        ) or 0
-
-        total_fb = (
-            self.db.query(func.count(ALFeedbackEvent.id))
-            .join(ALPrediction)
-            .filter(ALPrediction.model_checkpoint_id == model_checkpoint_id)
-            .scalar()
-        ) or 0
-
-        accepted = (
-            self.db.query(func.count(ALFeedbackEvent.id))
-            .join(ALPrediction)
-            .filter(
-                ALPrediction.model_checkpoint_id == model_checkpoint_id,
-                ALFeedbackEvent.action == ALFeedbackAction.ACCEPT,
-            )
-            .scalar()
-        ) or 0
-
-        rejected = (
-            self.db.query(func.count(ALFeedbackEvent.id))
-            .join(ALPrediction)
-            .filter(
-                ALPrediction.model_checkpoint_id == model_checkpoint_id,
-                ALFeedbackEvent.action == ALFeedbackAction.REJECT,
-            )
-            .scalar()
-        ) or 0
-
-        modified = (
-            self.db.query(func.count(ALFeedbackEvent.id))
-            .join(ALPrediction)
-            .filter(
-                ALPrediction.model_checkpoint_id == model_checkpoint_id,
-                ALFeedbackEvent.action == ALFeedbackAction.MODIFY,
-            )
-            .scalar()
-        ) or 0
-
-        fb_since = self._feedback_count_since_retrain(model_checkpoint_id)
-
-        retrain_jobs = (
-            self.db.query(func.count(ALRetrainJob.id))
-            .filter(ALRetrainJob.model_checkpoint_id == model_checkpoint_id)
-            .scalar()
-        ) or 0
-
-        return {
-            "model_checkpoint_id": model_checkpoint_id,
-            "total_predictions": total_preds,
-            "total_feedback": total_fb,
-            "accepted": accepted,
-            "rejected": rejected,
-            "modified": modified,
-            "feedback_since_last_retrain": fb_since,
-            "retrain_jobs": retrain_jobs,
-        }
-
-    # ================================================================
-    # 3. Inference + scoring
-    # ================================================================
-
-    def run_inference(
-        self,
-        model_checkpoint_id: int,
-        snippet_set_id: int,
-        k: int = 20,
-        device: str = "cpu",
-    ) -> ALInferenceResult:
-        """
-        Run the full inference → scoring → ranking pipeline.
-
-        Steps:
-          1. Load embeddings for the snippet set.
-          2. Check out the model and load the classifier.
-          3. Run classifier inference (labels + sampling scores).
-          4. Select top-k and persist predictions.
-
-        Returns:
-            dict with ``predictions``, ``total_scored``, ``model_info``.
-        """
-        # Load embeddings
-        X_pool, snippet_ids = self._load_embeddings(snippet_set_id)
-        n_dim = X_pool.shape[1]
-        ckpt = self.get_checkpoint(model_checkpoint_id)
-        checkpoint_path = None
-        model_type = "pam_multilabel_classifier"
-        if ckpt is not None:
-            handle = self._checkout(ckpt)
-            checkpoint_path = handle.effective_path
-            model_type = handle.model_type
-
-        # Load classifier
-        classifier = load_pam_classifier(
-            checkpoint_path=checkpoint_path,
-            model_type=model_type,
-            device=device,
-            n_dim=X_pool.shape[1],
-            num_classes=42 #TODO: shouldn't be hardcoded
+        diversity_scores_u = diversity(z_u, z_l)
+        density_scores_u = density(z_u, k=density_k)
+        composite_scores_u = composite(
+            uncertainty_scores=uncertainty_scores[unlabeled_indices] if unlabeled_indices else torch.empty(0,
+                                                                                                           device=embeddings.device),
+            diversity_scores=diversity_scores_u,
+            density_scores=density_scores_u,
+            wu=wu,
+            wd=wd,
+            wr=wr,
         )
 
-        # Inference
-        labels, confidences = classifier.predict(X_pool)
+        diversity_full = [None] * len(snippet_ids)
+        density_full = [None] * len(snippet_ids)
+        composite_full = [None] * len(snippet_ids)
 
-        # Combined scoring
-        scores = combined_score(confidences)
+        for pos, idx in enumerate(unlabeled_indices):
+            diversity_full[idx] = float(diversity_scores_u[pos].item())
+            density_full[idx] = float(density_scores_u[pos].item())
+            composite_full[idx] = float(composite_scores_u[pos].item())
 
-        # Already-labeled mask (predictions with feedback)
-        labeled_snippet_ids = set(
-            r[0]
-            for r in self.db.query(ALFeedbackEvent.prediction_id)
-            .join(ALPrediction)
-            .filter(ALPrediction.model_checkpoint_id == model_checkpoint_id)
-            .all()
-        )
-        labeled_mask = np.array(
-            [sid in labeled_snippet_ids for sid in snippet_ids], dtype=bool
-        )
+        rows: list[ALInferenceRow] = []
 
-        # Select top-k
-        top_indices = select_top_k(scores, k=k, exclude_mask=labeled_mask)
+        for i, snippet_id in enumerate(snippet_ids):
+            pred_indices = torch.where(preds[i] > 0)[0].tolist()
+            pred_labels = [label_order[j] for j in pred_indices]
+            prob_dict = {
+                label_order[j]: float(probs[i, j].item())
+                for j in range(len(label_order))
+            }
 
-        # Persist predictions (upsert)
-        predictions_out = []
-        for rank, idx in enumerate(top_indices):
-            pred = self._upsert_prediction(
-                model_checkpoint_id=model_checkpoint_id,
-                snippet_id=snippet_ids[idx],
-                predicted_label=labels[idx],
-                confidence=float(confidences[idx]),
-            )
-            predictions_out.append(pred)
-
-        self.db.commit()
-
-        return {
-            "predictions": predictions_out,
-            "total_scored": len(X_pool),
-            "model_info": {
-                "checkpoint_id": handle.checkpoint_id,
-                "name": handle.name,
-                "version": handle.version,
-                "model_type": handle.model_type,
-            },
-        }
-
-    # ================================================================
-    # 4. Feedback (accept / reject / modify)
-    # ================================================================
-
-    def submit_feedback(
-        self,
-        prediction_id: int,
-        action: str,
-        user_id: Optional[int] = None,
-        modified_label: Optional[str] = None,
-        notes: Optional[str] = None,
-        retrain_threshold: int = AUTO_RETRAIN_THRESHOLD,
-        retrain_epochs: int = 5,
-        retrain_lr: float = 1e-3,
-        retrain_device: str = "cpu",
-    ) -> Dict[str, Any]:
-        """
-        Record a feedback event and, if the auto-retrain threshold is
-        reached, trigger retraining.
-
-        Returns dict with the feedback record + retrain status.
-        """
-        # Validate action
-        try:
-            action_enum = PAMFeedbackAction(action)
-        except ValueError:
-            raise ValueError(
-                f"Invalid action '{action}'. Must be one of: "
-                f"{[a.value for a in PAMFeedbackAction]}"
-            )
-
-        if action_enum == PAMFeedbackAction.MODIFY and not modified_label:
-            raise ValueError("modified_label is required when action=MODIFY")
-
-        # Validate prediction
-        pred = (
-            self.db.query(PAMPrediction)
-            .filter(PAMPrediction.id == prediction_id)
-            .first()
-        )
-        if pred is None:
-            raise ValueError(f"Prediction {prediction_id} not found")
-
-        # Create feedback event
-        event = PAMFeedbackEvent(
-            prediction_id=prediction_id,
-            user_id=user_id,
-            action=action_enum,
-            modified_label=modified_label,
-            notes=notes,
-        )
-        self.db.add(event)
-        self.db.commit()
-        self.db.refresh(event)
-
-        # Count feedback since last completed retrain for this checkpoint
-        checkpoint_id = pred.model_checkpoint_id
-        fb_count = self._feedback_count_since_retrain(checkpoint_id)
-
-        # Interaction counter (in-process helper)
-        counter = get_interaction_counter()
-        counter.increment(checkpoint_id)
-
-        # Check auto-retrain
-        retrain_triggered = False
-        if fb_count >= retrain_threshold:
-            retrain_triggered = self._trigger_retrain(
-                checkpoint_id=checkpoint_id,
-                trigger="auto",
-                feedback_count=fb_count,
-                epochs=retrain_epochs,
-                learning_rate=retrain_lr,
-                device=retrain_device,
-            )
-
-        return {
-            "feedback_id": event.id,
-            "prediction_id": prediction_id,
-            "action": action_enum.value,
-            "modified_label": modified_label,
-            "created_at": event.created_at,
-            "feedback_count_since_retrain": fb_count,
-            "retrain_triggered": retrain_triggered,
-        }
-
-    def _upsert_prediction(
-        self,
-        model_checkpoint_id: int,
-        snippet_id: int,
-        predicted_label: str,
-        confidence: float,
-    ) -> PAMPrediction:
-        existing = (
-            self.db.query(PAMPrediction)
-            .filter(
-                and_(
-                    PAMPrediction.model_checkpoint_id == model_checkpoint_id,
-                    PAMPrediction.snippet_id == snippet_id,
+            rows.append(
+                ALInferenceRow(
+                    snippet_id=snippet_id,
+                    predicted_labels=pred_labels,
+                    predicted_probabilities=prob_dict,
+                    uncertainty=float(uncertainty_scores[i].item()),
+                    diversity=diversity_full[i],
+                    density=density_full[i],
+                    composite_score=composite_full[i],
                 )
             )
-            .first()
-        )
-        if existing:
-            existing.predicted_label = predicted_label
-            existing.confidence = confidence
-            return existing
 
-        pred = PAMPrediction(
-            model_checkpoint_id=model_checkpoint_id,
-            snippet_id=snippet_id,
-            predicted_label=predicted_label,
-            confidence=confidence,
-        )
-        self.db.add(pred)
-        return pred
+        return rows
+
+
 
 
 
@@ -1143,6 +834,117 @@ class PAMActiveLearningService:
                             model_checkpoint_id=model_checkpoint_id,
                         )
                     )
+
+    def _resolve_inference_params(
+            self,
+            threshold: float | None,
+            density_k: int | None,
+            wu: float | None,
+            wd: float | None,
+            wr: float | None,
+    ) -> tuple[float, int, float, float, float]:
+        return (
+            threshold if threshold is not None else DEFAULT_INFERENCE_THRESHOLD,
+            density_k if density_k is not None else DEFAULT_DENSITY_K,
+            wu if wu is not None else DEFAULT_COMPOSITE_WU,
+            wd if wd is not None else DEFAULT_COMPOSITE_WD,
+            wr if wr is not None else DEFAULT_COMPOSITE_WR,
+        )
+
+    def _get_labeled_snippet_ids_for_dataset(self, dataset_id: int) -> set[int]:
+        rows = (
+            self.db.query(ALSnippetAnnotation.snippet_id)
+            .filter(ALSnippetAnnotation.dataset_id == dataset_id)
+            .distinct()
+            .all()
+        )
+        return {row[0] for row in rows}
+
+    def _save_prediction_rows(
+            self,
+            model_checkpoint_id: int,
+            rows,
+    ) -> None:
+        for row in rows:
+            existing = (
+                self.db.query(ALPrediction)
+                .filter(
+                    ALPrediction.model_checkpoint_id == model_checkpoint_id,
+                    ALPrediction.snippet_id == row.snippet_id,
+                )
+                .one_or_none()
+            )
+
+            if existing is None:
+                existing = ALPrediction(
+                    model_checkpoint_id=model_checkpoint_id,
+                    snippet_id=row.snippet_id,
+                )
+                self.db.add(existing)
+
+            existing.predicted_labels = row.predicted_labels
+            existing.predicted_probabilities = row.predicted_probabilities
+            existing.uncertainty = row.uncertainty
+            existing.diversity = row.diversity
+            existing.density = row.density
+            existing.composite_score = row.composite_score
+
+    def _run_and_store_inference(
+            self,
+            dataset_id: int,
+            model_ckpt,
+            model,
+            X,
+            snippet_rows,
+            label_order: list[str],
+            threshold: float | None = None,
+            density_k: int | None = None,
+            wu: float | None = None,
+            wd: float | None = None,
+            wr: float | None = None,
+    ) -> dict:
+        threshold, density_k, wu, wd, wr = self._resolve_inference_params(
+            threshold=threshold,
+            density_k=density_k,
+            wu=wu,
+            wd=wd,
+            wr=wr,
+        )
+
+        device = next(model.parameters()).device
+        x_tensor = torch.tensor(X, dtype=torch.float32, device=device)
+
+        probs, preds = model.predict(x_tensor, threshold=threshold)
+        snippet_ids = [row.snippet_id for row in snippet_rows]
+        labeled_snippet_ids = self._get_labeled_snippet_ids_for_dataset(dataset_id)
+
+        rows = self.build_inference_rows(
+            probs=probs,
+            preds=preds,
+            embeddings=x_tensor,
+            snippet_ids=snippet_ids,
+            labeled_snippet_ids=labeled_snippet_ids,
+            label_order=label_order,
+            density_k=density_k,
+            wu=wu,
+            wd=wd,
+            wr=wr,
+        )
+
+        self._save_prediction_rows(
+            model_checkpoint_id=model_ckpt.id,
+            rows=rows,
+        )
+
+        return {
+            "num_predictions": len(rows),
+            "num_labeled_snippets": len(labeled_snippet_ids),
+            "threshold": threshold,
+            "density_k": density_k,
+            "composite_wu": wu,
+            "composite_wd": wd,
+            "composite_wr": wr,
+        }
 
     # def _checkout(self, ckpt: ALModelCheckpoint) -> PAMModelHandle:
     #     return checkout_model(

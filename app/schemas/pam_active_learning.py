@@ -90,53 +90,40 @@ class ALCheckpointResponse(BaseModel):
 
 # ── Inference / Predictions ────────────────────────────────────────────
 class ALRunInferenceRequest(BaseModel):
-    """Run inference and store predictions/acquisition scores for a checkpoint on a snippet set."""
-
     model_checkpoint_id: int = Field(..., description="Model checkpoint ID to use for inference")
     snippet_set_id: int = Field(..., description="Snippet set to run inference on")
-    device: str = Field(default="cpu", description="Device for inference, e.g. 'cpu' or 'cuda'",)
-    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Optional prediction threshold for multi-label outputs. Uses service/model default when omitted.",)
-    density_k: Optional[int] = Field(
-        default=None,
-        ge=1,
-        description="Optional k for density scoring. Uses service default when omitted.",
-    )
-    composite_wu: Optional[float] = Field(
-        default=None,
-        description="Optional uncertainty weight for composite scoring. Uses service default when omitted.",
-    )
-    composite_wd: Optional[float] = Field(
-        default=None,
-        description="Optional diversity weight for composite scoring. Uses service default when omitted.",
-    )
-    composite_wr: Optional[float] = Field(
-        default=None,
-        description="Optional density weight for composite scoring. Uses service default when omitted.",
-    )
+    device: str = Field(default="cpu", description="cpu or cuda")
+
+    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    density_k: Optional[int] = Field(default=None, ge=1)
+    composite_wu: Optional[float] = Field(default=None)
+    composite_wd: Optional[float] = Field(default=None)
+    composite_wr: Optional[float] = Field(default=None)
 
 
 class ALPredictionResponse(BaseModel):
     id: int
     model_checkpoint_id: int
     snippet_id: int
-    predicted_label: str
-    uncertainty: Optional[float] = None
-    diversity: Optional[float] = None
-    density: Optional[float] = None
-    composite_score: Optional[float] = None
+    predicted_labels: List[str]
+    predicted_probabilities: Optional[Dict[str, float]]
+    uncertainty: Optional[float]
+    diversity: Optional[float]
+    density: Optional[float]
+    composite_score: Optional[float]
     created_at: datetime
 
     class Config:
         from_attributes = True
 
-
-class ALInferenceResult(BaseModel):
-    """Result returned after running inference + scoring."""
-    predictions: List[ALPredictionResponse]
-    total_scored: int
-    total_labeled: int
-    total_unlabeled: int
-    model_info: Dict[str, Any]
+class ALInferenceRow(BaseModel):
+    snippet_id: int
+    predicted_labels: list[str]
+    predicted_probabilities: dict[str, float]
+    uncertainty: float
+    diversity: float | None
+    density: float | None
+    composite_score: float | None
 
 
 # ── Feedback ───────────────────────────────────────────────────────────
@@ -235,33 +222,13 @@ class ALTrainFromScratchRequest(BaseModel):
     dropout: float = Field(default=0.5, ge=0.0, le=0.9)
     device: str = Field(default="cpu", description="cpu or cuda")
 
-    run_inference: bool = Field(
-        default=False,
-        description="Whether to run inference and store predictions immediately after training",
-    )
-    inference_threshold: Optional[float] = Field(
-        default=None,
-        ge=0.0,
-        le=1.0,
-        description="Optional prediction threshold for post-training inference. Uses default when omitted.",
-    )
-    density_k: Optional[int] = Field(
-        default=None,
-        ge=1,
-        description="Optional k for density scoring during post-training inference. Uses default when omitted.",
-    )
-    composite_wu: Optional[float] = Field(
-        default=None,
-        description="Optional uncertainty weight for composite scoring during post-training inference.",
-    )
-    composite_wd: Optional[float] = Field(
-        default=None,
-        description="Optional diversity weight for composite scoring during post-training inference.",
-    )
-    composite_wr: Optional[float] = Field(
-        default=None,
-        description="Optional density weight for composite scoring during post-training inference.",
-    )
+    run_inference: bool = Field(default=False)
+
+    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    density_k: Optional[int] = Field(default=None, ge=1)
+    composite_wu: Optional[float] = Field(default=None)
+    composite_wd: Optional[float] = Field(default=None)
+    composite_wr: Optional[float] = Field(default=None)
 
 # ── Stats ──────────────────────────────────────────────────────────────
 
@@ -275,3 +242,8 @@ class ALStats(BaseModel):
     feedback_since_last_retrain: int
     retrain_jobs: int
 
+class ALSingleSampleScore(BaseModel):
+    uncertainty: float
+    diversity: Optional[float]
+    density: Optional[float]
+    composite: Optional[float]

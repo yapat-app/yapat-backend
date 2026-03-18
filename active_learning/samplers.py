@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 
+from app.schemas.pam_active_learning import ALSingleSampleScore
+
 
 
 def uncertainty(P: torch.Tensor) -> torch.Tensor:
@@ -61,5 +63,63 @@ def composite(
     r = normalize(density_scores)
 
     return wu * u + wd * d + wr * r
+
+def calculate_single_sample_scores(
+    probs_row: torch.Tensor,
+    sample_embedding: torch.Tensor,
+    unlabeled_embeddings: torch.Tensor,
+    labeled_embeddings: torch.Tensor,
+    density_k: int,
+    wu: float,
+    wd: float,
+    wr: float,
+) -> ALSingleSampleScore:
+    """
+    Compute all acquisition values for one sample.
+
+    probs_row: [C]
+    sample_embedding: [D]
+    unlabeled_embeddings: [N_u, D]
+    labeled_embeddings: [N_l, D]
+    """
+    u_score = uncertainty(probs_row.unsqueeze(0)).squeeze(0)
+
+    if labeled_embeddings.numel() == 0:
+        d_score = None
+    else:
+        d_score = torch.cdist(
+            sample_embedding.unsqueeze(0),
+            labeled_embeddings,
+        ).min(dim=1).values.squeeze(0)
+
+    if unlabeled_embeddings.shape[0] <= 1:
+        rho_score = None
+    else:
+        dist = torch.cdist(
+            sample_embedding.unsqueeze(0),
+            unlabeled_embeddings,
+        ).squeeze(0)
+
+        # remove exact self distance if present
+        sorted_vals = torch.sort(dist).values
+        neigh = sorted_vals[1:min(density_k + 1, sorted_vals.shape[0])]
+        if neigh.numel() == 0:
+            rho_score = None
+        else:
+            rho_score = 1.0 / (neigh.mean() + 1e-8)
+
+    if d_score is None or rho_score is None:
+        c_score = None
+    else:
+        # single-sample composite without global normalization is not very meaningful;
+        # use raw weighted sum here, mainly for convenience
+        c_score = wu * u_score + wd * d_score + wr * rho_score
+
+    return ALSingleSampleScore(
+        uncertainty=float(u_score.item()),
+        diversity=None if d_score is None else float(d_score.item()),
+        density=None if rho_score is None else float(rho_score.item()),
+        composite=None if c_score is None else float(c_score.item()),
+    )
 
 
