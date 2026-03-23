@@ -36,7 +36,7 @@ services:
   api:
     build: .
     container_name: yapat-api
-    command: /app/startup.sh uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: ["bash", "/app/startup.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
       db:
         condition: service_healthy
@@ -59,7 +59,6 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
       # Mount host directory for species models (read-write so retraining can save checkpoints)
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
@@ -92,7 +91,6 @@ services:
       - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
       - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
     volumes:
-      - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
       # Read-write so Celery worker can save checkpoints when retraining
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
@@ -118,7 +116,6 @@ services:
       - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
       - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
     volumes:
-      - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
@@ -138,8 +135,6 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     ports:
       - "5555:5555"
-    volumes:
-      - .:/app
     restart: unless-stopped
 
 volumes:
