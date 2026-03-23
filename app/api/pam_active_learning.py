@@ -95,43 +95,32 @@ def get_checkpoint(
 
 # ============ INFERENCE + SCORING ============
 
-@router.post("/inference", response_model=PAMInferenceResult)
-def run_inference(
-    body: PAMRunInferenceRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    """
-    Run the classifier on a snippet set, score & rank predictions,
-    and return the top-k most informative snippets for labeling.
 
-    Flow: model checkout → classifier inference → combined scoring →
-          top-k selection → persist & return predictions.
-    """
-    svc = PAMActiveLearningService(db)
+@router.post(
+    "/inference/get-or-create",
+    response_model=list[ALPredictionResponse],
+    status_code=status.HTTP_200_OK,
+)
+def get_or_create_predictions(
+    body: ALRunInferenceRequest,
+    db: Session = Depends(get_db),
+):
+    service = PAMActiveLearningService(db)
+
     try:
-        result = svc.run_inference(
-            model_checkpoint_id=body.model_checkpoint_id,
-            snippet_set_id=body.snippet_set_id,
-            k=body.k,
-            device=body.device,
-        )
-        return PAMInferenceResult(
-            predictions=[
-                PAMPredictionResponse.model_validate(p, from_attributes=True)
-                for p in result["predictions"]
-            ],
-            total_scored=result["total_scored"],
-            model_info=result["model_info"],
-        )
+        return service.get_or_create_predictions(body)
+
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Inference failed: {e}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve predictions: {str(e)}",
         )
-
-
 # # ============ FEEDBACK ============
 #
 # @router.post("/feedback", response_model=PAMFeedbackResponse)

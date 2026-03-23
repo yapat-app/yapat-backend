@@ -90,8 +90,8 @@ class ALCheckpointResponse(BaseModel):
 
 # ── Inference / Predictions ────────────────────────────────────────────
 class ALRunInferenceRequest(BaseModel):
-    model_checkpoint_id: int = Field(..., description="Model checkpoint ID to use for inference")
-    snippet_set_id: int = Field(..., description="Snippet set to run inference on")
+    model_checkpoint_id: int = Field(..., description="Model checkpoint ID to use")
+    snippet_set_id: int = Field(..., description="Snippet set to retrieve predictions for")
     device: str = Field(default="cpu", description="cpu or cuda")
 
     threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
@@ -99,6 +99,11 @@ class ALRunInferenceRequest(BaseModel):
     composite_wu: Optional[float] = Field(default=None)
     composite_wd: Optional[float] = Field(default=None)
     composite_wr: Optional[float] = Field(default=None)
+
+    force_refresh: bool = Field(
+        default=False,
+        description="If true, rerun inference even if predictions already exist",
+    )
 
 
 class ALPredictionResponse(BaseModel):

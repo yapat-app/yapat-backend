@@ -459,6 +459,86 @@ class PAMActiveLearningService:
             "retrain_triggered": retrain_triggered,
         }
 
+    def get_or_create_predictions(
+            self,
+            body,
+    ) -> list[ALPrediction]:
+        """
+        Return predictions for a checkpoint and snippet set.
+
+        Flow
+        ----
+        1. Check whether predictions already exist for this checkpoint on this snippet set
+        2. If yes, return them
+        3. Otherwise load model + embeddings, run inference, save predictions, return them
+        """
+        model_ckpt = self._get_checkpoint(body.model_checkpoint_id)
+        if model_ckpt is None:
+            raise ValueError(f"Model checkpoint {body.model_checkpoint_id} not found.")
+
+        hyper = model_ckpt.hyperparameters or {}
+        embedding_model_id = hyper.get("embedding_model_id")
+        if embedding_model_id is None:
+            raise ValueError(
+                f"Checkpoint {model_ckpt.id} is missing embedding_model_id in hyperparameters."
+            )
+
+        threshold, density_k, wu, wd, wr = self._resolve_inference_params(
+            threshold=body.threshold,
+            density_k=body.density_k,
+            wu=body.composite_wu,
+            wd=body.composite_wd,
+            wr=body.composite_wr,
+        )
+
+        existing = self._get_predictions_for_checkpoint_and_snippet_set(
+            model_checkpoint_id=model_ckpt.id,
+            snippet_set_id=body.snippet_set_id,
+        )
+
+        if existing and not body.force_refresh:
+            return existing
+
+        X, snippet_rows = self._load_embeddings(
+            snippet_set_id=body.snippet_set_id,
+            embedding_model_id=embedding_model_id,
+        )
+
+        model = MultiLabelMLPClassifier.load_from_checkpoint(
+            checkpoint_path=model_ckpt.checkpoint_path,
+            device=body.device,
+        )
+
+        label_order = getattr(model, "label_order", None)
+        if not label_order:
+            label_order = hyper.get("label_order")
+
+        if not label_order:
+            raise ValueError(
+                f"No label_order found in checkpoint file or checkpoint hyperparameters for checkpoint {model_ckpt.id}."
+            )
+
+        self._run_and_store_inference(
+            dataset_id=model_ckpt.dataset_id,
+            model_ckpt=model_ckpt,
+            model=model,
+            X=X,
+            snippet_rows=snippet_rows,
+            label_order=label_order,
+            threshold=threshold,
+            density_k=density_k,
+            wu=wu,
+            wd=wd,
+            wr=wr,
+        )
+
+        self.db.commit()
+
+        return self._get_predictions_for_checkpoint_and_snippet_set(
+            model_checkpoint_id=model_ckpt.id,
+            snippet_set_id=body.snippet_set_id,
+        )
+
     def _auto_retrain_from_feedback(self, parent_checkpoint_id: int) -> ALModelCheckpoint:
         parent_ckpt = self._get_checkpoint(parent_checkpoint_id)
         if parent_ckpt is None:
@@ -1199,6 +1279,7 @@ class PAMActiveLearningService:
         x_tensor = torch.tensor(X, dtype=torch.float32, device=device)
 
         probs, preds = model.predict(x_tensor, threshold=threshold)
+        # snippet_ids = [row["snippet_id"] for row in snippet_rows]
         snippet_ids = [row.snippet_id for row in snippet_rows]
         labeled_snippet_ids = self._get_labeled_snippet_ids_for_dataset(dataset_id)
 
@@ -1229,6 +1310,22 @@ class PAMActiveLearningService:
             "composite_wd": wd,
             "composite_wr": wr,
         }
+
+    def _get_predictions_for_checkpoint_and_snippet_set(
+            self,
+            model_checkpoint_id: int,
+            snippet_set_id: int,
+    ) -> list[ALPrediction]:
+        return (
+            self.db.query(ALPrediction)
+            .join(Snippet, Snippet.id == ALPrediction.snippet_id)
+            .filter(
+                ALPrediction.model_checkpoint_id == model_checkpoint_id,
+                Snippet.snippet_set_id == snippet_set_id,
+            )
+            .order_by(ALPrediction.composite_score.desc().nullslast(), ALPrediction.id.asc())
+            .all()
+        )
 
     def _store_user_labels_for_snippet(
             self,
