@@ -1,6 +1,6 @@
 services:
   api:
-    command: ["bash", "/app/startup.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command: ["bash", "-c", "sed -i 's/\\r//' /app/startup.sh && bash /app/startup.sh uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]
     volumes:
       - .:/app
 
