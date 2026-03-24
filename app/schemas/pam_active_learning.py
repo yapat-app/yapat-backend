@@ -173,11 +173,21 @@ class ALFeedbackResponse(BaseModel):
 # ── Retrain ────────────────────────────────────────────────────────────
 
 class ALRetrainRequest(BaseModel):
-    """Manually trigger retraining."""
-    model_checkpoint_id: int = Field(..., description="Checkpoint to retrain")
-    epochs: int = Field(default=5, ge=1, le=500)
-    learning_rate: float = Field(default=1e-3, gt=0)
-    device: str = Field(default="cpu")
+    model_checkpoint_id: int = Field(..., description="Parent checkpoint to retrain from")
+
+    epochs: Optional[int] = Field(default=None, ge=1, le=500)
+    learning_rate: Optional[float] = Field(default=None, gt=0)
+    batch_size: Optional[int] = Field(default=None, ge=1, le=4096)
+    hidden_dim: Optional[int] = Field(default=None, ge=1)
+    dropout: Optional[float] = Field(default=None, ge=0.0, le=0.9)
+    device: Optional[str] = Field(default=None, description="cpu or cuda")
+
+    run_inference: bool = Field(default=True)
+    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    density_k: Optional[int] = Field(default=None, ge=1)
+    composite_wu: Optional[float] = Field(default=None)
+    composite_wd: Optional[float] = Field(default=None)
+    composite_wr: Optional[float] = Field(default=None)
 
 
 class ALRetrainJobResponse(BaseModel):
