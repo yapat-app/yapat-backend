@@ -27,6 +27,7 @@ from app.schemas.pam_active_learning import (
 
 )
 from active_learning.al_classifier import MultiLabelMLPClassifier
+from active_learning.samplers import uncertainty, density, diversity, composite
 
 from active_learning.config import (
     DEFAULT_INFERENCE_THRESHOLD,
@@ -472,6 +473,8 @@ class PAMActiveLearningService:
             raise ValueError(f"Model checkpoint {body.model_checkpoint_id} not found.")
 
         hyper = model_ckpt.hyperparameters or {}
+        #input_dim = hyper.get("n_dim")
+        #hidden_dim = hyper.get("hidden_dim")
         embedding_model_id = hyper.get("embedding_model_id")
         if embedding_model_id is None:
             raise ValueError(
@@ -991,6 +994,7 @@ class PAMActiveLearningService:
             rows.append(
                 ALInferenceRow(
                     snippet_id=snippet_id,
+                    embedding=embeddings[i].detach().cpu().tolist(),
                     predicted_labels=pred_labels,
                     predicted_probabilities=prob_dict,
                     uncertainty=float(uncertainty_scores[i].item()),
@@ -1554,6 +1558,7 @@ class PAMActiveLearningService:
                 )
                 self.db.add(existing)
 
+            existing.embedding = row.embedding
             existing.predicted_labels = row.predicted_labels
             existing.predicted_probabilities = row.predicted_probabilities
             existing.uncertainty = row.uncertainty
@@ -1586,6 +1591,7 @@ class PAMActiveLearningService:
         device = next(model.parameters()).device
         x_tensor = torch.tensor(X, dtype=torch.float32, device=device)
 
+        features = model.extract_features(x_tensor)
         probs, preds = model.predict(x_tensor, threshold=threshold)
         snippet_ids = [row["snippet_id"] for row in snippet_rows]
         #snippet_ids = [row.snippet_id for row in snippet_rows]
@@ -1594,7 +1600,7 @@ class PAMActiveLearningService:
         rows = self.build_inference_rows(
             probs=probs,
             preds=preds,
-            embeddings=x_tensor,
+            embeddings=features,
             snippet_ids=snippet_ids,
             labeled_snippet_ids=labeled_snippet_ids,
             label_order=label_order,

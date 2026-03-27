@@ -123,6 +123,7 @@ class ALPredictionResponse(BaseModel):
 
 class ALInferenceRow(BaseModel):
     snippet_id: int
+    embedding: list[float] | None = None
     predicted_labels: list[str]
     predicted_probabilities: dict[str, float]
     uncertainty: float

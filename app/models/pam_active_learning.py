@@ -132,7 +132,8 @@ class ALPrediction(Base):
     composite_score = Column(Float, nullable=True)
 
     # Intermediate representation
-    embedding = Column(Vector(512), nullable=True)
+    # Keeping JSON as the dimensions could change based on the checkpoint hyperparams
+    embedding = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # Relationships
