@@ -137,7 +137,7 @@ def get_available_datasets(
     
     Returns:
     - For admins: all datasets (both with and without teams)
-    - For other users: datasets from teams where they have OWNER membership + 
+    - For other users: datasets from teams where they are a member (any role) +
                       datasets they have direct access to (granted via invitation)
     """
     # Check if user is admin
@@ -148,25 +148,24 @@ def get_available_datasets(
         datasets = db.query(DatasetModel).all()
     else:
         # Collect datasets from two sources:
-        # 1. Datasets from teams where user is OWNER
+        # 1. Datasets from teams where user is any member (owner or user)
         # 2. Datasets with direct access (via invitation)
         
-        # Get all teams where current user is an owner (via team membership)
-        owned_teams = db.query(TeamModel).join(
+        # Get all teams where current user is a member (any role)
+        member_teams = db.query(TeamModel).join(
             TeamMembershipModel,
             TeamModel.id == TeamMembershipModel.team_id
         ).filter(
-            TeamMembershipModel.user_id == current_user.id,
-            TeamMembershipModel.role == TeamRole.OWNER
+            TeamMembershipModel.user_id == current_user.id
         ).all()
         
-        owned_team_ids = [t.id for t in owned_teams]
+        member_team_ids = [t.id for t in member_teams]
         
-        # Get datasets from owned teams
+        # Get datasets from member teams
         team_datasets = []
-        if owned_team_ids:
+        if member_team_ids:
             team_datasets = db.query(DatasetModel).filter(
-                DatasetModel.team_id.in_(owned_team_ids)
+                DatasetModel.team_id.in_(member_team_ids)
             ).all()
         
         # Get datasets with direct access (via user_datasets table)
