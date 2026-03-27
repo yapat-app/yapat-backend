@@ -1,12 +1,3 @@
-"""
-PAM Active Learning models
-
-Data models for the PAM-specific active learning flow:
-- PAMModelCheckpoint: model version/checkpoint metadata
-- PAMPrediction: classifier predictions on snippets
-- PAMFeedbackEvent: human-in-the-loop accept/reject/modify events
-- PAMRetrainJob: retraining run metadata
-"""
 
 from sqlalchemy import (
     Column, Integer, String, DateTime, ForeignKey, Float, Text, JSON,
@@ -92,7 +83,7 @@ class ALModelCheckpoint(Base):
     retrain_jobs = relationship(
         "ALRetrainJob", back_populates="model_checkpoint", cascade="all, delete-orphan"
     )
-    annotations = relationship(
+    al_annotations = relationship(
         "ALSnippetAnnotation",
         back_populates="model_checkpoint",
     )
@@ -176,7 +167,8 @@ class ALSnippetAnnotation(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     snippet = relationship("Snippet", back_populates="al_annotations")
-    model_checkpoint = relationship("ALModelCheckpoint", back_populates="annotations")
+    model_checkpoint = relationship("ALModelCheckpoint", back_populates="al_annotations")
+    user = relationship("User", back_populates="al_annotations")
 
     __table_args__ = (
         UniqueConstraint(

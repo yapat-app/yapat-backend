@@ -227,14 +227,16 @@ class ALTrainFromScratchRequest(BaseModel):
     )
     label_config_path: str = Field(..., description="Path to label config file consisting of class names to train on")
     min_samples_per_class: int = Field(
-        default=5,
+        default=1,
         ge=1,
         description="Minimum number of labeled samples required for a class to be included",
     )
     max_samples_per_class: Optional[int] = Field(
         default=None,
         ge=1,
+        nullable=True,
         description="Optional cap on samples per class for balancing",
+        example=None
     )
     checkpoint_name: str = Field(
         default="cold_start_base",
