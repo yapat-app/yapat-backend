@@ -51,6 +51,7 @@ class MultiLabelMLPClassifier(nn.Module):
         self.num_classes = num_classes
         self.hidden_dim = hidden_dim
         self.dropout = dropout
+        logger.info("Creating a classifier.")
 
         self.model = nn.Sequential(
             nn.Linear(n_dim, hidden_dim),
@@ -63,6 +64,7 @@ class MultiLabelMLPClassifier(nn.Module):
         """
         Return raw logits.
         """
+        logger.info("Returning raw logits.")
         if self.model is None:
             raise ValueError("Classifier has not been created yet. Call create_classifier() first.")
         return self.model(x)
@@ -120,6 +122,7 @@ class MultiLabelMLPClassifier(nn.Module):
         if self.model is None:
             raise ValueError("Classifier has not been created yet. Call create_classifier() first.")
 
+        logger.info("Fitting a classifier.")
         X_tensor = torch.tensor(X, dtype=torch.float32)
         y_tensor = torch.tensor(y, dtype=torch.float32)
 

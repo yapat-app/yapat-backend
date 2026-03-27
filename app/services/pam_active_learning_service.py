@@ -12,29 +12,21 @@ import torch
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
+from app.config import settings
 from app.models.dataset import Dataset, DatasetType
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.models.embedding import EmbeddingVector
 from app.models.pam_active_learning import (
-    ALModelCheckpoint,
-    ALRetrainJob,
-    ALRetrainRequest,
-    ALModelStatus,
-    ALRetrainStatus,
-    ALSnippetAnnotation,
-    ALAnnotationSource,
-    ALPrediction,
-    ALFeedbackEvent,
-    ALFeedbackAction,
+    ALModelCheckpoint, ALPrediction, ALSnippetAnnotation, ALFeedbackEvent, ALRetrainJob, ALModelStatus, ALRetrainStatus, ALAnnotationSource
 )
 from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
     ALInferenceRow,
     ALFeedbackSubmit,
+
 )
-from app.services.pam_classifier import MultiLabelMLPClassifier
+from active_learning.al_classifier import MultiLabelMLPClassifier
 
 from active_learning.config import (
     DEFAULT_INFERENCE_THRESHOLD,
@@ -44,8 +36,10 @@ from active_learning.config import (
     DEFAULT_COMPOSITE_WR,
     RETRAIN_AFTER,
 )
+
 logger = logging.getLogger(__name__)
 
+DATA_ROOT = settings.DATA_ROOT or "/data"
 
 class PAMActiveLearningService:
     def __init__(self, db: Session):
@@ -138,6 +132,7 @@ class PAMActiveLearningService:
     # Train from scratch (COLD START)
 
     def train_from_scratch(self, body: ALTrainFromScratchRequest) -> ALModelCheckpoint:
+        logger.info("Getting dataset")
         ds = self._get_pam_dataset(body.dataset_id)
 
         snippet_set_id = body.snippet_set_id or ds.default_snippet_set_id
@@ -145,8 +140,9 @@ class PAMActiveLearningService:
             raise ValueError(
                 "No snippet_set_id provided and dataset has no default_snippet_set_id."
             )
-
-        species_list = self._load_species_from_label_config(body.label_config_path)
+        metadata_path = os.path.join(DATA_ROOT, body.metadata_path)
+        label_config_path = os.path.join(DATA_ROOT, body.label_config_path)
+        species_list = self._load_species_from_label_config(label_config_path)
         model_type = body.model_type.lower()
 
         if model_type != "pam_multilabel_classifier":
@@ -154,6 +150,9 @@ class PAMActiveLearningService:
                 f"Unsupported model_type '{body.model_type}'. "
                 "Only 'pam_multilabel_classifier' is currently supported."
             )
+
+
+        logger.info("Creating an entry for model checkpoint")
 
         model_ckpt = ALModelCheckpoint(
             dataset_id=body.dataset_id,
@@ -165,8 +164,8 @@ class PAMActiveLearningService:
             hyperparameters={
                 "training_mode": "cold_start",
                 "embedding_model_id": body.embedding_model_id,
-                "metadata_path": body.metadata_path,
-                "label_config_path": body.label_config_path,
+                "metadata_path": metadata_path,
+                "label_config_path": label_config_path,
                 "min_samples_per_class": body.min_samples_per_class,
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs,
@@ -183,6 +182,7 @@ class PAMActiveLearningService:
         self.db.add(model_ckpt)
         self.db.flush()
 
+        logger.info("Creating an entry for training job in ALRetrainJob")
         job = ALRetrainJob(
             model_checkpoint_id=model_ckpt.id,
             dataset_id=body.dataset_id,
@@ -199,16 +199,18 @@ class PAMActiveLearningService:
         self.db.refresh(job)
 
         try:
+            logger.info("Marking retrain status as RUNNING")
             job.status = ALRetrainStatus.RUNNING
             self.db.commit()
 
+            logger.info("Loading embeddings")
             X, snippet_rows = self._load_embeddings(
                 snippet_set_id=snippet_set_id,
                 embedding_model_id=body.embedding_model_id,
             )
-
+            logger.info("Loading ground truth labels")
             gt_index = self._load_ground_truth_metadata(
-                metadata_path=body.metadata_path,
+                metadata_path=metadata_path,
                 species_list=species_list,
                 allowed_subsets=["train"]
             )
@@ -265,7 +267,7 @@ class PAMActiveLearningService:
 
             checkpoint_dir = self._ensure_dir(
                 os.path.join(
-                    settings.MODEL_ARTIFACTS_DIR,
+                    settings.PAM_CHECKPOINTS_DIR,
                     "pam_active_learning",
                     str(ds.id),
                 )
@@ -1239,40 +1241,6 @@ class PAMActiveLearningService:
             species_list: List[str],
             allowed_subsets: Optional[List[str]] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Load recording-level ground truth metadata.
-
-        Returns
-        -------
-        gt_index : Dict[str, List[Dict[str, Any]]]
-            Indexed by recording identifier (sample_name / fname / file_name / file_path),
-            each value is a list of annotation events:
-                {
-                    "labels": np.ndarray,          # multi-hot label vector
-                    "start_time": Optional[float],
-                    "end_time": Optional[float],
-                }
-
-        Supported formats
-        -----------------
-        Format A: event-style
-            Required:
-              - recording identifier: file_name | recording_file | recording_name | file_path | sample_name | fname
-              - species column: species | label
-            Optional:
-              - start_time / end_time
-              - onset / offset
-              - min_t / max_t
-
-        Format B: wide multi-label
-            Required:
-              - recording identifier: sample_name | fname | file_name | file_path
-              - one column per species in species_list
-            Optional:
-              - min_t / max_t
-              - start_time / end_time
-              - onset / offset
-        """
         if not os.path.isfile(metadata_path):
             raise ValueError(f"Metadata file not found: {metadata_path}")
 
@@ -1283,28 +1251,31 @@ class PAMActiveLearningService:
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or []
 
-            # recording identifier column
-            id_col = None
-            for candidate in [
-                "sample_name",
-                "fname",
-                "file_name",
-                "recording_file",
-                "recording_name",
-                "file_path",
-            ]:
-                if candidate in fieldnames:
-                    id_col = candidate
-                    break
+            subset_col = "subset" if "subset" in fieldnames else None
 
-            if id_col is None:
+            has_fname_clip_key = all(col in fieldnames for col in ["fname", "min_t", "max_t"])
+
+            id_col = None
+            if not has_fname_clip_key:
+                for candidate in [
+                    "file_name",
+                    "recording_file",
+                    "recording_name",
+                    "file_path",
+                    "fname",
+                    "sample_name",
+                ]:
+                    if candidate in fieldnames:
+                        id_col = candidate
+                        break
+
+            if not has_fname_clip_key and id_col is None:
                 raise ValueError(
-                    "Metadata must contain one of: "
-                    "'sample_name', 'fname', 'file_name', 'recording_file', "
-                    "'recording_name', or 'file_path'."
+                    "Metadata must contain either:\n"
+                    "- fname + min_t + max_t for snippet-level matching, or\n"
+                    "- one of sample_name, fname, file_name, recording_file, recording_name, file_path."
                 )
 
-            # time columns
             start_col = None
             end_col = None
             if "min_t" in fieldnames and "max_t" in fieldnames:
@@ -1317,7 +1288,6 @@ class PAMActiveLearningService:
                 start_col = "onset"
                 end_col = "offset"
 
-            # format detection
             has_species_columns = all(sp in fieldnames for sp in species_list)
             species_col = None
             for candidate in ["species", "label"]:
@@ -1332,16 +1302,11 @@ class PAMActiveLearningService:
                     "- a 'species' / 'label' column."
                 )
 
-            subset_col = "subset" if "subset" in fieldnames else None
-
             for row in reader:
                 if subset_col and allowed_subsets is not None:
                     subset_value = str(row.get(subset_col, "")).strip().lower()
                     if subset_value not in allowed_subsets:
                         continue
-                recording_key = str(row[id_col]).strip()
-                if not recording_key:
-                    continue
 
                 start_time = None
                 end_time = None
@@ -1352,21 +1317,33 @@ class PAMActiveLearningService:
                         start_time = float(raw_start)
                         end_time = float(raw_end)
 
+                if has_fname_clip_key:
+                    fname = str(row["fname"]).strip()
+                    if not fname:
+                        continue
+                    if start_time is None or end_time is None:
+                        raise ValueError("fname-based snippet metadata requires min_t/max_t or equivalent times.")
+
+                    def _fmt_time(t: float) -> str:
+                        return str(int(t)) if float(t).is_integer() else str(t)
+
+                    recording_key = f"{fname}_{_fmt_time(start_time)}_{_fmt_time(end_time)}.wav"
+                else:
+                    recording_key = str(row[id_col]).strip()
+                    if not recording_key:
+                        continue
+
                 y = np.zeros(len(species_list), dtype=np.float32)
 
-                # Format B: wide multi-label row
                 if has_species_columns:
                     for sp in species_list:
                         value = str(row.get(sp, "0")).strip().lower()
                         y[species_to_idx[sp]] = 1.0 if value in {"1", "true", "yes"} else 0.0
-
-                # Format A: one species per row
                 else:
                     species_value = str(row[species_col]).strip()
                     if species_value in species_to_idx:
                         y[species_to_idx[species_value]] = 1.0
 
-                # skip empty rows
                 if y.sum() == 0:
                     continue
 
@@ -1462,6 +1439,7 @@ class PAMActiveLearningService:
             json.dump(payload, f, indent=2)
 
     def _load_species_from_label_config(self, label_config_path: str) -> List[str]:
+
         if not label_config_path:
             raise ValueError("label_config_path is required.")
         if not os.path.isfile(label_config_path):
