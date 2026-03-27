@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import torch.nn.functional as F
 
 from app.schemas.pam_active_learning import ALSingleSampleScore
 
@@ -19,6 +20,8 @@ def diversity(Z_u: torch.Tensor, Z_l: torch.Tensor) -> torch.Tensor:
     """
     if Z_l.numel() == 0 or Z_u.numel() == 0:
         return torch.zeros(Z_u.shape[0])
+    Z_u = F.normalize(Z_u, p=2, dim=1)
+    Z_l = F.normalize(Z_l, p=2, dim=1)
     dist = torch.cdist(Z_u, Z_l)              # [N_u, N_l]
     return dist.min(dim=1).values             # [N_u]
 
