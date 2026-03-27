@@ -253,11 +253,11 @@ class ALTrainFromScratchRequest(BaseModel):
 
     run_inference: bool = Field(default=False)
 
-    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    density_k: Optional[int] = Field(default=None, ge=1)
-    composite_wu: Optional[float] = Field(default=None)
-    composite_wd: Optional[float] = Field(default=None)
-    composite_wr: Optional[float] = Field(default=None)
+    threshold: Optional[float] = Field(default=0.6, ge=0.0, le=1.0)
+    density_k: Optional[int] = Field(default=5, ge=1)
+    composite_wu: Optional[float] = Field(default=0.5)
+    composite_wd: Optional[float] = Field(default=0.25)
+    composite_wr: Optional[float] = Field(default=0.25)
 
 # ── Stats ──────────────────────────────────────────────────────────────
 
