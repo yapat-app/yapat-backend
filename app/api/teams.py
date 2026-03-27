@@ -298,6 +298,34 @@ def create_team_invitation(
     return invitation
 
 
+@router.delete("/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_team(
+    team_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Delete a team (admin or team owner only).
+
+    Datasets belonging to the team are unassigned (team_id set to NULL) rather
+    than deleted, so recordings and annotations are preserved.
+    Memberships and invitations are removed automatically via cascade.
+    """
+    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    require_team_owner(current_user, team_id, db)
+
+    # Unassign datasets so they are not deleted by the ORM cascade
+    db.query(DatasetModel).filter(DatasetModel.team_id == team_id).update({"team_id": None})
+    db.flush()
+
+    db.refresh(team)
+    db.delete(team)
+    db.commit()
+    return None
+
+
 @router.delete("/{team_id}/invitations/{invitation_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_team_invitation(
     team_id: int,
