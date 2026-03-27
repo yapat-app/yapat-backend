@@ -532,10 +532,37 @@ class PAMActiveLearningService:
 
         self.db.commit()
 
-        return self._get_predictions_for_checkpoint_and_snippet_set(
+        predictions =  self._get_predictions_for_checkpoint_and_snippet_set(
             model_checkpoint_id=model_ckpt.id,
             snippet_set_id=body.snippet_set_id,
         )
+
+        if not body.sample_suggestion:
+            return {
+                "mode": "predictions",
+                "total_predictions": len(predictions),
+                "returned_count": len(predictions),
+                "strategy": None,
+                "rows": predictions,
+            }
+
+        strategy = body.suggestion_strategy or "composite"
+        k = body.k or 20
+
+        ranked = self._rank_prediction_suggestions(
+            dataset_id=model_ckpt.dataset_id,
+            snippet_set_id=body.snippet_set_id,
+            predictions=predictions,
+            strategy=strategy,
+        )
+
+        return {
+            "mode": "suggestions",
+            "total_predictions": len(predictions),
+            "returned_count": min(k, len(ranked)),
+            "strategy": strategy,
+            "rows": ranked[:k],
+        }
 
     def manual_retrain(self, body: ALRetrainRequest) -> ALModelCheckpoint:
         """
@@ -1716,16 +1743,54 @@ class PAMActiveLearningService:
                 is not None
         )
 
-    # def _checkout(self, ckpt: ALModelCheckpoint) -> PAMModelHandle:
-    #     return checkout_model(
-    #         checkpoint_id=ckpt.id,
-    #         dataset_id=ckpt.dataset_id,
-    #         name=ckpt.name,
-    #         version=ckpt.version,
-    #         checkpoint_path=ckpt.checkpoint_path,
-    #         model_type=ckpt.model_type,
-    #         hyperparameters=ckpt.hyperparameters or {},
-    #         is_base=bool(ckpt.is_base),
-    #         parent_checkpoint_id=ckpt.parent_checkpoint_id,
-    #         base_model_path_setting=settings.PAM_BASE_MODEL_PATH,
-    #     )
+    def _rank_prediction_suggestions(
+            self,
+            dataset_id: int,
+            snippet_set_id: int,
+            predictions: list[ALPrediction],
+            strategy: str,
+    ) -> list[ALPrediction]:
+        annotated_ids = self._get_annotated_snippet_ids_for_snippet_set(
+            dataset_id=dataset_id,
+            snippet_set_id=snippet_set_id,
+        )
+
+        candidates = [
+            p for p in predictions
+            if p.snippet_id not in annotated_ids
+        ]
+
+        if strategy == "random":
+            import random
+            candidates = candidates[:]
+            random.shuffle(candidates)
+            return candidates
+
+        key_map = {
+            "uncertainty": lambda p: p.uncertainty if p.uncertainty is not None else float("-inf"),
+            "diversity": lambda p: p.diversity if p.diversity is not None else float("-inf"),
+            "density": lambda p: p.density if p.density is not None else float("-inf"),
+            "composite": lambda p: p.composite_score if p.composite_score is not None else float("-inf"),
+        }
+
+        if strategy not in key_map:
+            raise ValueError(f"Unsupported suggestion strategy '{strategy}'.")
+
+        return sorted(candidates, key=key_map[strategy], reverse=True)
+
+    def _get_annotated_snippet_ids_for_snippet_set(
+        self,
+        dataset_id: int,
+        snippet_set_id: int,
+    ) -> set[int]:
+        rows = (
+            self.db.query(ALSnippetAnnotation.snippet_id)
+            .join(Snippet, Snippet.id == ALSnippetAnnotation.snippet_id)
+            .filter(
+                ALSnippetAnnotation.dataset_id == dataset_id,
+                Snippet.snippet_set_id == snippet_set_id,
+            )
+            .distinct()
+            .all()
+        )
+        return {row[0] for row in rows}

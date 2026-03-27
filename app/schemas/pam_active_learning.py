@@ -5,7 +5,7 @@ Request / response models for the PAM active learning API.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
 
@@ -30,6 +30,12 @@ class ALRetrainStatusSchema(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
+class SamplingMode(str, Enum):
+    RANDOM = "random"
+    UNCERTAINTY = "uncertainty"
+    DIVERSITY = "diversity"
+    DENSITY = "density"
+    COMPOSITE = "composite"
 
 # ── Model Checkpoint ───────────────────────────────────────────────────
 
@@ -105,6 +111,20 @@ class ALRunInferenceRequest(BaseModel):
         description="If true, rerun inference even if predictions already exist",
     )
 
+    sample_suggestion: bool = Field(
+        default=False,
+        description="If true, return ranked annotation suggestions instead of the full prediction set.",
+    )
+    suggestion_strategy: SamplingMode = Field(
+        default=SamplingMode.COMPOSITE,
+        description="Ranking strategy used when sample_suggestion=true.",
+    )
+    k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of suggestions to return when sample_suggestion=true.",
+    )
+
 
 class ALPredictionResponse(BaseModel):
     id: int
@@ -120,6 +140,18 @@ class ALPredictionResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ALPredictionListResponse(BaseModel):
+    mode: Literal["predictions", "suggestions"]
+    total_predictions: int
+    returned_count: int
+    suggestion_strategy: SamplingMode = Field(
+        default=SamplingMode.COMPOSITE,
+        description="uncertainty, density, diversity or composite",
+    )
+    k: Optional[int] = None
+    rows: List[ALPredictionResponse]
 
 class ALInferenceRow(BaseModel):
     snippet_id: int

@@ -25,7 +25,8 @@ from app.schemas.pam_active_learning import (
     ALRetrainRequest,
     ALRetrainJobResponse,
     ALStats,
-    ALTrainFromScratchRequest
+    ALTrainFromScratchRequest,
+    ALPredictionListResponse
 )
 from app.services.pam_active_learning_service import PAMActiveLearningService
 
@@ -97,7 +98,7 @@ def get_checkpoint(
 
 @router.post(
     "/inference/get-or-create",
-    response_model=list[ALPredictionResponse],
+    response_model=ALPredictionListResponse,
     status_code=status.HTTP_200_OK,
 )
 def get_or_create_predictions(
