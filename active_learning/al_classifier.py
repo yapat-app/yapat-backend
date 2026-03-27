@@ -291,3 +291,19 @@ class MultiLabelMLPClassifier(nn.Module):
         model.label_order = checkpoint.get("label_order", None)
 
         return model
+
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Return hidden-layer representation before the final classification layer.
+        Shape: [batch_size, hidden_dim]
+        """
+        if self.model is None:
+            raise ValueError("Classifier has not been created yet. Call create_classifier() first.")
+
+        # model[0] = Linear(n_dim, hidden_dim)
+        # model[1] = ReLU()
+        # model[2] = Dropout(dropout)
+        # model[3] = Linear(hidden_dim, num_classes)
+        x = self.model[0](x)
+        x = self.model[1](x)
+        return x
