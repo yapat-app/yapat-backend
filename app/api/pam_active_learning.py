@@ -20,7 +20,6 @@ from app.schemas.pam_active_learning import (
     ALCheckpointResponse,
     ALRunInferenceRequest,
     ALPredictionResponse,
-    ALInferenceResult,
     ALFeedbackSubmit,
     ALFeedbackResponse,
     ALRetrainRequest,
@@ -37,11 +36,11 @@ router = APIRouter()
 
 @router.post(
     "/checkpoints",
-    response_model=PAMCheckpointResponse,
+    response_model=ALCheckpointResponse,
     status_code=status.HTTP_201_CREATED,
 )
 def register_checkpoint(
-    body: PAMCheckpointCreate,
+    body: ALCheckpointCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -68,7 +67,7 @@ def register_checkpoint(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/checkpoints", response_model=List[PAMCheckpointResponse])
+@router.get("/checkpoints", response_model=List[ALCheckpointResponse])
 def list_checkpoints(
     dataset_id: Optional[int] = Query(None, description="Filter by dataset"),
     db: Session = Depends(get_db),
@@ -79,7 +78,7 @@ def list_checkpoints(
     return svc.list_checkpoints(dataset_id=dataset_id)
 
 
-@router.get("/checkpoints/{checkpoint_id}", response_model=PAMCheckpointResponse)
+@router.get("/checkpoints/{checkpoint_id}", response_model=ALCheckpointResponse)
 def get_checkpoint(
     checkpoint_id: int,
     db: Session = Depends(get_db),
