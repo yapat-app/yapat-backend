@@ -64,3 +64,19 @@ def require_team_owner(user: User, team_id: int, db: Session):
             detail="Not an owner of this team"
         )
 
+
+def require_conversation_access(user: User, conversation, db: Session):
+    """
+    Require user to have access to a conversation.
+
+    - If the conversation has a team: user must be a team member (or admin).
+    - If the conversation has no team (personal): user must be the creator (or admin).
+    """
+    if conversation.team_id is not None:
+        require_team_member(user, conversation.team_id, db)
+    elif not (check_admin(user) or conversation.user_id == user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this conversation"
+        )
+

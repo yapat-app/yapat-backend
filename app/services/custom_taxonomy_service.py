@@ -35,17 +35,17 @@ class CustomTaxonomyServiceError(Exception):
 
 def create_conversation(
     user_id: int,
-    team_id: int,
-    db: Session
+    db: Session,
+    team_id: Optional[int] = None,
 ) -> TaxonomyConversation:
     """
     Create a new taxonomy conversation.
-    
+
     Args:
         user_id: User creating the conversation
-        team_id: Team the conversation belongs to
         db: Database session
-        
+        team_id: Team the conversation belongs to (None for personal conversations)
+
     Returns:
         Created TaxonomyConversation
     """
@@ -57,7 +57,7 @@ def create_conversation(
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
-    
+
     logger.info(f"Created conversation {conversation.id} for user {user_id} in team {team_id}")
     return conversation
 
