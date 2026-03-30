@@ -27,7 +27,7 @@ class MessageResponse(BaseModel):
 
 class ConversationCreate(BaseModel):
     """Schema for creating a conversation"""
-    team_id: int = Field(..., description="Team ID for the conversation")
+    team_id: Optional[int] = Field(None, description="Team ID for the conversation. If not provided, the user's first team is used.")
 
 
 class LabelSpaceItem(BaseModel):

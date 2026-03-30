@@ -81,22 +81,36 @@ def start_conversation(
     Start a new taxonomy generation conversation.
     
     Creates a new conversation context for generating a custom taxonomy.
-    User must be a member of the specified team.
+    User must be a member of the specified team. If no team_id is provided,
+    the user's first team is used automatically.
     """
+    # Resolve team_id: use provided value or fall back to user's first team
+    team_id = request.team_id
+    if team_id is None:
+        first_membership = db.query(TeamMembership).filter(
+            TeamMembership.user_id == current_user.id
+        ).first()
+        if not first_membership:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You must belong to a team to start a conversation. Please ask an admin to add you to a team."
+            )
+        team_id = first_membership.team_id
+
     # Verify team exists
-    team = db.query(Team).filter(Team.id == request.team_id).first()
+    team = db.query(Team).filter(Team.id == team_id).first()
     if not team:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Team {request.team_id} not found"
+            detail=f"Team {team_id} not found"
         )
     # Verify user is member of the team
-    require_team_member(current_user, request.team_id, db)
+    require_team_member(current_user, team_id, db)
     
     try:
         conversation = custom_taxonomy_service.create_conversation(
             user_id=current_user.id,
-            team_id=request.team_id,
+            team_id=team_id,
             db=db
         )
         return conversation
