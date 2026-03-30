@@ -316,11 +316,12 @@ def delete_team(
 
     require_team_owner(current_user, team_id, db)
 
-    # Unassign datasets so they are not deleted by the ORM cascade
-    db.query(DatasetModel).filter(DatasetModel.team_id == team_id).update({"team_id": None})
-    db.flush()
+    # Unassign datasets via ORM so the relationship is properly tracked.
+    # The datasets relationship has no delete cascade, so this simply nulls the FK.
+    for dataset in list(team.datasets):
+        dataset.team_id = None
 
-    db.refresh(team)
+    db.flush()
     db.delete(team)
     db.commit()
     return None
