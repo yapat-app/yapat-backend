@@ -716,7 +716,7 @@ class PAMActiveLearningService:
 
             checkpoint_dir = self._ensure_dir(
                 os.path.join(
-                    settings.MODEL_ARTIFACTS_DIR,
+                    settings.PAM_CHECKPOINTS_DIR,
                     "pam_active_learning",
                     str(dataset_id),
                 )
@@ -901,7 +901,7 @@ class PAMActiveLearningService:
 
             checkpoint_dir = self._ensure_dir(
                 os.path.join(
-                    settings.MODEL_ARTIFACTS_DIR,
+                    settings.PAM_CHECKPOINTS_DIR,
                     "pam_active_learning",
                     str(dataset_id),
                 )
