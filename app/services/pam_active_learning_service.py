@@ -372,11 +372,13 @@ class PAMActiveLearningService:
 
         Flow
         ----
-        1. Resolve prediction row for (model_checkpoint_id, snippet_id)
-        2. Store ALFeedbackEvent
-        3. If ACCEPT or MODIFY, store trusted labels into ALSnippetAnnotation
-        4. Count feedback since last retrain
-        5. If threshold reached and no retrain is active, trigger auto retrain
+        1. Validate checkpoint and dataset
+        2. Resolve all predictions for (model_checkpoint_id, snippet_id)
+        3. Compute final labels for this snippet action
+        4. Store ALFeedbackEvent
+        5. If ACCEPT or MODIFY, store trusted labels into ALSnippetAnnotation
+        6. Count feedback since last retrain
+        7. If threshold reached and no retrain is active, trigger auto retrain
         """
         model_ckpt = self._get_checkpoint(body.model_checkpoint_id)
         if model_ckpt is None:
@@ -387,45 +389,50 @@ class PAMActiveLearningService:
                 f"Checkpoint {body.model_checkpoint_id} does not belong to dataset {body.dataset_id}."
             )
 
-        prediction = (
+        predictions = (
             self.db.query(ALPrediction)
             .filter(
                 ALPrediction.model_checkpoint_id == body.model_checkpoint_id,
                 ALPrediction.snippet_id == body.snippet_id,
             )
-            .one_or_none()
+            .all()
         )
-        if prediction is None:
+
+        if not predictions:
             raise ValueError(
                 f"No prediction found for checkpoint={body.model_checkpoint_id}, snippet={body.snippet_id}."
             )
+
+        predicted_labels = self._collect_predicted_labels_for_snippet(predictions)
 
         action_value = body.action.value if hasattr(body.action, "value") else body.action
 
         if action_value == "MODIFY" and not body.labels:
             raise ValueError("labels are required when action=MODIFY")
 
+        final_labels = self._resolve_feedback_labels(
+            action=action_value,
+            predicted_labels=predicted_labels,
+            labels=body.labels,
+        )
+
         feedback = ALFeedbackEvent(
-            prediction_id=prediction.id,
+            dataset_id=body.dataset_id,
+            model_checkpoint_id=body.model_checkpoint_id,
+            snippet_id=body.snippet_id,
             user_id=body.user_id,
             action=action_value,
-            modified_labels=body.labels if action_value == "MODIFY" else None,
+            final_labels=final_labels,
             notes=body.notes,
         )
         self.db.add(feedback)
         self.db.flush()
 
-        labels_to_store = self._resolve_feedback_labels(
-            action=action_value,
-            prediction=prediction,
-            labels=body.labels,
-        )
-
-        if labels_to_store:
+        if action_value in {"ACCEPT", "MODIFY"} and final_labels:
             self._store_user_labels_for_snippet(
                 dataset_id=body.dataset_id,
                 snippet_id=body.snippet_id,
-                labels=labels_to_store,
+                labels=final_labels,
                 model_checkpoint_id=body.model_checkpoint_id,
                 user_id=body.user_id,
             )
@@ -446,9 +453,11 @@ class PAMActiveLearningService:
 
         return {
             "id": feedback.id,
-            "prediction_id": feedback.prediction_id,
+            "dataset_id": feedback.dataset_id,
+            "model_checkpoint_id": feedback.model_checkpoint_id,
+            "snippet_id": feedback.snippet_id,
             "action": feedback.action,
-            "modified_labels": feedback.modified_labels,
+            "final_labels": feedback.final_labels,
             "notes": feedback.notes,
             "created_at": feedback.created_at,
             "feedback_count_since_retrain": feedback_count,
@@ -1071,18 +1080,21 @@ class PAMActiveLearningService:
             .first()
         )
 
-        cutoff = last_retrain[0] if last_retrain and last_retrain[0] is not None else datetime.min.replace(
-            tzinfo=timezone.utc)
+        cutoff = (
+            last_retrain[0]
+            if last_retrain and last_retrain[0] is not None
+            else datetime.min.replace(tzinfo=timezone.utc)
+        )
 
         count = (
             self.db.query(func.count(ALFeedbackEvent.id))
-            .join(ALPrediction, ALPrediction.id == ALFeedbackEvent.prediction_id)
             .filter(
-                ALPrediction.model_checkpoint_id == checkpoint_id,
+                ALFeedbackEvent.model_checkpoint_id == checkpoint_id,
                 ALFeedbackEvent.created_at > cutoff,
             )
             .scalar()
         )
+
         return int(count or 0)
 
     def _get_last_completed_retrain_cutoff(self, checkpoint_id: int) -> datetime:
@@ -1723,11 +1735,11 @@ class PAMActiveLearningService:
     def _resolve_feedback_labels(
             self,
             action: str,
-            prediction: ALPrediction,
+            predicted_labels: list[str],
             labels: list[str] | None,
     ) -> list[str]:
         if action == "ACCEPT":
-            return labels if labels else (prediction.predicted_labels or [])
+            return labels if labels else predicted_labels
         if action == "MODIFY":
             return labels or []
         return []
@@ -1794,3 +1806,15 @@ class PAMActiveLearningService:
             .all()
         )
         return {row[0] for row in rows}
+
+    def _collect_predicted_labels_for_snippet(
+            self,
+            predictions: list[ALPrediction],
+    ) -> list[str]:
+        labels: set[str] = set()
+
+        for prediction in predictions:
+            if prediction.predicted_labels:
+                labels.update(prediction.predicted_labels)
+
+        return sorted(labels)
