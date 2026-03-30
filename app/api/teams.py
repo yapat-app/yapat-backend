@@ -193,8 +193,22 @@ def read_teams(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Get list of teams"""
-    teams = db.query(TeamModel).offset(skip).limit(limit).all()
+    """Get list of teams.
+
+    - Admins see all teams.
+    - All other users only see teams they are a member of.
+    """
+    if current_user.role == UserRole.ADMIN:
+        teams = db.query(TeamModel).offset(skip).limit(limit).all()
+    else:
+        teams = (
+            db.query(TeamModel)
+            .join(TeamMembershipModel, TeamModel.id == TeamMembershipModel.team_id)
+            .filter(TeamMembershipModel.user_id == current_user.id)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
     return teams
 
 
