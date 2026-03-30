@@ -186,37 +186,54 @@ class ALSnippetAnnotation(Base):
 
 class ALFeedbackEvent(Base):
     """
-    A single human-in-the-loop feedback event.
+    A single snippet-level human-in-the-loop feedback event.
 
     action = ACCEPT | REJECT | MODIFY
-    When action == MODIFY, *modified_label* holds the corrected label.
+
+    final_labels stores the resolved labels after the user action:
+    - ACCEPT  -> accepted predicted labels (or explicitly provided labels)
+    - MODIFY  -> user-provided corrected labels
+    - REJECT  -> usually empty list
     """
     __tablename__ = "al_feedback_events"
 
     id = Column(Integer, primary_key=True, index=True)
-    prediction_id = Column(
+
+    model_checkpoint_id = Column(
         Integer,
-        ForeignKey("al_predictions.id", ondelete="CASCADE"),
+        ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
+
+    snippet_id = Column(
+        Integer,
+        ForeignKey("snippets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
     user_id = Column(
         Integer,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
+
     action = Column(
         SQLEnum(ALFeedbackAction, name="al_feedback_action_enum", create_type=True),
         nullable=False,
     )
-    modified_labels = Column(JSON, nullable=True)
+
+    final_labels = Column(JSON, nullable=True)
+
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # Relationships
-    prediction = relationship("ALPrediction", back_populates="feedback_events")
     user = relationship("User")
+    snippet = relationship("Snippet")
+    model_checkpoint = relationship("ALModelCheckpoint")
 
 # ── Fields required for VIS ─────────────────────────────────────────────────────
 
