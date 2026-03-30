@@ -139,10 +139,6 @@ class ALPrediction(Base):
     # Relationships
     model_checkpoint = relationship("ALModelCheckpoint", back_populates="predictions")
     snippet = relationship("Snippet", back_populates="al_predictions")
-    feedback_events = relationship(
-        "ALFeedbackEvent", back_populates="prediction", cascade="all, delete-orphan"
-    )
-
     __table_args__ = (
         UniqueConstraint("model_checkpoint_id", "snippet_id", name="uq_al_prediction"),
     )
@@ -198,6 +194,13 @@ class ALFeedbackEvent(Base):
     __tablename__ = "al_feedback_events"
 
     id = Column(Integer, primary_key=True, index=True)
+
+    dataset_id = Column(
+        Integer,
+        ForeignKey("datasets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     model_checkpoint_id = Column(
         Integer,

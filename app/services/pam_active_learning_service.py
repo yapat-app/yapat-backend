@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, Sequence
 
 import numpy as np
 import torch
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -406,14 +406,15 @@ class PAMActiveLearningService:
         predicted_labels = self._collect_predicted_labels_for_snippet(predictions)
 
         action_value = body.action.value if hasattr(body.action, "value") else body.action
+        normalized_labels = self._normalize_feedback_labels(body.labels)
 
-        if action_value == "MODIFY" and not body.labels:
+        if action_value == "MODIFY" and not normalized_labels:
             raise ValueError("labels are required when action=MODIFY")
 
         final_labels = self._resolve_feedback_labels(
             action=action_value,
             predicted_labels=predicted_labels,
-            labels=body.labels,
+            labels=normalized_labels,
         )
 
         feedback = ALFeedbackEvent(
@@ -1126,53 +1127,20 @@ class PAMActiveLearningService:
             return 0
 
         for event in events:
-            prediction = event.prediction
-            if prediction is None:
+            if event.action not in {ALFeedbackAction.ACCEPT, ALFeedbackAction.MODIFY}:
                 continue
 
-            model_ckpt = prediction.model_checkpoint
-            if model_ckpt is None:
+            labels_to_store = event.final_labels or []
+            if not labels_to_store:
                 continue
 
-            dataset_id = model_ckpt.dataset_id
-            snippet_id = prediction.snippet_id
-
-            labels_to_store: list[str] = []
-
-            if event.action == ALFeedbackAction.ACCEPT:
-                labels_to_store = prediction.predicted_labels or []
-
-            elif event.action == ALFeedbackAction.MODIFY:
-                labels_to_store = event.modified_labels or []
-
-            elif event.action == ALFeedbackAction.REJECT:
-                labels_to_store = []
-
-            for label in labels_to_store:
-                exists = (
-                    self.db.query(ALSnippetAnnotation)
-                    .filter(
-                        ALSnippetAnnotation.dataset_id == dataset_id,
-                        ALSnippetAnnotation.snippet_id == snippet_id,
-                        ALSnippetAnnotation.label == label,
-                        ALSnippetAnnotation.source == ALAnnotationSource.USER,
-                        ALSnippetAnnotation.user_id == event.user_id,
-                        ALSnippetAnnotation.model_checkpoint_id == checkpoint_id,
-                    )
-                    .one_or_none()
-                )
-
-                if exists is None:
-                    self.db.add(
-                        ALSnippetAnnotation(
-                            dataset_id=dataset_id,
-                            snippet_id=snippet_id,
-                            label=label,
-                            source=ALAnnotationSource.USER,
-                            user_id=event.user_id,
-                            model_checkpoint_id=checkpoint_id,
-                        )
-                    )
+            self._store_user_labels_for_snippet(
+                dataset_id=event.dataset_id,
+                snippet_id=event.snippet_id,
+                labels=labels_to_store,
+                model_checkpoint_id=event.model_checkpoint_id,
+                user_id=event.user_id,
+            )
 
         self.db.flush()
         return len(events)
@@ -1185,9 +1153,8 @@ class PAMActiveLearningService:
 
         return (
             self.db.query(ALFeedbackEvent)
-            .join(ALPrediction, ALPrediction.id == ALFeedbackEvent.prediction_id)
             .filter(
-                ALPrediction.model_checkpoint_id == checkpoint_id,
+                ALFeedbackEvent.model_checkpoint_id == checkpoint_id,
                 ALFeedbackEvent.created_at > cutoff,
             )
             .order_by(ALFeedbackEvent.created_at.asc())
@@ -1738,10 +1705,17 @@ class PAMActiveLearningService:
             predicted_labels: list[str],
             labels: list[str] | None,
     ) -> list[str]:
+        incoming_labels = self._normalize_feedback_labels(labels)
+
         if action == "ACCEPT":
-            return labels if labels else predicted_labels
+            # If user did not provide explicit labels, trust model predictions
+            return predicted_labels
+
         if action == "MODIFY":
-            return labels or []
+            # MODIFY must use explicit corrected labels
+            return incoming_labels
+
+        # REJECT => no trusted labels
         return []
 
     def _has_active_retrain_job(self, checkpoint_id: int) -> bool:
@@ -1811,10 +1785,51 @@ class PAMActiveLearningService:
             self,
             predictions: list[ALPrediction],
     ) -> list[str]:
-        labels: set[str] = set()
+        labels: list[str] = []
+        seen: set[str] = set()
 
         for prediction in predictions:
             if prediction.predicted_labels:
-                labels.update(prediction.predicted_labels)
+                for label in prediction.predicted_labels:
+                    value = str(label).strip()
+                    if value and value not in seen:
+                        seen.add(value)
+                        labels.append(value)
 
-        return sorted(labels)
+        return labels
+
+    def _normalize_feedback_labels(
+            self,
+            labels: list[str] | None,
+    ) -> list[str]:
+        """
+        Clean incoming labels from API payload.
+
+        Removes:
+        - None
+        - empty strings
+        - Swagger placeholder "string"
+        - duplicates
+        """
+        if not labels:
+            return []
+
+        cleaned: list[str] = []
+        seen: set[str] = set()
+
+        for label in labels:
+            if label is None:
+                continue
+
+            value = str(label).strip()
+            if not value:
+                continue
+
+            if value.lower() == "string":
+                continue
+
+            if value not in seen:
+                seen.add(value)
+                cleaned.append(value)
+
+        return cleaned

@@ -191,9 +191,10 @@ class ALFeedbackSubmit(BaseModel):
 
 class ALFeedbackResponse(BaseModel):
     id: int
-    prediction_id: int
+    model_checkpoint_id: int
+    snippet_id: int
     action: ALFeedbackActionSchema
-    modified_labels: Optional[List[str]] = None
+    final_labels: Optional[List[str]] = None
     notes: Optional[str] = None
     created_at: datetime
     feedback_count_since_retrain: int
