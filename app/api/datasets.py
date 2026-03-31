@@ -151,7 +151,7 @@ def read_dataset(
         current_user: User = Depends(get_current_active_user),
 ):
     svc = DatasetService(db)
-    dataset = svc.get_dataset(dataset_id)
+    dataset = svc.get_dataset_for_user(dataset_id, current_user)
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
@@ -195,15 +195,12 @@ def delete_dataset(
         current_user: User = Depends(get_current_active_user),
 ):
     svc = DatasetService(db)
-    dataset = svc.get_dataset(dataset_id)
+    dataset = svc.get_dataset_for_user(dataset_id, current_user)
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    is_admin = current_user.role == UserRole.ADMIN
-    is_owner = True
-
-    if not (is_admin or is_owner):
-        raise HTTPException(status_code=403, detail="Not authorized to delete dataset")
+    if not svc.can_delete_dataset(dataset, current_user):
+        raise HTTPException(status_code=403, detail="Only team owners and admins can delete a dataset")
 
     svc.delete_dataset(dataset)
     return None
@@ -231,9 +228,9 @@ def export_dataset_annotations(
     
     Returns either JSON (default) or CSV format.
     """
-    # Verify dataset exists
+    # Verify dataset exists and user has access
     svc = DatasetService(db)
-    dataset = svc.get_dataset(dataset_id)
+    dataset = svc.get_dataset_for_user(dataset_id, current_user)
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     

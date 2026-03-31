@@ -136,6 +136,63 @@ class DatasetService:
     def get_dataset(self, dataset_id: int) -> Optional[DatasetModel]:
         return self.db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
 
+    def get_dataset_for_user(self, dataset_id: int, current_user: User) -> Optional[DatasetModel]:
+        """Fetch a dataset only if the user is allowed to access it.
+
+        - Admins: unrestricted access.
+        - Others: must be a member (any role) of the dataset's team, or have
+          direct access via the user_datasets grant table.
+        Returns None if the dataset doesn't exist or the user has no access.
+        """
+        dataset = self.get_dataset(dataset_id)
+        if not dataset:
+            return None
+        if current_user.role == UserRole.ADMIN:
+            return dataset
+
+        if dataset.team_id is not None:
+            membership = (
+                self.db.query(TeamMembershipModel)
+                .filter(
+                    TeamMembershipModel.team_id == dataset.team_id,
+                    TeamMembershipModel.user_id == current_user.id,
+                )
+                .first()
+            )
+            return dataset if membership else None
+
+        # Dataset not yet assigned to a team — fall back to direct-access grant
+        direct = (
+            self.db.query(user_datasets)
+            .filter(
+                user_datasets.c.user_id == current_user.id,
+                user_datasets.c.dataset_id == dataset_id,
+            )
+            .first()
+        )
+        return dataset if direct else None
+
+    def can_delete_dataset(self, dataset: DatasetModel, current_user: User) -> bool:
+        """Return True if the user may delete this dataset.
+
+        - Admins: always allowed.
+        - Others: must be OWNER of the dataset's team.
+        """
+        if current_user.role == UserRole.ADMIN:
+            return True
+        if dataset.team_id is None:
+            return False
+        membership = (
+            self.db.query(TeamMembershipModel)
+            .filter(
+                TeamMembershipModel.team_id == dataset.team_id,
+                TeamMembershipModel.user_id == current_user.id,
+                TeamMembershipModel.role == TeamRole.OWNER,
+            )
+            .first()
+        )
+        return bool(membership)
+
     # ---------------------------------------------------------
     # Path validation
     # ---------------------------------------------------------
