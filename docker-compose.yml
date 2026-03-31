@@ -54,6 +54,7 @@ services:
       - BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
       - DATA_ROOT=/data
       - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
+      - OE_YAPAT_TIMEOUT=120
     ports:
       - "8000:8000"
     volumes:

@@ -59,8 +59,8 @@ class Settings(BaseSettings):
     # OE_YAPAT Service (Custom Taxonomy Generation)
     OE_YAPAT_SERVICE_URL: str = "http://localhost:8002"  
     OE_YAPAT_API_KEY: Optional[str] = None
-    OE_YAPAT_TIMEOUT: int = 60  # seconds
-    OE_YAPAT_RETRY_ATTEMPTS: int = 3
+    OE_YAPAT_TIMEOUT: int = 120  # seconds — needs to cover up to 6 LLM calls in oe_yapat http_api_server
+    OE_YAPAT_RETRY_ATTEMPTS: int = 2  # 2 retries max; 3× is too long when timeout is 120s
 
     model_config = SettingsConfigDict(
         env_file=".env",
