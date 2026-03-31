@@ -16,6 +16,13 @@ from app.models.embedding import (
     SnippetSet,
 )
 from app.models.user_feed import UserFeed
+from app.models.custom_taxonomy import CustomTaxonomy, TaxonomyStatus
+from app.models.taxonomy_conversation import (
+    TaxonomyConversation,
+    TaxonomyMessage,
+    ConversationStatus,
+    MessageRole,
+)
 
 __all__ = [
     "User",
@@ -30,4 +37,10 @@ __all__ = [
     "Annotation",
     "InvitationLink",
     "UserFeed",
+    "CustomTaxonomy",
+    "TaxonomyStatus",
+    "TaxonomyConversation",
+    "TaxonomyMessage",
+    "ConversationStatus",
+    "MessageRole",
 ]

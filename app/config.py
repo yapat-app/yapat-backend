@@ -4,7 +4,7 @@ Configuration
 
 from typing import Optional, Union
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -56,9 +56,17 @@ class Settings(BaseSettings):
     CELERY_TASK_TIME_LIMIT: int = 3600  # 1 hour max per task
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes limit
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    # OE_YAPAT Service (Custom Taxonomy Generation)
+    OE_YAPAT_SERVICE_URL: str = "http://localhost:8002"  
+    OE_YAPAT_API_KEY: Optional[str] = None
+    OE_YAPAT_TIMEOUT: int = 60  # seconds
+    OE_YAPAT_RETRY_ATTEMPTS: int = 3
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore",  # Ignore env vars not in this model (e.g. ACTIVE_LEARNING_* from other branches)
+    )
 
 
 settings = Settings()

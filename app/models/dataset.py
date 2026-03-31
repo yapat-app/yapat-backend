@@ -32,7 +32,7 @@ class Dataset(Base):
     name = Column(String, nullable=False, index=True)
     description = Column(Text, nullable=True)
     source_uri = Column(String, nullable=False, index=True)  # Path to audio files directory
-    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"),
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="SET NULL"),
                      nullable=True)  # Nullable for admin-created datasets
     default_snippet_set_id = Column(
         Integer,

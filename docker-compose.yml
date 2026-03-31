@@ -53,6 +53,7 @@ services:
       - PROJECT_NAME=YAPAT Backend
       - BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
       - DATA_ROOT=/data
+      - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
     ports:
       - "8000:8000"
     volumes:
@@ -76,6 +77,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
       - DATA_ROOT=/data
+      - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
@@ -97,6 +99,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-secret-key-change-in-production}
       - DATA_ROOT=/data
+      - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro

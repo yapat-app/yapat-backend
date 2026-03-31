@@ -52,18 +52,67 @@ def create_annotation(
         taxon_id = matched['taxon_id']
         resolved = matched
     else:
-        # Validate and resolve taxon_id
-        resolved = taxonomy.resolve_taxon_id(taxon_id)
+        # Validate and resolve taxon_id (pass db session for custom taxonomies)
+        resolved = taxonomy.resolve_taxon_id(taxon_id, db_session=db)
         if not resolved:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid or unresolvable taxon_id: {taxon_id}"
             )
+        
+        # Check access for custom taxonomies
+        if resolved.get("taxonomy_type") == "custom":
+            from app.core.permissions import check_team_member, check_admin
+            from app.services.custom_taxonomy_service import get_taxonomy_by_id
+            from app.models.custom_taxonomy import TaxonomyStatus
+            
+            custom_taxonomy = get_taxonomy_by_id(taxon_id, db)
+            if not custom_taxonomy:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Custom taxonomy {taxon_id} not found"
+                )
+            
+            # Check if taxonomy is active
+            if custom_taxonomy.status != TaxonomyStatus.ACTIVE:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Taxonomy {taxon_id} is not active and cannot be used for annotation"
+                )
+            
+            # Check if user has access: must be team member or global taxonomy
+            if not custom_taxonomy.is_global:
+                if not check_team_member(current_user, custom_taxonomy.team_id, db) and not check_admin(current_user):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"You don't have access to use taxonomy {taxon_id}"
+                    )
     
+    # Reject duplicate: same snippet already has this taxon_id
+    existing = (
+        db.query(AnnotationModel)
+        .filter(
+            AnnotationModel.snippet_id == annotation_in.snippet_id,
+            AnnotationModel.taxon_id == taxon_id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This snippet already has an annotation for this taxon ({taxon_id}). Duplicate annotations are not allowed.",
+        )
+
     # Create annotation with resolved name snapshot
-    annotation_data = annotation_in.model_dump(exclude={'species_name'})
+    annotation_data = annotation_in.model_dump(exclude={'species_name', 'display_name'})
     annotation_data['taxon_id'] = taxon_id
-    annotation_data['resolved_name_snapshot'] = resolved.get('canonical_name') or resolved.get('scientific_name')
+    # Prefer client-provided display_name (e.g. from Taxonomy Assistant) for wiki/envo/ols
+    snapshot = (
+        annotation_in.display_name
+        or resolved.get('canonical_name')
+        or resolved.get('scientific_name')
+    )
+    annotation_data['resolved_name_snapshot'] = snapshot or taxon_id
     annotation_data['user_id'] = current_user.id
     
     annotation = AnnotationModel(**annotation_data)
@@ -81,16 +130,25 @@ def create_annotations_batch(
 ):
     """
     Create multiple annotations for a single snippet.
-    
+
     Useful for multi-label annotations where multiple taxa are present
-    in the same audio snippet.
+    in the same audio snippet. Duplicate taxon_id for the same snippet are not allowed.
     """
+    snippet_id = batch_in.snippet_id
+    # Existing taxon_ids on this snippet (no duplicates allowed)
+    existing_taxon_ids = {
+        a.taxon_id
+        for a in db.query(AnnotationModel).filter(
+            AnnotationModel.snippet_id == snippet_id
+        ).all()
+    }
+    seen_in_batch = set()
     created_annotations = []
-    
+
     for annotation_in in batch_in.annotations:
         taxon_id = annotation_in.taxon_id
         resolved = None
-        
+
         # If species_name is provided, resolve it to taxon_id
         if annotation_in.species_name:
             matched = taxonomy.match_species_name(annotation_in.species_name)
@@ -102,19 +160,65 @@ def create_annotations_batch(
             taxon_id = matched['taxon_id']
             resolved = matched
         else:
-            # Validate and resolve taxon_id
-            resolved = taxonomy.resolve_taxon_id(taxon_id)
+            # Validate and resolve taxon_id (pass db session for custom taxonomies)
+            resolved = taxonomy.resolve_taxon_id(taxon_id, db_session=db)
             if not resolved:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid or unresolvable taxon_id: {taxon_id}"
                 )
-        
+            
+            # Check access for custom taxonomies
+            if resolved.get("taxonomy_type") == "custom":
+                from app.core.permissions import check_team_member, check_admin
+                from app.services.custom_taxonomy_service import get_taxonomy_by_id
+                from app.models.custom_taxonomy import TaxonomyStatus
+                
+                custom_taxonomy = get_taxonomy_by_id(taxon_id, db)
+                if not custom_taxonomy:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Custom taxonomy {taxon_id} not found"
+                    )
+                
+                # Check if taxonomy is active
+                if custom_taxonomy.status != TaxonomyStatus.ACTIVE:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Taxonomy {taxon_id} is not active and cannot be used for annotation"
+                    )
+                
+                # Check if user has access: must be team member or global taxonomy
+                if not custom_taxonomy.is_global:
+                    if not check_team_member(current_user, custom_taxonomy.team_id, db) and not check_admin(current_user):
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail=f"You don't have access to use taxonomy {taxon_id}"
+                        )
+
+        # Reject duplicate: already on snippet or repeated in this batch
+        if taxon_id in existing_taxon_ids:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"This snippet already has an annotation for this taxon ({taxon_id}). Duplicate annotations are not allowed.",
+            )
+        if taxon_id in seen_in_batch:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Duplicate taxon in request: {taxon_id} appears more than once.",
+            )
+        seen_in_batch.add(taxon_id)
+
         # Create annotation with resolved name snapshot
-        annotation_data = annotation_in.model_dump(exclude={'species_name'})
+        annotation_data = annotation_in.model_dump(exclude={'species_name', 'display_name'})
         annotation_data['taxon_id'] = taxon_id
         annotation_data['snippet_id'] = batch_in.snippet_id
-        annotation_data['resolved_name_snapshot'] = resolved.get('canonical_name') or resolved.get('scientific_name')
+        snapshot = (
+            annotation_in.display_name
+            or resolved.get('canonical_name')
+            or resolved.get('scientific_name')
+        )
+        annotation_data['resolved_name_snapshot'] = snapshot or taxon_id
         annotation_data['user_id'] = current_user.id
         
         annotation = AnnotationModel(**annotation_data)

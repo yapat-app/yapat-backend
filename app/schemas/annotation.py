@@ -8,18 +8,23 @@ from typing import Optional, Dict, Any
 import re
 
 
-TAXON_ID_PATTERN = re.compile(r'^[a-z]+:\d+$')
+# Accept namespace:key (key = digits, or alphanumeric/underscore/hyphen for e.g. local:species_slug), or custom:uuid
+TAXON_ID_PATTERN = re.compile(r'^([a-z]+:[a-zA-Z0-9_-]+|custom:[a-f0-9-]+)$')
 
 
 class AnnotationBase(BaseModel):
     taxon_id: Optional[str] = Field(
         None,
-        description="Namespaced taxon identifier (e.g., 'gbif:2420576'). Either taxon_id or species_name must be provided.",
-        pattern=r'^[a-z]+:\d+$'
+        description="Namespaced taxon identifier (e.g., 'gbif:2420576', 'custom:uuid', 'wiki:65091', 'local:vesperis_iridescentis'). Either taxon_id or species_name must be provided.",
+        pattern=r'^([a-z]+:[a-zA-Z0-9_-]+|custom:[a-f0-9-]+)$'
     )
     species_name: Optional[str] = Field(
         None,
         description="Scientific or common species name (e.g., 'Turdus merula' or 'Common Blackbird'). Either taxon_id or species_name must be provided."
+    )
+    display_name: Optional[str] = Field(
+        None,
+        description="Human-readable name for resolved_name_snapshot when using wiki/envo/ols taxon_id (e.g. from Taxonomy Assistant)."
     )
     extra_metadata: Optional[Dict[str, Any]] = None
     
@@ -28,7 +33,7 @@ class AnnotationBase(BaseModel):
     def validate_taxon_id_format(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and not TAXON_ID_PATTERN.match(v):
             raise ValueError(
-                "taxon_id must be in format 'namespace:key' (e.g., 'gbif:2420576')"
+                "taxon_id must be in format 'namespace:key' (e.g., 'gbif:2420576' or 'custom:uuid')"
             )
         return v
     
@@ -44,6 +49,7 @@ class AnnotationBase(BaseModel):
 
 class AnnotationCreate(AnnotationBase):
     snippet_id: int
+    # display_name from AnnotationBase: optional, used as resolved_name_snapshot for wiki/envo/ols
 
 
 class AnnotationBatchCreate(BaseModel):

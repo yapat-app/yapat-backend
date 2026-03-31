@@ -8,11 +8,11 @@ import os
 from typing import List, Optional
 
 import soundfile as sf
-from sqlalchemy import exists, and_
+from sqlalchemy import exists, and_, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.dataset import Dataset as DatasetModel
+from app.models.dataset import Dataset as DatasetModel, user_datasets
 from app.models.recording import Recording as RecordingModel
 from app.models.team import Team as TeamModel
 from app.models.team import TeamMembership as TeamMembershipModel
@@ -99,25 +99,35 @@ class DatasetService:
                 .all()
             )
 
-        # Non-admin users: list datasets from teams where the user is OWNER
-        owned_team_ids = (
+        # Non-admin users: datasets from teams where user is any member (owner or user)
+        member_team_ids = (
             self.db.query(TeamModel.id)
             .join(TeamMembershipModel)
-            .filter(
-                TeamMembershipModel.user_id == current_user.id,
-                TeamMembershipModel.role == TeamRole.OWNER,
-            )
+            .filter(TeamMembershipModel.user_id == current_user.id)
             .all()
         )
+        member_team_ids = [t[0] for t in member_team_ids]
 
-        owned_team_ids = [t[0] for t in owned_team_ids]
+        # Datasets with direct access granted via invitation (user_datasets table)
+        direct_access_ids = (
+            self.db.query(user_datasets.c.dataset_id)
+            .filter(user_datasets.c.user_id == current_user.id)
+            .all()
+        )
+        direct_access_ids = [r[0] for r in direct_access_ids]
 
-        if not owned_team_ids:
+        if not member_team_ids and not direct_access_ids:
             return []
+
+        filters = []
+        if member_team_ids:
+            filters.append(DatasetModel.team_id.in_(member_team_ids))
+        if direct_access_ids:
+            filters.append(DatasetModel.id.in_(direct_access_ids))
 
         return (
             self.db.query(DatasetModel)
-            .filter(DatasetModel.team_id.in_(owned_team_ids))
+            .filter(or_(*filters))
             .offset(skip)
             .limit(limit)
             .all()

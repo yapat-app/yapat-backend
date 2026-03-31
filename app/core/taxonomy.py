@@ -12,18 +12,37 @@ import re
 
 GBIF_API_BASE = "https://api.gbif.org/v1"
 GBIF_API_V2_BASE = "https://api.gbif.org/v2"
+# Digits-only key (gbif, wiki, envo, etc.)
 TAXON_ID_PATTERN = re.compile(r'^([a-z]+):(\d+)$')
+# Alphanumeric key (e.g. local:species_slug)
+TAXON_ID_ALNUM_PATTERN = re.compile(r'^([a-z]+):([a-zA-Z0-9_-]+)$')
+CUSTOM_TAXON_ID_PATTERN = re.compile(r'^(custom:[a-f0-9-]+)$')
 
 
 def parse_taxon_id(taxon_id: str) -> Optional[Dict[str, Any]]:
-    """Parse a namespaced taxon ID (e.g., 'gbif:2420576') into namespace and key"""
+    """Parse a namespaced taxon ID (e.g., 'gbif:2420576', 'custom:uuid', 'local:species_slug') into namespace and key"""
+    # Try digits-only pattern first (gbif, wiki, envo, ols)
     match = TAXON_ID_PATTERN.match(taxon_id)
-    if not match:
-        return None
-    return {
-        "namespace": match.group(1),
-        "key": match.group(2)
-    }
+    if match:
+        return {
+            "namespace": match.group(1),
+            "key": match.group(2)
+        }
+    # Try alphanumeric key (e.g. local:vesperis_iridescentis)
+    match = TAXON_ID_ALNUM_PATTERN.match(taxon_id)
+    if match:
+        return {
+            "namespace": match.group(1),
+            "key": match.group(2)
+        }
+    # Try custom taxonomy pattern
+    match = CUSTOM_TAXON_ID_PATTERN.match(taxon_id)
+    if match:
+        return {
+            "namespace": "custom",
+            "key": taxon_id  # Full custom:uuid
+        }
+    return None
 
 
 def suggest_species(query: str, limit: int = 10) -> List[Dict[str, Any]]:
@@ -107,11 +126,14 @@ def search_species(
         return []
 
 
-def resolve_taxon_id(taxon_id: str) -> Optional[Dict[str, Any]]:
+def resolve_taxon_id(taxon_id: str, db_session=None) -> Optional[Dict[str, Any]]:
     """Resolve a namespaced taxon ID to detailed information
     
+    Supports both GBIF and custom taxonomies.
+    
     Args:
-        taxon_id: Namespaced ID (e.g., 'gbif:2420576')
+        taxon_id: Namespaced ID (e.g., 'gbif:2420576' or 'custom:uuid')
+        db_session: Optional database session (required for custom taxonomies)
     
     Returns:
         Dict with resolved name and details, or None if invalid
@@ -123,39 +145,75 @@ def resolve_taxon_id(taxon_id: str) -> Optional[Dict[str, Any]]:
     namespace = parsed["namespace"]
     key = parsed["key"]
     
-    # Currently only support GBIF
-    if namespace != "gbif":
-        return None
-    
-    try:
-        response = requests.get(
-            f"{GBIF_API_BASE}/species/{key}",
-            timeout=10  # 10 second timeout for resolution queries
-        )
-        response.raise_for_status()
-        data = response.json()
+    # Handle custom taxonomies
+    if namespace == "custom":
+        if not db_session:
+            return None
         
+        # Import here to avoid circular dependency
+        from app.services.custom_taxonomy_service import get_taxonomy_by_id
+        
+        taxonomy = get_taxonomy_by_id(taxon_id, db_session)
+        if not taxonomy:
+            return None
+        
+        # For custom taxonomy root, return basic info
         return {
             "taxon_id": taxon_id,
-            "canonical_name": data.get("canonicalName"),
-            "scientific_name": data.get("scientificName"),
-            "rank": data.get("rank"),
-            "status": data.get("status"),
-            "kingdom": data.get("kingdom"),
-            "phylum": data.get("phylum"),
-            "class": data.get("class"),
-            "order": data.get("order"),
-            "family": data.get("family"),
-            "genus": data.get("genus"),
-            "common_names": [
-                {"name": v.get("vernacularName"), "language": v.get("language")}
-                for v in data.get("vernacularNames", [])
-            ],
-            "habitats": data.get("habitats", []),
-            "taxonomic_status": data.get("taxonomicStatus")
+            "canonical_name": taxonomy.name,
+            "scientific_name": taxonomy.name,
+            "rank": "custom_taxonomy",
+            "status": taxonomy.status,
+            "taxonomy_type": "custom",
+            "taxonomy_id": taxonomy.taxonomy_id,
+            "description": taxonomy.description
         }
-    except requests.RequestException:
-        return None
+    
+    # Handle GBIF taxonomies
+    if namespace == "gbif":
+        try:
+            response = requests.get(
+                f"{GBIF_API_BASE}/species/{key}",
+                timeout=10  # 10 second timeout for resolution queries
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            return {
+                "taxon_id": taxon_id,
+                "canonical_name": data.get("canonicalName"),
+                "scientific_name": data.get("scientificName"),
+                "rank": data.get("rank"),
+                "status": data.get("status"),
+                "kingdom": data.get("kingdom"),
+                "phylum": data.get("phylum"),
+                "class": data.get("class"),
+                "order": data.get("order"),
+                "family": data.get("family"),
+                "genus": data.get("genus"),
+                "common_names": [
+                    {"name": v.get("vernacularName"), "language": v.get("language")}
+                    for v in data.get("vernacularNames", [])
+                ],
+                "habitats": data.get("habitats", []),
+                "taxonomic_status": data.get("taxonomicStatus"),
+                "taxonomy_type": "gbif"
+            }
+        except requests.RequestException:
+            return None
+
+    # Handle wiki / envo / ols / local: accept as valid IDs from OE_YAPAT taxonomy assistant.
+    # No external API resolution; use taxon_id as display name unless client sends display_name.
+    if namespace in ("wiki", "envo", "ols", "local"):
+        return {
+            "taxon_id": taxon_id,
+            "canonical_name": taxon_id,
+            "scientific_name": taxon_id,
+            "rank": "concept",
+            "taxonomy_type": namespace,
+        }
+    
+    return None
 
 
 def batch_resolve_taxon_ids(taxon_ids: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
@@ -221,16 +279,17 @@ def match_species_name(name: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def validate_taxon_id(taxon_id: str) -> bool:
+def validate_taxon_id(taxon_id: str, db_session=None) -> bool:
     """Validate if a taxon ID exists and is resolvable
     
     Args:
-        taxon_id: Namespaced ID (e.g., 'gbif:2420576')
+        taxon_id: Namespaced ID (e.g., 'gbif:2420576' or 'custom:uuid')
+        db_session: Optional database session (required for custom taxonomies)
     
     Returns:
         True if valid and resolvable, False otherwise
     """
-    result = resolve_taxon_id(taxon_id)
+    result = resolve_taxon_id(taxon_id, db_session)
     return result is not None
 
 
