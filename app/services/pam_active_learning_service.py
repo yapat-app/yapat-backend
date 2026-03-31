@@ -18,7 +18,8 @@ from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.models.embedding import EmbeddingVector
 from app.models.pam_active_learning import (
-    ALModelCheckpoint, ALPrediction, ALSnippetAnnotation, ALFeedbackEvent, ALRetrainJob, ALModelStatus, ALRetrainStatus, ALAnnotationSource
+    ALModelCheckpoint, ALPrediction, ALSnippetAnnotation, ALFeedbackEvent, ALRetrainJob,
+    ALModelStatus, ALRetrainStatus, ALAnnotationSource, ALModelFamilyState
 )
 from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
@@ -49,7 +50,7 @@ class PAMActiveLearningService:
     def register_checkpoint(
         self,
         dataset_id: int,
-        family_name: str,
+        model_family_name: str,
         version: str = "v0",
         checkpoint_path: Optional[str] = None,
         label_config_path: Optional[str] = None,
@@ -65,7 +66,7 @@ class PAMActiveLearningService:
             .filter(
                 and_(
                     ALModelCheckpoint.dataset_id == dataset_id,
-                    ALModelCheckpoint.family_name == family_name,
+                    ALModelCheckpoint.model_family_name == model_family_name,
                     ALModelCheckpoint.version == version,
                 )
             )
@@ -87,7 +88,7 @@ class PAMActiveLearningService:
 
         ckpt = ALModelCheckpoint(
             dataset_id=dataset_id,
-            name=name,
+            model_family_name=model_family_name,
             version=version,
             checkpoint_path=checkpoint_path or "",
             label_config_path=label_config_path or "",
@@ -100,7 +101,7 @@ class PAMActiveLearningService:
         self.db.add(ckpt)
         self.db.commit()
         self.db.refresh(ckpt)
-        logger.info("Registered PAM checkpoint id=%d name=%s is_base=%s", ckpt.id, name, is_base)
+        logger.info("Registered PAM checkpoint id=%d name=%s is_base=%s", ckpt.id, model_family_name, is_base)
         return ckpt
 
 
@@ -157,7 +158,7 @@ class PAMActiveLearningService:
 
         model_ckpt = ALModelCheckpoint(
             dataset_id=body.dataset_id,
-            name=body.checkpoint_name,
+            model_family_name=body.model_family_name,
             version=body.version,
             checkpoint_path="",
             label_config_path=body.label_config_path,
@@ -275,12 +276,12 @@ class PAMActiveLearningService:
             )
             checkpoint_path = os.path.join(
                 checkpoint_dir,
-                f"{body.checkpoint_name}_{body.version}_ckpt_{model_ckpt.id}.pt",
+                f"{body.model_family_name}_{body.version}_ckpt_{model_ckpt.id}.pt",
             )
 
             resolved_label_config_path = os.path.join(
                 checkpoint_dir,
-                f"{body.checkpoint_name}_{body.version}_labels_{model_ckpt.id}.json",
+                f"{body.model_family_name}_{body.version}_labels_{model_ckpt.id}.json",
             )
 
             self._save_label_config(
@@ -350,6 +351,11 @@ class PAMActiveLearningService:
                 "class_counts": class_counts,
                 **train_metrics,
             }
+            self._set_active_family_checkpoint(
+                dataset_id=body.dataset_id,
+                model_family_name=body.model_family_name,
+                checkpoint_id=model_ckpt.id,
+            )
             self.db.commit()
             self.db.refresh(model_ckpt)
             self.db.refresh(job)
@@ -380,19 +386,22 @@ class PAMActiveLearningService:
         6. Count feedback since last retrain
         7. If threshold reached and no retrain is active, trigger auto retrain
         """
-        model_ckpt = self._get_checkpoint(body.model_checkpoint_id)
+        model_ckpt = self._get_active_checkpoint_for_model_family(
+            dataset_id=body.dataset_id,
+            model_family_name=body.model_family_name,
+        )
         if model_ckpt is None:
-            raise ValueError(f"Model checkpoint {body.model_checkpoint_id} not found.")
+            raise ValueError(f"Model checkpoint {model_ckpt.id} not found.")
 
         if model_ckpt.dataset_id != body.dataset_id:
             raise ValueError(
-                f"Checkpoint {body.model_checkpoint_id} does not belong to dataset {body.dataset_id}."
+                f"Checkpoint {model_ckpt.id} does not belong to dataset {body.dataset_id}."
             )
 
         predictions = (
             self.db.query(ALPrediction)
             .filter(
-                ALPrediction.model_checkpoint_id == body.model_checkpoint_id,
+                ALPrediction.model_checkpoint_id == model_ckpt.id,
                 ALPrediction.snippet_id == body.snippet_id,
             )
             .all()
@@ -400,7 +409,7 @@ class PAMActiveLearningService:
 
         if not predictions:
             raise ValueError(
-                f"No prediction found for checkpoint={body.model_checkpoint_id}, snippet={body.snippet_id}."
+                f"No prediction found for checkpoint={model_ckpt.id}, snippet={body.snippet_id}."
             )
 
         predicted_labels = self._collect_predicted_labels_for_snippet(predictions)
@@ -419,7 +428,7 @@ class PAMActiveLearningService:
 
         feedback = ALFeedbackEvent(
             dataset_id=body.dataset_id,
-            model_checkpoint_id=body.model_checkpoint_id,
+            model_checkpoint_id=model_ckpt.id,
             snippet_id=body.snippet_id,
             user_id=body.user_id,
             action=action_value,
@@ -434,28 +443,29 @@ class PAMActiveLearningService:
                 dataset_id=body.dataset_id,
                 snippet_id=body.snippet_id,
                 labels=final_labels,
-                model_checkpoint_id=body.model_checkpoint_id,
+                model_checkpoint_id=model_ckpt.id,
                 user_id=body.user_id,
             )
 
         self.db.commit()
         self.db.refresh(feedback)
 
-        feedback_count = self._feedback_count_since_retrain(body.model_checkpoint_id)
+        feedback_count = self._feedback_count_since_retrain(model_ckpt.id)
         retrain_triggered = False
 
         if (
                 feedback_count >= RETRAIN_AFTER
-                and not self._has_active_retrain_job(body.model_checkpoint_id)
+                and not self._has_active_retrain_job(model_ckpt.id)
         ):
             retrain_triggered = True
-            self._auto_retrain_from_feedback(body.model_checkpoint_id)
-            feedback_count = self._feedback_count_since_retrain(body.model_checkpoint_id)
+            self._auto_retrain_from_feedback(model_ckpt.id)
+            feedback_count = self._feedback_count_since_retrain(model_ckpt.id)
 
         return {
             "id": feedback.id,
-            "dataset_id": feedback.dataset_id,
+            "model_family_name": model_ckpt.model_family_name,
             "model_checkpoint_id": feedback.model_checkpoint_id,
+            "active_checkpoint_id": model_ckpt.id,
             "snippet_id": feedback.snippet_id,
             "action": feedback.action,
             "final_labels": feedback.final_labels,
@@ -465,26 +475,13 @@ class PAMActiveLearningService:
             "retrain_triggered": retrain_triggered,
         }
 
-    def get_or_create_predictions(
-            self,
-            body,
-    ) -> list[ALPrediction]:
-        """
-        Return predictions for a checkpoint and snippet set.
-
-        Flow
-        ----
-        1. Check whether predictions already exist for this checkpoint on this snippet set
-        2. If yes, return them
-        3. Otherwise load model + embeddings, run inference, save predictions, return them
-        """
-        model_ckpt = self._get_checkpoint(body.model_checkpoint_id)
-        if model_ckpt is None:
-            raise ValueError(f"Model checkpoint {body.model_checkpoint_id} not found.")
+    def get_or_create_predictions(self, body):
+        model_ckpt = self._get_active_checkpoint_for_model_family(
+            dataset_id=body.dataset_id,
+            model_family_name=body.model_family_name,
+        )
 
         hyper = model_ckpt.hyperparameters or {}
-        #input_dim = hyper.get("n_dim")
-        #hidden_dim = hyper.get("hidden_dim")
         embedding_model_id = hyper.get("embedding_model_id")
         if embedding_model_id is None:
             raise ValueError(
@@ -499,64 +496,62 @@ class PAMActiveLearningService:
             wr=body.composite_wr,
         )
 
-        existing = self._get_predictions_for_checkpoint_and_snippet_set(
+        predictions = self._get_predictions_for_checkpoint_and_snippet_set(
             model_checkpoint_id=model_ckpt.id,
             snippet_set_id=body.snippet_set_id,
         )
 
-        if existing and not body.force_refresh:
-            return existing
-
-        X, snippet_rows = self._load_embeddings(
-            snippet_set_id=body.snippet_set_id,
-            embedding_model_id=embedding_model_id,
-        )
-
-        model = MultiLabelMLPClassifier.load_from_checkpoint(
-            checkpoint_path=model_ckpt.checkpoint_path,
-            device=body.device,
-        )
-
-        label_order = getattr(model, "label_order", None)
-        if not label_order:
-            label_order = hyper.get("label_order")
-
-        if not label_order:
-            raise ValueError(
-                f"No label_order found in checkpoint file or checkpoint hyperparameters for checkpoint {model_ckpt.id}."
+        if not predictions or body.force_refresh:
+            X, snippet_rows = self._load_embeddings(
+                snippet_set_id=body.snippet_set_id,
+                embedding_model_id=embedding_model_id,
             )
 
-        self._run_and_store_inference(
-            dataset_id=model_ckpt.dataset_id,
-            model_ckpt=model_ckpt,
-            model=model,
-            X=X,
-            snippet_rows=snippet_rows,
-            label_order=label_order,
-            threshold=threshold,
-            density_k=density_k,
-            wu=wu,
-            wd=wd,
-            wr=wr,
-        )
+            model = MultiLabelMLPClassifier.load_from_checkpoint(
+                checkpoint_path=model_ckpt.checkpoint_path,
+                device=body.device,
+            )
 
-        self.db.commit()
+            label_order = getattr(model, "label_order", None) or hyper.get("label_order")
+            if not label_order:
+                raise ValueError(
+                    f"No label_order found in checkpoint file or hyperparameters for checkpoint {model_ckpt.id}."
+                )
 
-        predictions =  self._get_predictions_for_checkpoint_and_snippet_set(
-            model_checkpoint_id=model_ckpt.id,
-            snippet_set_id=body.snippet_set_id,
-        )
+            self._run_and_store_inference(
+                dataset_id=model_ckpt.dataset_id,
+                model_ckpt=model_ckpt,
+                model=model,
+                X=X,
+                snippet_rows=snippet_rows,
+                label_order=label_order,
+                threshold=threshold,
+                density_k=density_k,
+                wu=wu,
+                wd=wd,
+                wr=wr,
+            )
+            self.db.commit()
+
+            predictions = self._get_predictions_for_checkpoint_and_snippet_set(
+                model_checkpoint_id=model_ckpt.id,
+                snippet_set_id=body.snippet_set_id,
+            )
 
         if not body.sample_suggestion:
             return {
                 "mode": "predictions",
+                "model_family_name": body.model_family_name,
+                "used_checkpoint_id": model_ckpt.id,
                 "total_predictions": len(predictions),
                 "returned_count": len(predictions),
-                "strategy": None,
+                "suggestion_strategy": body.suggestion_strategy,
+                "k": body.k,
                 "rows": predictions,
             }
 
-        strategy = body.suggestion_strategy or "composite"
+        strategy = body.suggestion_strategy.value if hasattr(body.suggestion_strategy,
+                                                             "value") else body.suggestion_strategy
         k = body.k or 20
 
         ranked = self._rank_prediction_suggestions(
@@ -568,9 +563,12 @@ class PAMActiveLearningService:
 
         return {
             "mode": "suggestions",
+            "model_family_name": body.model_family_name,
+            "used_checkpoint_id": model_ckpt.id,
             "total_predictions": len(predictions),
             "returned_count": min(k, len(ranked)),
-            "strategy": strategy,
+            "suggestion_strategy": body.suggestion_strategy,
+            "k": k,
             "rows": ranked[:k],
         }
 
@@ -587,9 +585,12 @@ class PAMActiveLearningService:
         5. Train child checkpoint
         6. Optionally run inference
         """
-        parent_ckpt = self._get_checkpoint(body.model_checkpoint_id)
+        parent_ckpt = self._get_active_checkpoint_for_model_family(
+            dataset_id=body.dataset_id,
+            model_family_name=body.model_family_name,
+        )
         if parent_ckpt is None:
-            raise ValueError(f"Model checkpoint {body.model_checkpoint_id} not found.")
+            raise ValueError(f"Model checkpoint {parent_ckpt.id} not found.")
 
         hyper = parent_ckpt.hyperparameters or {}
 
@@ -724,7 +725,7 @@ class PAMActiveLearningService:
 
             checkpoint_path = os.path.join(
                 checkpoint_dir,
-                f"{new_ckpt.family_name}_{new_ckpt.version}_ckpt_{new_ckpt.id}.pt",
+                f"{new_ckpt.model_family_name}_{new_ckpt.version}_ckpt_{new_ckpt.id}.pt",
             )
 
             self._save_classifier_checkpoint(
@@ -776,6 +777,11 @@ class PAMActiveLearningService:
                 "inference_metrics": inference_metrics,
                 **train_metrics,
             }
+            self._set_active_family_checkpoint(
+                dataset_id=dataset_id,
+                model_family_name=parent_ckpt.model_family_name,
+                checkpoint_id=new_ckpt.id,
+            )
 
             self.db.commit()
             self.db.refresh(new_ckpt)
@@ -816,7 +822,7 @@ class PAMActiveLearningService:
 
         new_ckpt = ALModelCheckpoint(
             dataset_id=dataset_id,
-            name=parent_ckpt.family_name,
+            model_family_name=parent_ckpt.model_family_name,
             version=new_version,
             checkpoint_path="",
             label_config_path=parent_ckpt.label_config_path,
@@ -909,7 +915,7 @@ class PAMActiveLearningService:
 
             checkpoint_path = os.path.join(
                 checkpoint_dir,
-                f"{new_ckpt.family_name}_{new_ckpt.version}_ckpt_{new_ckpt.id}.pt",
+                f"{new_ckpt.model_family_name}_{new_ckpt.version}_ckpt_{new_ckpt.id}.pt",
             )
 
             self._save_classifier_checkpoint(
@@ -953,6 +959,11 @@ class PAMActiveLearningService:
                 "inference_metrics": inference_metrics,
                 **train_metrics,
             }
+            self._set_active_family_checkpoint(
+                dataset_id=dataset_id,
+                model_family_name=parent_ckpt.model_family_name,
+                checkpoint_id=new_ckpt.id,
+            )
 
             self.db.commit()
             self.db.refresh(new_ckpt)
@@ -1833,3 +1844,53 @@ class PAMActiveLearningService:
                 cleaned.append(value)
 
         return cleaned
+
+    def _get_active_checkpoint_for_model_family(
+            self,
+            dataset_id: int,
+            model_family_name: str,
+    ) -> ALModelCheckpoint:
+        family = (
+            self.db.query(ALModelFamilyState)
+            .filter(
+                ALModelFamilyState.dataset_id == dataset_id,
+                ALModelFamilyState.model_family_name == model_family_name,
+            )
+            .one_or_none()
+        )
+        if family is None or family.active_model_checkpoint_id is None:
+            raise ValueError(
+                f"No active checkpoint found for dataset={dataset_id}, model_family_name={model_family_name}."
+            )
+
+        ckpt = self._get_checkpoint(family.active_model_checkpoint_id)
+        if ckpt is None:
+            raise ValueError(
+                f"Active checkpoint {family.active_model_checkpoint_id} not found."
+            )
+        return ckpt
+
+    def _set_active_family_checkpoint(
+            self,
+            dataset_id: int,
+            model_family_name: str,
+            checkpoint_id: int,
+    ) -> None:
+        row = (
+            self.db.query(ALModelFamilyState)
+            .filter(
+                ALModelFamilyState.dataset_id == dataset_id,
+                ALModelFamilyState.model_family_name == model_family_name,
+            )
+            .one_or_none()
+        )
+
+        if row is None:
+            row = ALModelFamilyState(
+                dataset_id=dataset_id,
+                model_family_name=model_family_name,
+                active_model_checkpoint_id=checkpoint_id,
+            )
+            self.db.add(row)
+        else:
+            row.active_model_checkpoint_id = checkpoint_id

@@ -42,7 +42,7 @@ class SamplingMode(str, Enum):
 class ALCheckpointCreate(BaseModel):
     """Register / checkout a model checkpoint for a dataset."""
     dataset_id: int = Field(..., description="ID of the PAM dataset")
-    family_name: str = Field(..., description="Human-readable model name")
+    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
     version: str = Field(default="v0", description="Version tag")
     checkpoint_path: Optional[str] = Field(None, description="Filesystem path to weights (optional)")
     model_type: str = Field(default="pam_multi_label_classifier", description="Classifier type identifier")
@@ -79,7 +79,7 @@ class ALCheckpointHyperparameters(BaseModel):
 class ALCheckpointResponse(BaseModel):
     id: int
     dataset_id: int
-    family_name: str
+    model_family_name: str
     version: str
     checkpoint_path: Optional[str] = None
     model_type: str
@@ -96,7 +96,8 @@ class ALCheckpointResponse(BaseModel):
 
 # ── Inference / Predictions ────────────────────────────────────────────
 class ALRunInferenceRequest(BaseModel):
-    model_checkpoint_id: int = Field(..., description="Model checkpoint ID to use")
+    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
+    dataset_id : int
     snippet_set_id: int = Field(..., description="Snippet set to retrieve predictions for")
     device: str = Field(default="cpu", description="cpu or cuda")
 
@@ -144,6 +145,8 @@ class ALPredictionResponse(BaseModel):
 
 class ALPredictionListResponse(BaseModel):
     mode: Literal["predictions", "suggestions"]
+    model_family_name: str
+    used_checkpoint_id: int
     total_predictions: int
     returned_count: int
     suggestion_strategy: SamplingMode = Field(
@@ -167,7 +170,7 @@ class ALInferenceRow(BaseModel):
 # ── Feedback ───────────────────────────────────────────────────────────
 class ALFeedbackSubmit(BaseModel):
     dataset_id: int = Field(..., description="Dataset ID")
-    model_checkpoint_id: int = Field(..., description="Checkpoint under which the snippet was reviewed")
+    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
     snippet_id: int = Field(..., description="Snippet being reviewed")
 
     action: ALFeedbackActionSchema = Field(
@@ -191,7 +194,9 @@ class ALFeedbackSubmit(BaseModel):
 
 class ALFeedbackResponse(BaseModel):
     id: int
+    model_family_name: str
     model_checkpoint_id: int
+    active_checkpoint_id: Optional[int] = None
     snippet_id: int
     action: ALFeedbackActionSchema
     final_labels: Optional[List[str]] = None
@@ -207,7 +212,8 @@ class ALFeedbackResponse(BaseModel):
 # ── Retrain ────────────────────────────────────────────────────────────
 
 class ALRetrainRequest(BaseModel):
-    model_checkpoint_id: int = Field(..., description="Parent checkpoint to retrain from")
+    dataset_id: int = Field(..., description="Dataset ID")
+    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
 
     epochs: Optional[int] = Field(default=None, ge=1, le=500)
     learning_rate: Optional[float] = Field(default=None, gt=0)
@@ -226,7 +232,12 @@ class ALRetrainRequest(BaseModel):
 
 class ALRetrainJobResponse(BaseModel):
     id: int
-    model_checkpoint_id: int
+    model_family_name: str
+    used_checkpoint_id: int
+    active_checkpoint_id: int
+    epochs: int
+    learning_rate: float
+    batch_size: int
     trigger: str
     feedback_count: int
     status: ALRetrainStatusSchema
@@ -272,9 +283,9 @@ class ALTrainFromScratchRequest(BaseModel):
         description="Optional cap on samples per class for balancing",
         example=None
     )
-    family_name: str = Field(
+    model_family_name: str = Field(
         default="cold_start_base",
-        description="This name will be the same throughout all versions of the checkpoints",
+        description="Model family name shared across checkpoint versions",
     )
     version: str = Field(default="v0", description="Version tag for the new checkpoint")
     model_type: str = Field(default="pam_multilabel_classifier", description="Classifier type identifier")

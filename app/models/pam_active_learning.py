@@ -54,7 +54,7 @@ class ALModelCheckpoint(Base):
         nullable=False,
         index=True,
     )
-    family_name = Column(String, nullable=False)
+    model_family_name = Column(String, nullable=False)
     version = Column(String, nullable=False, default="v0")
     checkpoint_path = Column(String, nullable=False)  # filesystem path to weights
     label_config_path = Column(String, nullable=False)
@@ -95,9 +95,35 @@ class ALModelCheckpoint(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("dataset_id", "family_name", "version", name="uq_al_checkpoint"),
+        UniqueConstraint("dataset_id", "model_family_name", "version", name="uq_al_checkpoint"),
     )
 
+class ALModelFamilyState(Base):
+    __tablename__ = "al_model_family_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    dataset_id = Column(
+        Integer,
+        ForeignKey("datasets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    model_family_name = Column(String, nullable=False, index=True)
+    active_model_checkpoint_id = Column(
+        Integer,
+        ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "model_family_name", name="uq_al_model_family_state"),
+    )
 
 # ── Prediction ─────────────────────────────────────────────────────────
 
