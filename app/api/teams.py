@@ -100,13 +100,14 @@ def create_team(
     db.commit()
     db.refresh(team)
     
-    # Add creator as team owner
+    # Add creator as team owner and mark the team as ready
     membership = TeamMembershipModel(
         team_id=team.id,
         user_id=current_user.id,
         role=TeamRole.OWNER
     )
     db.add(membership)
+    team.is_ready = True
     
     # If dataset_ids were provided, assign them to the new team
     if datasets:

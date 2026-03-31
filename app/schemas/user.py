@@ -11,13 +11,12 @@ from app.models.user import UserRole
 class UserBase(BaseModel):
     username: str
     full_name: Optional[str] = None
-    role: UserRole = UserRole.USER
 
 
 class UserCreate(UserBase):
     password: str
-    invitation_token: Optional[str] = None  # For admin-created dataset invitations
-    team_invitation_token: Optional[str] = None  # For team invitations
+    invitation_token: Optional[str] = None  # For admin-created dataset invitations → becomes TEAM_OWNER
+    team_invitation_token: Optional[str] = None  # For team invitations → becomes USER member of that team
     
     @field_validator('password')
     @classmethod
@@ -52,6 +51,7 @@ class UserUpdate(BaseModel):
 
 class UserInDB(UserBase):
     id: int
+    role: UserRole
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime] = None

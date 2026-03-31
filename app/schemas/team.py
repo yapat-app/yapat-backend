@@ -36,6 +36,7 @@ class TeamUpdate(BaseModel):
 
 class Team(TeamBase):
     id: int
+    is_ready: bool = False
     created_at: datetime
     updated_at: Optional[datetime] = None
 

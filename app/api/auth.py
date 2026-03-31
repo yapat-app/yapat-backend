@@ -22,7 +22,19 @@ router = APIRouter()
 
 @router.post("/register", response_model=User, status_code=status.HTTP_201_CREATED)
 def register(user_in: UserCreate, db: Session = Depends(get_db)):
-    """Register a new user"""
+    """Register a new user.
+
+    Requires either an `invitation_token` (grants TEAM_OWNER role) or a
+    `team_invitation_token` (grants USER role within that team).
+    Open registration without a token is not permitted.
+    """
+    # Require at least one invitation token
+    if not user_in.invitation_token and not user_in.team_invitation_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Registration requires an invitation token (invitation_token or team_invitation_token)"
+        )
+
     # Check if user already exists
     db_user = db.query(UserModel).filter(UserModel.username == user_in.username).first()
     if db_user:
@@ -34,7 +46,7 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
     # Handle invitation tokens if provided
     invitation = None
     team_invitation = None
-    user_role = user_in.role
+    user_role = UserRole.USER  # default; overridden by token type
     
     if user_in.invitation_token:
         # Validate admin invitation token (for dataset access)
@@ -142,9 +154,14 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
                 membership = TeamMembershipModel(
                     team_id=team_id,
                     user_id=db_user.id,
-                    role=TeamRole.OWNER  # Team owner role for invited users
+                    role=TeamRole.OWNER
                 )
                 db.add(membership)
+            
+            # Mark team as ready now that it has an owner
+            team_obj = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+            if team_obj and not team_obj.is_ready:
+                team_obj.is_ready = True
         
         # Grant direct access to datasets without teams
         for dataset in unassigned_datasets:
