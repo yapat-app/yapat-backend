@@ -29,13 +29,18 @@ def check_team_member(user: User, team_id: int, db: Session) -> bool:
 
 
 def check_team_owner_membership(user: User, team_id: int, db: Session) -> bool:
-    """Check if user is an owner of a specific team"""
+    """Check if user is an owner of a specific team.
+
+    NOTE: intentionally avoids filtering on `role` in SQL because the
+    PostgreSQL ENUM type stores the enum *name* ('OWNER') while the Python
+    enum comparison in a WHERE clause would use the *value* ('owner'),
+    causing a mismatch. Instead we fetch the row and compare in Python.
+    """
     membership = db.query(TeamMembership).filter(
         TeamMembership.team_id == team_id,
         TeamMembership.user_id == user.id,
-        TeamMembership.role == TeamRole.OWNER
     ).first()
-    return membership is not None
+    return membership is not None and membership.role == TeamRole.OWNER
 
 
 def require_admin(user: User):

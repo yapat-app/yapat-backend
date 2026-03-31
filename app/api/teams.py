@@ -61,15 +61,12 @@ def create_team(
             # For non-admin users, verify they have access to all requested datasets
             # Access sources: 1) Teams where user is OWNER, 2) Direct access via invitation
             
-            # Get teams where user is owner
-            owned_teams = db.query(TeamModel).join(
-                TeamMembershipModel
-            ).filter(
+            # Get teams where user is owner (role comparison done in Python to
+            # avoid enum name/value mismatch with the native PostgreSQL ENUM type)
+            owner_memberships = db.query(TeamMembershipModel).filter(
                 TeamMembershipModel.user_id == current_user.id,
-                TeamMembershipModel.role == TeamRole.OWNER
             ).all()
-            
-            owned_team_ids = [t.id for t in owned_teams]
+            owned_team_ids = [m.team_id for m in owner_memberships if m.role == TeamRole.OWNER]
             
             # Get datasets with direct access
             direct_access_dataset_ids = db.query(user_datasets.c.dataset_id).filter(
@@ -93,21 +90,24 @@ def create_team(
                     detail=f"You do not have access to these datasets: {invalid_datasets}"
                 )
     
-    # Create the team
+    # Create the team (is_ready stays False until a real owner joins)
     team_data = team_in.dict(exclude={'dataset_ids'})
     team = TeamModel(**team_data)
     db.add(team)
     db.commit()
     db.refresh(team)
-    
-    # Add creator as team owner and mark the team as ready
-    membership = TeamMembershipModel(
-        team_id=team.id,
-        user_id=current_user.id,
-        role=TeamRole.OWNER
-    )
-    db.add(membership)
-    team.is_ready = True
+
+    # Admins create teams on behalf of others — they are not added as members,
+    # and the team stays is_ready=False until an owner registers via invitation.
+    # Non-admin creators become the team owner immediately.
+    if current_user.role != UserRole.ADMIN:
+        membership = TeamMembershipModel(
+            team_id=team.id,
+            user_id=current_user.id,
+            role=TeamRole.OWNER
+        )
+        db.add(membership)
+        team.is_ready = True
     
     # If dataset_ids were provided, assign them to the new team
     if datasets:
@@ -211,6 +211,69 @@ def read_teams(
             .all()
         )
     return teams
+
+
+@router.get("/{team_id}", response_model=Team)
+def get_team(
+    team_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Get a single team by ID.
+
+    Accessible by admins and team members.
+    """
+    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+    require_team_member(current_user, team_id, db)
+    return team
+
+
+@router.patch("/{team_id}", response_model=Team)
+def update_team(
+    team_id: int,
+    team_in: TeamUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Update team name/description (team owner or admin only)."""
+    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+    require_team_owner(current_user, team_id, db)
+    update_data = team_in.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(team, field, value)
+    db.commit()
+    db.refresh(team)
+    return team
+
+
+@router.delete("/{team_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_team_member(
+    team_id: int,
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Remove a member from a team (team owner or admin only)."""
+    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+    require_team_owner(current_user, team_id, db)
+    membership = db.query(TeamMembershipModel).filter(
+        TeamMembershipModel.team_id == team_id,
+        TeamMembershipModel.user_id == user_id
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+    # If removing the owner, mark team as not ready
+    if membership.role == TeamRole.OWNER:
+        team.is_ready = False
+    db.delete(membership)
+    db.commit()
+    return None
 
 
 @router.get("/{team_id}/datasets", response_model=List[DatasetSchema])

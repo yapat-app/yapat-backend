@@ -33,7 +33,7 @@ def upgrade():
         WHERE id IN (
             SELECT DISTINCT team_id
             FROM team_memberships
-            WHERE role = 'owner'
+            WHERE role = 'OWNER'
         )
         """
     )

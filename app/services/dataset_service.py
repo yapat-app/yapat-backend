@@ -182,16 +182,17 @@ class DatasetService:
             return True
         if dataset.team_id is None:
             return False
+        # Role comparison done in Python to avoid enum name/value mismatch
+        # with the native PostgreSQL ENUM type.
         membership = (
             self.db.query(TeamMembershipModel)
             .filter(
                 TeamMembershipModel.team_id == dataset.team_id,
                 TeamMembershipModel.user_id == current_user.id,
-                TeamMembershipModel.role == TeamRole.OWNER,
             )
             .first()
         )
-        return bool(membership)
+        return bool(membership and membership.role == TeamRole.OWNER)
 
     # ---------------------------------------------------------
     # Path validation

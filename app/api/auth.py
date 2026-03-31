@@ -187,17 +187,33 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
         ).first()
         
         if not existing_membership:
-            # Create membership
+            # Bootstrap the first member of an ownerless team as OWNER.
+            # Role comparison is done in Python to avoid enum name/value
+            # mismatch with the native PostgreSQL ENUM type.
+            existing_team_memberships = db.query(TeamMembershipModel).filter(
+                TeamMembershipModel.team_id == team_invitation.team_id,
+            ).all()
+            has_owner = any(m.role == TeamRole.OWNER for m in existing_team_memberships)
+            assigned_role = TeamRole.OWNER if not has_owner else team_invitation.target_role
+
             membership = TeamMembershipModel(
                 team_id=team_invitation.team_id,
                 user_id=db_user.id,
-                role=team_invitation.target_role
+                role=assigned_role
             )
             db.add(membership)
-            
-            # Increment usage count
+
+            # If an owner just joined, mark the team as ready and elevate the
+            # user's global role so they can access owner-only UI features.
+            if assigned_role == TeamRole.OWNER:
+                db_user.role = UserRole.TEAM_OWNER
+                team_obj = db.query(TeamModel).filter(
+                    TeamModel.id == team_invitation.team_id
+                ).first()
+                if team_obj and not team_obj.is_ready:
+                    team_obj.is_ready = True
+
             team_invitation.used_count += 1
-            
             db.commit()
     
     return db_user
