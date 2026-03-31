@@ -4,6 +4,7 @@ Team endpoints
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List
 
 from app.api.deps import get_db, get_current_active_user
@@ -18,6 +19,7 @@ from app.models.team import (
 )
 from app.models.user import User, User as UserModel, UserRole
 from app.models.dataset import Dataset as DatasetModel, user_datasets
+from app.models.recording import Recording
 from app.core.permissions import require_team_owner, require_team_member
 from datetime import datetime, timezone, timedelta
 
@@ -181,10 +183,39 @@ def get_available_datasets(
         dataset_dict = {}
         for ds in team_datasets + direct_access_datasets:
             dataset_dict[ds.id] = ds
-        
+
         datasets = list(dataset_dict.values())
-    
-    return datasets
+
+    # Attach recording_count to every dataset (same logic as GET /api/datasets)
+    if datasets:
+        dataset_ids = [ds.id for ds in datasets]
+        recording_counts = (
+            db.query(Recording.dataset_id, func.count(Recording.id).label("count"))
+            .filter(Recording.dataset_id.in_(dataset_ids))
+            .group_by(Recording.dataset_id)
+            .all()
+        )
+        count_map = {ds_id: count for ds_id, count in recording_counts}
+    else:
+        count_map = {}
+
+    result = []
+    for ds in datasets:
+        ds_dict = {
+            "id": ds.id,
+            "name": ds.name,
+            "description": ds.description,
+            "source_uri": ds.source_uri,
+            "team_id": ds.team_id,
+            "default_snippet_set_id": ds.default_snippet_set_id,
+            "created_at": ds.created_at,
+            "updated_at": ds.updated_at,
+            "recording_count": count_map.get(ds.id, 0),
+            "is_ready_for_feed": False,
+        }
+        result.append(DatasetSchema(**ds_dict))
+
+    return result
 
 
 @router.get("/", response_model=List[Team])
