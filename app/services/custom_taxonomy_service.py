@@ -197,7 +197,7 @@ async def process_user_prompt(
             db=db,
             metadata={"error": True}
         )
-        raise CustomTaxonomyServiceError(str(e)) from e
+        raise  # re-raise the original OEYapatServiceError so the API returns 503
 
 
 def add_to_label_space(

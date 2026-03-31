@@ -43,7 +43,7 @@ class LabelSpaceItem(BaseModel):
 class ConversationResponse(BaseModel):
     """Response schema for a conversation (label space building session)"""
     id: int
-    team_id: int
+    team_id: Optional[int] = None
     user_id: int
     custom_taxonomy_id: Optional[int] = None
     status: str = Field(..., description="Conversation status: in_progress, completed, cancelled")
