@@ -49,7 +49,7 @@ class PAMActiveLearningService:
     def register_checkpoint(
         self,
         dataset_id: int,
-        name: str,
+        family_name: str,
         version: str = "v0",
         checkpoint_path: Optional[str] = None,
         label_config_path: Optional[str] = None,
@@ -65,7 +65,7 @@ class PAMActiveLearningService:
             .filter(
                 and_(
                     ALModelCheckpoint.dataset_id == dataset_id,
-                    ALModelCheckpoint.name == name,
+                    ALModelCheckpoint.family_name == family_name,
                     ALModelCheckpoint.version == version,
                 )
             )
@@ -618,7 +618,7 @@ class PAMActiveLearningService:
 
         new_ckpt = ALModelCheckpoint(
             dataset_id=dataset_id,
-            name=parent_ckpt.name,
+            name=parent_ckpt.family_name,
             version=new_version,
             checkpoint_path="",
             label_config_path=parent_ckpt.label_config_path,
@@ -724,7 +724,7 @@ class PAMActiveLearningService:
 
             checkpoint_path = os.path.join(
                 checkpoint_dir,
-                f"{new_ckpt.name}_{new_ckpt.version}_ckpt_{new_ckpt.id}.pt",
+                f"{new_ckpt.family_name}_{new_ckpt.version}_ckpt_{new_ckpt.id}.pt",
             )
 
             self._save_classifier_checkpoint(
@@ -816,7 +816,7 @@ class PAMActiveLearningService:
 
         new_ckpt = ALModelCheckpoint(
             dataset_id=dataset_id,
-            name=parent_ckpt.name,
+            name=parent_ckpt.family_name,
             version=new_version,
             checkpoint_path="",
             label_config_path=parent_ckpt.label_config_path,
@@ -909,7 +909,7 @@ class PAMActiveLearningService:
 
             checkpoint_path = os.path.join(
                 checkpoint_dir,
-                f"{new_ckpt.name}_{new_ckpt.version}_ckpt_{new_ckpt.id}.pt",
+                f"{new_ckpt.family_name}_{new_ckpt.version}_ckpt_{new_ckpt.id}.pt",
             )
 
             self._save_classifier_checkpoint(

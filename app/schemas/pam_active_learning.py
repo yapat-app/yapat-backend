@@ -42,7 +42,7 @@ class SamplingMode(str, Enum):
 class ALCheckpointCreate(BaseModel):
     """Register / checkout a model checkpoint for a dataset."""
     dataset_id: int = Field(..., description="ID of the PAM dataset")
-    name: str = Field(..., description="Human-readable model name")
+    family_name: str = Field(..., description="Human-readable model name")
     version: str = Field(default="v0", description="Version tag")
     checkpoint_path: Optional[str] = Field(None, description="Filesystem path to weights (optional)")
     model_type: str = Field(default="pam_multi_label_classifier", description="Classifier type identifier")
@@ -79,7 +79,7 @@ class ALCheckpointHyperparameters(BaseModel):
 class ALCheckpointResponse(BaseModel):
     id: int
     dataset_id: int
-    name: str
+    family_name: str
     version: str
     checkpoint_path: Optional[str] = None
     model_type: str
@@ -272,9 +272,9 @@ class ALTrainFromScratchRequest(BaseModel):
         description="Optional cap on samples per class for balancing",
         example=None
     )
-    checkpoint_name: str = Field(
+    family_name: str = Field(
         default="cold_start_base",
-        description="Human-readable name for the new base checkpoint",
+        description="This name will be the same throughout all versions of the checkpoints",
     )
     version: str = Field(default="v0", description="Version tag for the new checkpoint")
     model_type: str = Field(default="pam_multilabel_classifier", description="Classifier type identifier")

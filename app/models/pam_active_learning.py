@@ -54,7 +54,7 @@ class ALModelCheckpoint(Base):
         nullable=False,
         index=True,
     )
-    name = Column(String, nullable=False)
+    family_name = Column(String, nullable=False)
     version = Column(String, nullable=False, default="v0")
     checkpoint_path = Column(String, nullable=False)  # filesystem path to weights
     label_config_path = Column(String, nullable=False)
@@ -95,7 +95,7 @@ class ALModelCheckpoint(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("dataset_id", "name", "version", name="uq_al_checkpoint"),
+        UniqueConstraint("dataset_id", "family_name", "version", name="uq_al_checkpoint"),
     )
 
 
