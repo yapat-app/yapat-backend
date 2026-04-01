@@ -1,0 +1,175 @@
+"""
+Feedback helpers: counting, syncing events to annotations, label normalization.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.models.pam_active_learning import (
+    ALFeedbackAction,
+    ALFeedbackEvent,
+    ALPrediction,
+    ALRetrainJob,
+    ALRetrainStatus,
+)
+
+from app.services.pam_al._annotation_helpers import store_user_labels_for_snippet
+
+
+def feedback_count_since_retrain(db: Session, checkpoint_id: int) -> int:
+    """Count feedback events created after the most recent completed retrain."""
+    last_retrain = (
+        db.query(ALRetrainJob.completed_at)
+        .filter(
+            ALRetrainJob.model_checkpoint_id == checkpoint_id,
+            ALRetrainJob.status == ALRetrainStatus.COMPLETED,
+        )
+        .order_by(ALRetrainJob.completed_at.desc())
+        .first()
+    )
+
+    cutoff = (
+        last_retrain[0]
+        if last_retrain and last_retrain[0] is not None
+        else datetime.min.replace(tzinfo=timezone.utc)
+    )
+
+    count = (
+        db.query(func.count(ALFeedbackEvent.id))
+        .filter(
+            ALFeedbackEvent.model_checkpoint_id == checkpoint_id,
+            ALFeedbackEvent.created_at > cutoff,
+        )
+        .scalar()
+    )
+
+    return int(count or 0)
+
+
+def get_last_completed_retrain_cutoff(db: Session, checkpoint_id: int) -> datetime:
+    last_retrain = (
+        db.query(ALRetrainJob.completed_at)
+        .filter(
+            ALRetrainJob.model_checkpoint_id == checkpoint_id,
+            ALRetrainJob.status == ALRetrainStatus.COMPLETED,
+        )
+        .order_by(ALRetrainJob.completed_at.desc())
+        .first()
+    )
+    if last_retrain and last_retrain[0] is not None:
+        return last_retrain[0]
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def get_feedback_events_since_last_retrain(
+    db: Session,
+    checkpoint_id: int,
+) -> list[ALFeedbackEvent]:
+    cutoff = get_last_completed_retrain_cutoff(db, checkpoint_id)
+    return (
+        db.query(ALFeedbackEvent)
+        .filter(
+            ALFeedbackEvent.model_checkpoint_id == checkpoint_id,
+            ALFeedbackEvent.created_at > cutoff,
+        )
+        .order_by(ALFeedbackEvent.created_at.asc())
+        .all()
+    )
+
+
+def sync_feedback_events_to_annotations(db: Session, checkpoint_id: int) -> int:
+    """
+    Sync recent ACCEPT / MODIFY feedback since the last retrain into
+    ALSnippetAnnotation.  Returns the number of events processed.
+    """
+    events = get_feedback_events_since_last_retrain(db, checkpoint_id)
+    if not events:
+        return 0
+
+    for event in events:
+        if event.action not in {ALFeedbackAction.ACCEPT, ALFeedbackAction.MODIFY}:
+            continue
+
+        labels_to_store = event.final_labels or []
+        if not labels_to_store:
+            continue
+
+        store_user_labels_for_snippet(
+            db=db,
+            dataset_id=event.dataset_id,
+            snippet_id=event.snippet_id,
+            labels=labels_to_store,
+            model_checkpoint_id=event.model_checkpoint_id,
+            user_id=event.user_id,
+        )
+
+    db.flush()
+    return len(events)
+
+
+def has_active_retrain_job(db: Session, checkpoint_id: int) -> bool:
+    return (
+        db.query(ALRetrainJob)
+        .filter(
+            ALRetrainJob.model_checkpoint_id == checkpoint_id,
+            ALRetrainJob.status.in_([ALRetrainStatus.PENDING, ALRetrainStatus.RUNNING]),
+        )
+        .first()
+        is not None
+    )
+
+
+def collect_predicted_labels_for_snippet(
+    predictions: list[ALPrediction],
+) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+
+    for prediction in predictions:
+        if prediction.predicted_labels:
+            for label in prediction.predicted_labels:
+                value = str(label).strip()
+                if value and value not in seen:
+                    seen.add(value)
+                    labels.append(value)
+
+    return labels
+
+
+def normalize_feedback_labels(labels: list[str] | None) -> list[str]:
+    """Clean incoming labels: remove None, empty, Swagger placeholder, duplicates."""
+    if not labels:
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+
+    for label in labels:
+        if label is None:
+            continue
+        value = str(label).strip()
+        if not value or value.lower() == "string":
+            continue
+        if value not in seen:
+            seen.add(value)
+            cleaned.append(value)
+
+    return cleaned
+
+
+def resolve_feedback_labels(
+    action: str,
+    predicted_labels: list[str],
+    labels: list[str] | None,
+) -> list[str]:
+    incoming_labels = normalize_feedback_labels(labels)
+
+    if action == "ACCEPT":
+        return predicted_labels
+    if action == "MODIFY":
+        return incoming_labels
+    return []

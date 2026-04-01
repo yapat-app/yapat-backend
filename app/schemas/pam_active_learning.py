@@ -321,3 +321,35 @@ class ALSingleSampleScore(BaseModel):
     diversity: Optional[float]
     density: Optional[float]
     composite: Optional[float]
+
+
+# ── Async job dispatch ──────────────────────────────────────────────────
+
+class ALJobDispatch(BaseModel):
+    """
+    Returned immediately when a training or retrain request is accepted and
+    dispatched to the background worker.  The client should poll
+    GET /api/pam-al/retrain/jobs/{job_id} to track progress.
+    """
+    job_id: int
+    checkpoint_id: int
+    status: ALRetrainStatusSchema
+    message: str
+
+
+class ALRetrainJobStatusResponse(BaseModel):
+    """Full status of a retrain job — use for polling."""
+    id: int
+    dataset_id: int
+    model_checkpoint_id: int
+    trigger: str
+    feedback_count: int
+    status: ALRetrainStatusSchema
+    result_metrics: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
