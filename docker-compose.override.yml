@@ -8,6 +8,10 @@ services:
     volumes:
       - .:/app
 
+  celery-worker-pam-al:
+    volumes:
+      - .:/app
+
   celery-beat:
     volumes:
       - .:/app
