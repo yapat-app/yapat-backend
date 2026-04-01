@@ -50,6 +50,39 @@ class PAMActiveLearningService:
     def __init__(self, db: Session):
         self.db = db
 
+    def _cleanup_failed_training_checkpoint(
+        self,
+        checkpoint: ALModelCheckpoint,
+        job: ALRetrainJob,
+        error: Exception,
+    ) -> None:
+        """
+        Remove a failed checkpoint entry.
+
+        Scheduling-based retries are not configured yet; until then, failed
+        training attempts are cleaned up by deleting the checkpoint row.
+        """
+        checkpoint_id = checkpoint.id
+        job_id = job.id
+        error_message = str(error)
+        try:
+            self.db.delete(checkpoint)
+            self.db.commit()
+            logger.info(
+                "Deleted failed checkpoint entry checkpoint_id=%d job_id=%d error=%s",
+                checkpoint_id,
+                job_id,
+                error_message,
+            )
+        except Exception:
+            self.db.rollback()
+            logger.exception(
+                "Failed to delete checkpoint after training failure checkpoint_id=%d job_id=%d",
+                checkpoint_id,
+                job_id,
+            )
+            raise
+
     # ==================================================================
     # Checkpoint management
     # ==================================================================
@@ -180,11 +213,7 @@ class PAMActiveLearningService:
 
         except Exception as e:
             logger.exception("Cold-start training failed.")
-            model_ckpt.status = ALModelStatus.ERROR
-            job.status = ALRetrainStatus.FAILED
-            job.completed_at = datetime.now(timezone.utc)
-            job.error_message = str(e)
-            self.db.commit()
+            self._cleanup_failed_training_checkpoint(model_ckpt, job, e)
             raise
 
     # ==================================================================
@@ -426,11 +455,7 @@ class PAMActiveLearningService:
 
         except Exception as e:
             logger.exception("Manual retraining failed.")
-            new_ckpt.status = ALModelStatus.ERROR
-            job.status = ALRetrainStatus.FAILED
-            job.completed_at = datetime.now(timezone.utc)
-            job.error_message = str(e)
-            self.db.commit()
+            self._cleanup_failed_training_checkpoint(new_ckpt, job, e)
             raise
 
     # ==================================================================
@@ -587,11 +612,7 @@ class PAMActiveLearningService:
 
         except Exception as e:
             logger.exception("execute_train_from_scratch failed checkpoint_id=%d", checkpoint_id)
-            model_ckpt.status = ALModelStatus.ERROR
-            job.status = ALRetrainStatus.FAILED
-            job.completed_at = datetime.now(timezone.utc)
-            job.error_message = str(e)
-            self.db.commit()
+            self._cleanup_failed_training_checkpoint(model_ckpt, job, e)
             raise
 
     def setup_manual_retrain(self, body) -> tuple[ALModelCheckpoint, ALRetrainJob]:
@@ -786,11 +807,7 @@ class PAMActiveLearningService:
 
         except Exception as e:
             logger.exception("Retrain failed checkpoint_id=%d", checkpoint_id)
-            new_ckpt.status = ALModelStatus.ERROR
-            job.status = ALRetrainStatus.FAILED
-            job.completed_at = datetime.now(timezone.utc)
-            job.error_message = str(e)
-            self.db.commit()
+            self._cleanup_failed_training_checkpoint(new_ckpt, job, e)
             raise
 
     # ==================================================================
