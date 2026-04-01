@@ -16,16 +16,17 @@ from typing import List, Optional
 from app.api.deps import get_db, get_current_active_user
 from app.models.user import User
 from app.schemas.pam_active_learning import (
-    PAMCheckpointCreate,
-    PAMCheckpointResponse,
-    PAMRunInferenceRequest,
-    PAMPredictionResponse,
-    PAMInferenceResult,
-    PAMFeedbackSubmit,
-    PAMFeedbackResponse,
-    PAMRetrainRequest,
-    PAMRetrainJobResponse,
-    PAMActiveLearningStats,
+    ALCheckpointCreate,
+    ALCheckpointResponse,
+    ALRunInferenceRequest,
+    ALPredictionResponse,
+    ALFeedbackSubmit,
+    ALFeedbackResponse,
+    ALRetrainRequest,
+    ALRetrainJobResponse,
+    ALStats,
+    ALTrainFromScratchRequest,
+    ALPredictionListResponse
 )
 from app.services.pam_active_learning_service import PAMActiveLearningService
 
@@ -36,11 +37,11 @@ router = APIRouter()
 
 @router.post(
     "/checkpoints",
-    response_model=PAMCheckpointResponse,
+    response_model=ALCheckpointResponse,
     status_code=status.HTTP_201_CREATED,
 )
 def register_checkpoint(
-    body: PAMCheckpointCreate,
+    body: ALCheckpointCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -67,7 +68,7 @@ def register_checkpoint(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/checkpoints", response_model=List[PAMCheckpointResponse])
+@router.get("/checkpoints", response_model=List[ALCheckpointResponse])
 def list_checkpoints(
     dataset_id: Optional[int] = Query(None, description="Filter by dataset"),
     db: Session = Depends(get_db),
@@ -78,7 +79,7 @@ def list_checkpoints(
     return svc.list_checkpoints(dataset_id=dataset_id)
 
 
-@router.get("/checkpoints/{checkpoint_id}", response_model=PAMCheckpointResponse)
+@router.get("/checkpoints/{checkpoint_id}", response_model=ALCheckpointResponse)
 def get_checkpoint(
     checkpoint_id: int,
     db: Session = Depends(get_db),
@@ -94,149 +95,108 @@ def get_checkpoint(
 
 # ============ INFERENCE + SCORING ============
 
-@router.post("/inference", response_model=PAMInferenceResult)
-def run_inference(
-    body: PAMRunInferenceRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    """
-    Run the classifier on a snippet set, score & rank predictions,
-    and return the top-k most informative snippets for labeling.
-
-    Flow: model checkout → classifier inference → combined scoring →
-          top-k selection → persist & return predictions.
-    """
-    svc = PAMActiveLearningService(db)
-    try:
-        result = svc.run_inference(
-            model_checkpoint_id=body.model_checkpoint_id,
-            snippet_set_id=body.snippet_set_id,
-            k=body.k,
-            device=body.device,
-        )
-        return PAMInferenceResult(
-            predictions=[
-                PAMPredictionResponse.model_validate(p, from_attributes=True)
-                for p in result["predictions"]
-            ],
-            total_scored=result["total_scored"],
-            model_info=result["model_info"],
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Inference failed: {e}"
-        )
-
-
-# ============ FEEDBACK ============
-
-@router.post("/feedback", response_model=PAMFeedbackResponse)
-def submit_feedback(
-    body: PAMFeedbackSubmit,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    """
-    Submit feedback on a prediction: ACCEPT / REJECT / MODIFY.
-
-    When action=MODIFY, provide the corrected label in ``modified_label``.
-
-    If 5 or more feedbacks have been submitted since the last retrain,
-    retraining is triggered automatically.
-    """
-    svc = PAMActiveLearningService(db)
-    try:
-        result = svc.submit_feedback(
-            prediction_id=body.prediction_id,
-            action=body.action.value,
-            user_id=current_user.id,
-            modified_label=body.modified_label,
-            notes=body.notes,
-        )
-        return PAMFeedbackResponse(
-            id=result["feedback_id"],
-            prediction_id=result["prediction_id"],
-            action=result["action"],
-            modified_label=result["modified_label"],
-            created_at=result["created_at"],
-            feedback_count_since_retrain=result["feedback_count_since_retrain"],
-            retrain_triggered=result["retrain_triggered"],
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Feedback submission failed: {e}"
-        )
-
-
-# ============ RETRAIN ============
 
 @router.post(
-    "/retrain",
-    response_model=PAMRetrainJobResponse,
+    "/inference/get-or-create",
+    response_model=ALPredictionListResponse,
+    status_code=status.HTTP_200_OK,
+)
+def get_or_create_predictions(
+    body: ALRunInferenceRequest,
+    db: Session = Depends(get_db),
+):
+    service = PAMActiveLearningService(db)
+
+    try:
+        return service.get_or_create_predictions(body)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve predictions: {str(e)}",
+        )
+
+@router.post(
+    "/retrain/manual",
+    response_model=ALCheckpointResponse,
     status_code=status.HTTP_201_CREATED,
 )
 def manual_retrain(
-    body: PAMRetrainRequest,
+    body: ALRetrainRequest,
+    db: Session = Depends(get_db),
+):
+    service = PAMActiveLearningService(db)
+
+    try:
+        return service.manual_retrain(body)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Manual retraining failed: {str(e)}",
+        )
+
+
+# ============ TRAIN FROM SCRATCH / COLD START TRAINING ============
+
+@router.post(
+    "/train-from-scratch",
+    response_model=ALCheckpointResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def train_from_scratch(
+    body: ALTrainFromScratchRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """
-    Manually trigger retraining for a PAM model checkpoint.
-
-    This fires regardless of the automatic interaction threshold.
-    """
     svc = PAMActiveLearningService(db)
     try:
-        job = svc.manual_retrain(
-            model_checkpoint_id=body.model_checkpoint_id,
-            epochs=body.epochs,
-            learning_rate=body.learning_rate,
-            device=body.device,
-        )
-        # Enrich response with new checkpoint info from result_metrics
-        metrics = job.result_metrics or {}
-        return PAMRetrainJobResponse(
-            id=job.id,
-            model_checkpoint_id=job.model_checkpoint_id,
-            trigger=job.trigger,
-            feedback_count=job.feedback_count,
-            status=job.status.value,
-            result_metrics=job.result_metrics,
-            error_message=job.error_message,
-            started_at=job.started_at,
-            completed_at=job.completed_at,
-            created_at=job.created_at,
-            new_checkpoint_id=metrics.get("new_checkpoint_id"),
-            new_checkpoint_path=metrics.get("new_checkpoint_path"),
-        )
+        ckpt = svc.train_from_scratch(body)
+        return ckpt
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Retrain trigger failed: {e}"
+            status_code=500,
+            detail=f"Cold-start training failed: {e}",
         )
 
-
-# ============ STATS ============
-
-@router.get("/stats", response_model=PAMActiveLearningStats)
-def get_stats(
-    model_checkpoint_id: int = Query(..., description="Checkpoint ID"),
+@router.post(
+    "/feedback",
+    response_model=ALFeedbackResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def submit_feedback(
+    body: ALFeedbackSubmit,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
 ):
-    """
-    Get active learning statistics for a PAM model checkpoint.
+    service = PAMActiveLearningService(db)
 
-    Includes counts of predictions, feedback breakdown, and retrain jobs.
-    """
-    svc = PAMActiveLearningService(db)
     try:
-        return PAMActiveLearningStats(**svc.get_stats(model_checkpoint_id))
+        result = service.submit_feedback(body)
+        return result
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Stats retrieval failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to submit feedback: {str(e)}",
+        )
+

@@ -5,57 +5,88 @@ Request / response models for the PAM active learning API.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
 
 
 # ── Enums (mirror ORM enums for API layer) ─────────────────────────────
 
-class PAMModelStatusSchema(str, Enum):
+class ALModelStatusSchema(str, Enum):
     AVAILABLE = "AVAILABLE"
     LOADING = "LOADING"
     ERROR = "ERROR"
 
 
-class PAMFeedbackActionSchema(str, Enum):
+class ALFeedbackActionSchema(str, Enum):
     ACCEPT = "ACCEPT"
     REJECT = "REJECT"
     MODIFY = "MODIFY"
 
 
-class PAMRetrainStatusSchema(str, Enum):
+class ALRetrainStatusSchema(str, Enum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
+class SamplingMode(str, Enum):
+    RANDOM = "random"
+    UNCERTAINTY = "uncertainty"
+    DIVERSITY = "diversity"
+    DENSITY = "density"
+    COMPOSITE = "composite"
 
 # ── Model Checkpoint ───────────────────────────────────────────────────
 
-class PAMCheckpointCreate(BaseModel):
+class ALCheckpointCreate(BaseModel):
     """Register / checkout a model checkpoint for a dataset."""
     dataset_id: int = Field(..., description="ID of the PAM dataset")
-    name: str = Field(..., description="Human-readable model name")
+    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
     version: str = Field(default="v0", description="Version tag")
     checkpoint_path: Optional[str] = Field(None, description="Filesystem path to weights (optional)")
-    model_type: str = Field(default="pam_classifier", description="Classifier type identifier")
+    model_type: str = Field(default="pam_multi_label_classifier", description="Classifier type identifier")
     hyperparameters: Optional[Dict[str, Any]] = None
     is_base: bool = Field(default=False, description="Mark as base model entry (uses shared base weights)")
     parent_checkpoint_id: Optional[int] = Field(None, description="Parent checkpoint ID for version lineage")
 
+class ALCheckpointHyperparameters(BaseModel):
+    training_mode: Optional[str] = None
 
-class PAMCheckpointResponse(BaseModel):
+    embedding_model_id: Optional[int] = None
+    metadata_path: Optional[str] = None
+    label_config_path: Optional[str] = None
+
+    min_samples_per_class: Optional[int] = None
+    max_samples_per_class: Optional[int] = None
+
+    epochs: Optional[int] = None
+    learning_rate: Optional[float] = None
+    batch_size: Optional[int] = None
+    hidden_dim: Optional[int] = None
+    dropout: Optional[float] = None
+    device: Optional[str] = None
+
+    resolved_snippet_set_id: Optional[int] = None
+    n_dim: Optional[int] = None
+    num_classes: Optional[int] = None
+    train_samples: Optional[int] = None
+
+    used_species: Optional[List[str]] = None
+    excluded_species: Optional[List[str]] = None
+    class_counts: Optional[Dict[str, int]] = None
+
+class ALCheckpointResponse(BaseModel):
     id: int
     dataset_id: int
-    name: str
+    model_family_name: str
     version: str
     checkpoint_path: Optional[str] = None
     model_type: str
-    hyperparameters: Optional[Dict[str, Any]] = None
+    hyperparameters: Optional[ALCheckpointHyperparameters] = None
     is_base: int = 0
     parent_checkpoint_id: Optional[int] = None
-    status: PAMModelStatusSchema
+    status: ALModelStatusSchema
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -64,54 +95,113 @@ class PAMCheckpointResponse(BaseModel):
 
 
 # ── Inference / Predictions ────────────────────────────────────────────
-
-class PAMRunInferenceRequest(BaseModel):
-    """Trigger inference on a snippet set using a checked-out model."""
-    model_checkpoint_id: int = Field(..., description="Checked-out model checkpoint ID")
-    snippet_set_id: int = Field(..., description="Snippet set to run inference on")
-    k: int = Field(default=20, ge=1, le=500, description="Number of top-ranked predictions to return")
+class ALRunInferenceRequest(BaseModel):
+    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
+    dataset_id : int
+    snippet_set_id: int = Field(..., description="Snippet set to retrieve predictions for")
     device: str = Field(default="cpu", description="cpu or cuda")
 
+    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    density_k: Optional[int] = Field(default=None, ge=1)
+    composite_wu: Optional[float] = Field(default=None)
+    composite_wd: Optional[float] = Field(default=None)
+    composite_wr: Optional[float] = Field(default=None)
 
-class PAMPredictionResponse(BaseModel):
+    force_refresh: bool = Field(
+        default=False,
+        description="If true, rerun inference even if predictions already exist",
+    )
+
+    sample_suggestion: bool = Field(
+        default=False,
+        description="If true, return ranked annotation suggestions instead of the full prediction set.",
+    )
+    suggestion_strategy: SamplingMode = Field(
+        default=SamplingMode.COMPOSITE,
+        description="Ranking strategy used when sample_suggestion=true.",
+    )
+    k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of suggestions to return when sample_suggestion=true.",
+    )
+
+
+class ALPredictionResponse(BaseModel):
     id: int
     model_checkpoint_id: int
     snippet_id: int
-    predicted_label: str
-    confidence: float
+    predicted_labels: List[str]
+    predicted_probabilities: Optional[Dict[str, float]]
+    uncertainty: Optional[float]
+    diversity: Optional[float]
+    density: Optional[float]
+    composite_score: Optional[float]
     created_at: datetime
 
     class Config:
         from_attributes = True
 
 
-class PAMInferenceResult(BaseModel):
-    """Result returned after running inference + scoring."""
-    predictions: List[PAMPredictionResponse]
-    total_scored: int
-    model_info: Dict[str, Any]
+class ALPredictionListResponse(BaseModel):
+    mode: Literal["predictions", "suggestions"]
+    model_family_name: str
+    used_checkpoint_id: int
+    total_predictions: int
+    returned_count: int
+    suggestion_strategy: SamplingMode = Field(
+        default=SamplingMode.COMPOSITE,
+        description="uncertainty, density, diversity or composite",
+    )
+    k: Optional[int] = None
+    rows: List[ALPredictionResponse]
+
+class ALInferenceRow(BaseModel):
+    snippet_id: int
+    embedding: list[float] | None = None
+    predicted_labels: list[str]
+    predicted_probabilities: dict[str, float]
+    uncertainty: float
+    diversity: float | None
+    density: float | None
+    composite_score: float | None
 
 
 # ── Feedback ───────────────────────────────────────────────────────────
+class ALFeedbackSubmit(BaseModel):
+    dataset_id: int = Field(..., description="Dataset ID")
+    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
+    snippet_id: int = Field(..., description="Snippet being reviewed")
 
-class PAMFeedbackSubmit(BaseModel):
-    """Submit feedback on a single prediction."""
-    prediction_id: int = Field(..., description="Prediction to give feedback on")
-    action: PAMFeedbackActionSchema = Field(..., description="ACCEPT, REJECT, or MODIFY")
-    modified_label: Optional[str] = Field(
-        None, description="Corrected label (required when action=MODIFY)"
+    action: ALFeedbackActionSchema = Field(
+        ...,
+        description="ACCEPT, REJECT, or MODIFY",
     )
+
+    labels: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Final labels provided by the user. "
+            "For ACCEPT this may be omitted to use predicted labels. "
+            "For MODIFY this should contain replacement labels. "
+            "For REJECT this is usually omitted."
+        ),
+    )
+
     notes: Optional[str] = None
+    user_id: Optional[int] = None
 
 
-class PAMFeedbackResponse(BaseModel):
+class ALFeedbackResponse(BaseModel):
     id: int
-    prediction_id: int
-    action: PAMFeedbackActionSchema
-    modified_label: Optional[str] = None
+    model_family_name: str
+    model_checkpoint_id: int
+    active_checkpoint_id: Optional[int] = None
+    snippet_id: int
+    action: ALFeedbackActionSchema
+    final_labels: Optional[List[str]] = None
     notes: Optional[str] = None
     created_at: datetime
-    # auto-retrain status
     feedback_count_since_retrain: int
     retrain_triggered: bool
 
@@ -121,20 +211,36 @@ class PAMFeedbackResponse(BaseModel):
 
 # ── Retrain ────────────────────────────────────────────────────────────
 
-class PAMRetrainRequest(BaseModel):
-    """Manually trigger retraining."""
-    model_checkpoint_id: int = Field(..., description="Checkpoint to retrain")
-    epochs: int = Field(default=5, ge=1, le=500)
-    learning_rate: float = Field(default=1e-3, gt=0)
-    device: str = Field(default="cpu")
+class ALRetrainRequest(BaseModel):
+    dataset_id: int = Field(..., description="Dataset ID")
+    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
+
+    epochs: Optional[int] = Field(default=None, ge=1, le=500)
+    learning_rate: Optional[float] = Field(default=None, gt=0)
+    batch_size: Optional[int] = Field(default=None, ge=1, le=4096)
+    hidden_dim: Optional[int] = Field(default=None, ge=1)
+    dropout: Optional[float] = Field(default=None, ge=0.0, le=0.9)
+    device: Optional[str] = Field(default=None, description="cpu or cuda")
+
+    run_inference: bool = Field(default=True)
+    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    density_k: Optional[int] = Field(default=None, ge=1)
+    composite_wu: Optional[float] = Field(default=None)
+    composite_wd: Optional[float] = Field(default=None)
+    composite_wr: Optional[float] = Field(default=None)
 
 
-class PAMRetrainJobResponse(BaseModel):
+class ALRetrainJobResponse(BaseModel):
     id: int
-    model_checkpoint_id: int
+    model_family_name: str
+    used_checkpoint_id: int
+    active_checkpoint_id: int
+    epochs: int
+    learning_rate: float
+    batch_size: int
     trigger: str
     feedback_count: int
-    status: PAMRetrainStatusSchema
+    status: ALRetrainStatusSchema
     result_metrics: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
     started_at: Optional[datetime] = None
@@ -147,10 +253,60 @@ class PAMRetrainJobResponse(BaseModel):
     class Config:
         from_attributes = True
 
+# ── Train from scratch ────────────────────────────────────────────────────────────
+
+class ALTrainFromScratchRequest(BaseModel):
+    """Train a fresh classifier from ground-truth labels to mitigate cold start."""
+    dataset_id: int = Field(..., description="Dataset to train on")
+    snippet_set_id: Optional[int] = Field(
+        None,
+        description="Snippet set to use; defaults to dataset.default_snippet_set_id",
+    )
+    embedding_model_id: int = Field(
+        ...,
+        description="Embedding model whose vectors should be used for training",
+    )
+    metadata_path: str = Field(
+        ...,
+        description="Path to metadata file containing ground-truth labels",
+    )
+    label_config_path: str = Field(..., description="Path to label config file consisting of class names to train on")
+    min_samples_per_class: int = Field(
+        default=1,
+        ge=1,
+        description="Minimum number of labeled samples required for a class to be included",
+    )
+    max_samples_per_class: Optional[int] = Field(
+        default=None,
+        ge=1,
+        nullable=True,
+        description="Optional cap on samples per class for balancing",
+        example=None
+    )
+    model_family_name: str = Field(
+        default="cold_start_base",
+        description="Model family name shared across checkpoint versions",
+    )
+    version: str = Field(default="v0", description="Version tag for the new checkpoint")
+    model_type: Optional[str] = Field(default="pam_multilabel_classifier", description="Classifier type identifier")
+    epochs: Optional[int] = Field(default=20, ge=1, le=500)
+    learning_rate: Optional[float] = Field(default=1e-3)
+    batch_size: Optional[int] = Field(default=16)
+    hidden_dim: Optional[int] = Field(default=128)
+    dropout: Optional[float] = Field(default=0.5)
+    device: Optional[str] = Field(default="cpu", description="cpu or cuda")
+
+    run_inference: bool = Field(default=False)
+
+    threshold: Optional[float] = Field(default=0.6)
+    density_k: Optional[int] = Field(default=15)
+    composite_wu: Optional[float] = Field(default=0.5)
+    composite_wd: Optional[float] = Field(default=0.25)
+    composite_wr: Optional[float] = Field(default=0.25)
 
 # ── Stats ──────────────────────────────────────────────────────────────
 
-class PAMActiveLearningStats(BaseModel):
+class ALStats(BaseModel):
     model_checkpoint_id: int
     total_predictions: int
     total_feedback: int
@@ -159,3 +315,9 @@ class PAMActiveLearningStats(BaseModel):
     modified: int
     feedback_since_last_retrain: int
     retrain_jobs: int
+
+class ALSingleSampleScore(BaseModel):
+    uncertainty: float
+    diversity: Optional[float]
+    density: Optional[float]
+    composite: Optional[float]

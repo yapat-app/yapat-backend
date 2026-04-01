@@ -41,7 +41,13 @@ class Snippet(Base):
         back_populates="snippet",
         cascade="all, delete-orphan",
     )
-    
+
+    al_annotations = relationship(
+        "ALSnippetAnnotation",
+        back_populates="snippet",
+        cascade="all, delete-orphan",
+    )
+
     # WSSED active learning snippet labels
     wssed_snippet_labels = relationship(
         "WSSEDSnippetLabel",
@@ -49,8 +55,8 @@ class Snippet(Base):
         cascade="all, delete-orphan",
     )
     # PAM active learning predictions
-    pam_predictions = relationship(
-        "PAMPrediction",
+    al_predictions = relationship(
+        "ALPrediction",
         back_populates="snippet",
         cascade="all, delete-orphan",
     )

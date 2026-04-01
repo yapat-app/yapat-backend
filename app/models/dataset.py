@@ -72,8 +72,8 @@ class Dataset(Base):
     # Users with direct access to this dataset (via invitation, before team assignment)
     authorized_users = relationship("User", secondary=user_datasets, backref="accessible_datasets")
     # PAM Active Learning model checkpoints
-    pam_model_checkpoints = relationship(
-        "PAMModelCheckpoint",
+    al_model_checkpoints = relationship(
+        "ALModelCheckpoint",
         back_populates="dataset",
         cascade="all, delete-orphan",
     )

@@ -33,13 +33,13 @@ from app.models.wssed import (
     FeedbackType,
 )
 from app.models.pam_active_learning import (
-    PAMModelCheckpoint,
-    PAMPrediction,
-    PAMFeedbackEvent,
-    PAMRetrainJob,
-    PAMModelStatus,
-    PAMFeedbackAction,
-    PAMRetrainStatus,
+    ALModelCheckpoint,
+    ALPrediction,
+    ALFeedbackEvent,
+    ALRetrainJob,
+    ALModelStatus,
+    ALFeedbackAction,
+    ALRetrainStatus,
 )
 
 __all__ = [
@@ -69,11 +69,11 @@ __all__ = [
     "TrainingStatus",
     "FeedbackType",
     # PAM Active Learning
-    "PAMModelCheckpoint",
-    "PAMPrediction",
-    "PAMFeedbackEvent",
-    "PAMRetrainJob",
-    "PAMModelStatus",
-    "PAMFeedbackAction",
-    "PAMRetrainStatus",
+    "ALModelCheckpoint",
+    "ALPrediction",
+    "ALFeedbackEvent",
+    "ALRetrainJob",
+    "ALModelStatus",
+    "ALFeedbackAction",
+    "ALRetrainStatus",
 ]
