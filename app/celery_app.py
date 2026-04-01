@@ -4,6 +4,9 @@ Celery application instance and configuration
 
 from celery import Celery
 from app.config import settings
+from app.logging_config import configure_logging
+
+configure_logging()
 
 # Create Celery instance
 celery_app = Celery(
@@ -43,6 +46,7 @@ celery_app.conf.update(
     # Worker settings
     worker_prefetch_multiplier=4,
     worker_max_tasks_per_child=1000,
+    worker_hijack_root_logger=False,
 )
 
 if __name__ == "__main__":

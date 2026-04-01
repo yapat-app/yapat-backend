@@ -492,12 +492,30 @@ class PAMActiveLearningService:
         species_list = ckpt_h.load_species_from_label_config(hyper["label_config_path"])
 
         try:
+            logger.info(
+                "Starting cold-start execution checkpoint_id=%d job_id=%d dataset_id=%d snippet_set_id=%s",
+                checkpoint_id,
+                job_id,
+                model_ckpt.dataset_id,
+                snippet_set_id,
+            )
             job.status = ALRetrainStatus.RUNNING
             self.db.commit()
 
             X, snippet_rows = data_h.load_embeddings(self.db, snippet_set_id, hyper["embedding_model_id"])
+            logger.info(
+                "Loaded embeddings for cold-start checkpoint_id=%d rows=%d",
+                checkpoint_id,
+                len(snippet_rows),
+            )
             gt_index = data_h.load_ground_truth_metadata(hyper["metadata_path"], species_list, ["train"])
             X_train, y_train, used_sids = data_h.align_embeddings_and_labels(X, snippet_rows, gt_index, species_list)
+            logger.info(
+                "Aligned training set for cold-start checkpoint_id=%d samples=%d classes=%d",
+                checkpoint_id,
+                int(y_train.shape[0]),
+                int(y_train.shape[1]),
+            )
 
             model = MultiLabelMLPClassifier()
             X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = model.filter_and_balance_classes(
@@ -519,6 +537,12 @@ class PAMActiveLearningService:
             train_metrics = model.fit(X=X_train, y=y_train, epochs=int(hyper.get("epochs", 20)),
                                       learning_rate=float(hyper.get("learning_rate", 1e-3)),
                                       batch_size=int(hyper.get("batch_size", 32)), device=dev)
+            logger.info(
+                "Finished cold-start model fit checkpoint_id=%d train_samples=%d num_classes=%d",
+                checkpoint_id,
+                int(X_train.shape[0]),
+                int(num_classes),
+            )
 
             cp = ckpt_h.make_checkpoint_path(ds.id, model_ckpt.model_family_name, model_ckpt.version, model_ckpt.id)
             lcp = ckpt_h.make_label_config_path(ds.id, model_ckpt.model_family_name, model_ckpt.version, model_ckpt.id)
@@ -542,6 +566,7 @@ class PAMActiveLearningService:
                     self.db, model_ckpt.dataset_id, model_ckpt, model, X, snippet_rows, used_sp, labeled_ids,
                     hyper.get("threshold"), hyper.get("density_k"),
                     hyper.get("composite_wu"), hyper.get("composite_wd"), hyper.get("composite_wr"))
+                logger.info("Completed initial inference for cold-start checkpoint_id=%d", checkpoint_id)
 
             job.status = ALRetrainStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
@@ -553,6 +578,11 @@ class PAMActiveLearningService:
             ckpt_h.set_active_family_checkpoint(self.db, model_ckpt.dataset_id, model_ckpt.model_family_name, model_ckpt.id)
             self.db.commit()
             self.db.refresh(model_ckpt)
+            logger.info(
+                "Cold-start execution completed checkpoint_id=%d job_id=%d",
+                checkpoint_id,
+                job_id,
+            )
             return model_ckpt
 
         except Exception as e:
@@ -662,11 +692,23 @@ class PAMActiveLearningService:
             raise ValueError("Checkpoint missing label_order.")
 
         try:
+            logger.info(
+                "Starting retrain execution checkpoint_id=%d job_id=%d dataset_id=%d sync_feedback=%s",
+                checkpoint_id,
+                job_id,
+                dataset_id,
+                sync_feedback,
+            )
             job.status = ALRetrainStatus.RUNNING
             self.db.commit()
 
             if sync_feedback and parent_checkpoint_id:
                 fb_h.sync_feedback_events_to_annotations(self.db, parent_checkpoint_id)
+                logger.info(
+                    "Synchronized feedback annotations for retrain checkpoint_id=%d parent_checkpoint_id=%d",
+                    checkpoint_id,
+                    parent_checkpoint_id,
+                )
 
             annotations_by_snippet = ann_h.get_trusted_annotations(self.db, dataset_id)
             if not annotations_by_snippet:
@@ -674,6 +716,11 @@ class PAMActiveLearningService:
 
             X, snippet_rows = data_h.load_embeddings(self.db, snippet_set_id, embedding_model_id)
             snippet_ids = [r["snippet_id"] for r in snippet_rows]
+            logger.info(
+                "Loaded embeddings for retrain checkpoint_id=%d rows=%d",
+                checkpoint_id,
+                len(snippet_rows),
+            )
 
             keep = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
             if not keep:
@@ -687,6 +734,12 @@ class PAMActiveLearningService:
             X_train, y_train = X_train[keep_rows], y_train[keep_rows]
             if X_train.shape[0] == 0:
                 raise ValueError("No training rows remain after filtering.")
+            logger.info(
+                "Prepared retrain dataset checkpoint_id=%d train_samples=%d num_classes=%d",
+                checkpoint_id,
+                int(X_train.shape[0]),
+                int(y_train.shape[1]),
+            )
 
             hd = int(hyper.get("hidden_dim", 128))
             do = float(hyper.get("dropout", 0.5))
@@ -698,6 +751,7 @@ class PAMActiveLearningService:
             train_metrics = model.fit(X=X_train, y=y_train,
                 epochs=int(hyper.get("epochs", 20)), learning_rate=float(hyper.get("learning_rate", 1e-3)),
                 batch_size=int(hyper.get("batch_size", 32)), device=dev)
+            logger.info("Finished retrain model fit checkpoint_id=%d", checkpoint_id)
 
             cp = ckpt_h.make_checkpoint_path(dataset_id, new_ckpt.model_family_name, new_ckpt.version, new_ckpt.id)
             ckpt_h.save_classifier_checkpoint(model, cp, hd, do, label_order)
@@ -716,6 +770,7 @@ class PAMActiveLearningService:
                     self.db, dataset_id, new_ckpt, model, X, snippet_rows, label_order, labeled_ids,
                     hyper.get("threshold"), hyper.get("density_k"),
                     hyper.get("composite_wu"), hyper.get("composite_wd"), hyper.get("composite_wr"))
+                logger.info("Completed post-retrain inference checkpoint_id=%d", checkpoint_id)
 
             job.status = ALRetrainStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
@@ -726,6 +781,7 @@ class PAMActiveLearningService:
             ckpt_h.set_active_family_checkpoint(self.db, dataset_id, new_ckpt.model_family_name, new_ckpt.id)
             self.db.commit()
             self.db.refresh(new_ckpt)
+            logger.info("Retrain execution completed checkpoint_id=%d job_id=%d", checkpoint_id, job_id)
             return new_ckpt
 
         except Exception as e:

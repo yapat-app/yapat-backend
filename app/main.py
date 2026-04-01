@@ -6,6 +6,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.logging_config import configure_logging
+
+configure_logging()
+
 from app.api import auth, teams, datasets, recordings, snippets, annotations, feed, invitations, tasks, taxonomy, embeddings, custom_taxonomy, pam_active_learning
 
 app = FastAPI(
