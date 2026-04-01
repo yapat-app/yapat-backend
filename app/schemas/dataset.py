@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 class DatasetType(str, Enum):
     PAM = "PAM"
-    WEAKLY_LABELED = "WEAKLY_LABELED"
+    FOCAL_RECORDINGS = "FOCAL_RECORDINGS"
 
 
 class DatasetBase(BaseModel):

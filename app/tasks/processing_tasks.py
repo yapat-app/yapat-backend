@@ -80,7 +80,7 @@ def process_dataset(self, dataset_id: int):
     New architecture:
     - Only scanning runs at dataset creation
     - Snippet generation is triggered by embedding jobs, not datasets
-    - For WEAKLY_LABELED datasets, auto-register species models after scanning
+    - For FOCAL_RECORDINGS datasets, auto-register species models after scanning
       (chained so it runs after scan completes and recordings exist)
     """
     # Chain: scan first, then auto-register so species list is available
@@ -111,18 +111,18 @@ def generate_snippets(self, dataset_id: int, snippet_set_id: int):
 
 
 # --------------------------------------------------------------------
-# Task: Auto-register species models for WEAKLY_LABELED datasets
+# Task: Auto-register species models for FOCAL_RECORDINGS datasets
 # --------------------------------------------------------------------
 
 @celery_app.task(bind=True, name="app.tasks.processing_tasks.auto_register_species_models")
 def auto_register_species_models(self, scan_result=None):
     """
-    Automatically register species models for a WEAKLY_LABELED dataset.
+    Automatically register species models for a FOCAL_RECORDINGS dataset.
     Intended to be chained after scan_dataset: receives scan result and extracts dataset_id.
     Can also be called with a single int (dataset_id) for backward compatibility.
 
     This task:
-    1. Checks if dataset type is WEAKLY_LABELED
+    1. Checks if dataset type is FOCAL_RECORDINGS
     2. Extracts species from filenames (FNJV format)
     3. Registers a species model for each unique species
 
@@ -181,12 +181,12 @@ def auto_register_species_models(self, scan_result=None):
             logger.error(error_msg)
             return {"status": "error", "message": error_msg}
         
-        # Check if dataset is WEAKLY_LABELED
-        if dataset.dataset_type != DatasetType.WEAKLY_LABELED:
-            logger.info(f"Dataset {dataset_id} is not WEAKLY_LABELED (type: {dataset.dataset_type}), skipping")
+        # Check if dataset is FOCAL_RECORDINGS
+        if dataset.dataset_type != DatasetType.FOCAL_RECORDINGS:
+            logger.info(f"Dataset {dataset_id} is not FOCAL_RECORDINGS (type: {dataset.dataset_type}), skipping")
             return {
                 "status": "skipped",
-                "reason": "not_weakly_labeled",
+                "reason": "not_focal_recordings",
                 "dataset_type": dataset.dataset_type.value
             }
         

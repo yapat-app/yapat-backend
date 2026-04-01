@@ -12,7 +12,7 @@ from app.database import Base
 
 class DatasetType(str, enum.Enum):
     PAM = "PAM"
-    WEAKLY_LABELED = "WEAKLY_LABELED"
+    FOCAL_RECORDINGS = "FOCAL_RECORDINGS"
 
 
 # Association table for user-dataset direct access
