@@ -99,7 +99,7 @@ class ALRunInferenceRequest(BaseModel):
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
     dataset_id : int
     snippet_set_id: int = Field(..., description="Snippet set to retrieve predictions for")
-    device: str = Field(default="cpu", description="cpu or cuda")
+    device: Optional[str] = Field(default="cpu", description="cpu or cuda")
 
     threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     density_k: Optional[int] = Field(default=None, ge=1)
@@ -116,13 +116,12 @@ class ALRunInferenceRequest(BaseModel):
         default=False,
         description="If true, return ranked annotation suggestions instead of the full prediction set.",
     )
-    suggestion_strategy: SamplingMode = Field(
+    suggestion_strategy: Optional[SamplingMode] = Field(
         default=SamplingMode.COMPOSITE,
         description="Ranking strategy used when sample_suggestion=true.",
     )
     k: Optional[int] = Field(
-        default=None,
-        ge=1,
+        default=5,
         description="Number of suggestions to return when sample_suggestion=true.",
     )
 
@@ -214,13 +213,6 @@ class ALFeedbackResponse(BaseModel):
 class ALRetrainRequest(BaseModel):
     dataset_id: int = Field(..., description="Dataset ID")
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
-
-    epochs: Optional[int] = Field(default=None, ge=1, le=500)
-    learning_rate: Optional[float] = Field(default=None, gt=0)
-    batch_size: Optional[int] = Field(default=None, ge=1, le=4096)
-    hidden_dim: Optional[int] = Field(default=None, ge=1)
-    dropout: Optional[float] = Field(default=None, ge=0.0, le=0.9)
-    device: Optional[str] = Field(default=None, description="cpu or cuda")
 
     run_inference: bool = Field(default=True)
     threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)

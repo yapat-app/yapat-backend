@@ -25,7 +25,8 @@ from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
     ALInferenceRow,
     ALFeedbackSubmit,
-    ALFeedbackAction
+    ALFeedbackActionSchema,
+    ALRetrainRequest,
 
 )
 from active_learning.al_classifier import MultiLabelMLPClassifier
@@ -38,6 +39,12 @@ from active_learning.config import (
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
     RETRAIN_AFTER,
+    DEFAULT_EPOCHS,
+    DEFAULT_LEARNING_RATE,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_HIDDEN_DIM,
+    DEFAULT_DROPOUT,
+    DEFAULT_DEVICE
 )
 
 logger = logging.getLogger(__name__)
@@ -489,7 +496,7 @@ class PAMActiveLearningService:
                 f"Checkpoint {model_ckpt.id} is missing embedding_model_id in hyperparameters."
             )
 
-        threshold, density_k, wu, wd, wr = self._resolve_inference_params(
+        inference_params = self._resolve_inference_params(
             threshold=body.threshold,
             density_k=body.density_k,
             wu=body.composite_wu,
@@ -526,11 +533,7 @@ class PAMActiveLearningService:
                 X=X,
                 snippet_rows=snippet_rows,
                 label_order=label_order,
-                threshold=threshold,
-                density_k=density_k,
-                wu=wu,
-                wd=wd,
-                wr=wr,
+                **inference_params
             )
             self.db.commit()
 
@@ -591,7 +594,10 @@ class PAMActiveLearningService:
             model_family_name=body.model_family_name,
         )
         if parent_ckpt is None:
-            raise ValueError(f"Model checkpoint {parent_ckpt.id} not found.")
+            raise ValueError(
+                f"No active checkpoint found for dataset_id={body.dataset_id}, "
+                f"model_family_name='{body.model_family_name}'."
+            )
 
         hyper = parent_ckpt.hyperparameters or {}
 
@@ -607,14 +613,14 @@ class PAMActiveLearningService:
         if not label_order:
             raise ValueError("Parent checkpoint missing label_order in hyperparameters.")
 
-        epochs = body.epochs if body.epochs is not None else int(hyper.get("epochs", 20))
-        learning_rate = (
-            body.learning_rate if body.learning_rate is not None else float(hyper.get("learning_rate", 1e-3))
-        )
-        batch_size = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", 32))
-        hidden_dim = body.hidden_dim if body.hidden_dim is not None else int(hyper.get("hidden_dim", 128))
-        dropout = body.dropout if body.dropout is not None else float(hyper.get("dropout", 0.5))
-        device = body.device if body.device is not None else str(hyper.get("device", "cpu"))
+        train_params = self._resolve_retrain_hyperparameters(parent_ckpt)
+
+        epochs = train_params["epochs"]
+        learning_rate = train_params["learning_rate"]
+        batch_size = train_params["batch_size"]
+        hidden_dim = train_params["hidden_dim"]
+        dropout = train_params["dropout"]
+        device = train_params["device"]
 
         new_version = f"{parent_ckpt.version}_manual_{int(datetime.now(timezone.utc).timestamp())}"
 
@@ -751,6 +757,13 @@ class PAMActiveLearningService:
 
             inference_metrics = None
             if body.run_inference:
+                inference_params = self._resolve_inference_params(
+                    threshold=body.threshold,
+                    density_k=body.density_k,
+                    wu=body.composite_wu,
+                    wd=body.composite_wd,
+                    wr=body.composite_wr,
+                )
                 inference_metrics = self._run_and_store_inference(
                     dataset_id=dataset_id,
                     model_ckpt=new_ckpt,
@@ -758,11 +771,7 @@ class PAMActiveLearningService:
                     X=X,
                     snippet_rows=snippet_rows,
                     label_order=label_order,
-                    threshold=body.threshold,
-                    density_k=body.density_k,
-                    wu=body.composite_wu,
-                    wd=body.composite_wd,
-                    wr=body.composite_wr,
+                    **inference_params,
                 )
 
             job.status = ALRetrainStatus.COMPLETED
@@ -778,6 +787,7 @@ class PAMActiveLearningService:
                 "inference_metrics": inference_metrics,
                 **train_metrics,
             }
+
             self._set_active_family_checkpoint(
                 dataset_id=dataset_id,
                 model_family_name=parent_ckpt.model_family_name,
@@ -806,6 +816,7 @@ class PAMActiveLearningService:
             raise ValueError(f"Parent checkpoint {parent_checkpoint_id} not found.")
 
         hyper = parent_ckpt.hyperparameters or {}
+        train_params = self._resolve_retrain_hyperparameters(parent_ckpt)
 
         dataset_id = parent_ckpt.dataset_id
         snippet_set_id = hyper.get("resolved_snippet_set_id")
@@ -832,6 +843,12 @@ class PAMActiveLearningService:
                 **hyper,
                 "training_mode": "feedback_retrain",
                 "parent_checkpoint_id": parent_checkpoint_id,
+                "epochs": train_params["epochs"],
+                "learning_rate": train_params["learning_rate"],
+                "batch_size": train_params["batch_size"],
+                "hidden_dim": train_params["hidden_dim"],
+                "dropout": train_params["dropout"],
+                "device": train_params["device"],
             },
             is_base=0,
             parent_checkpoint_id=parent_checkpoint_id,
@@ -892,18 +909,18 @@ class PAMActiveLearningService:
             model.create_classifier(
                 n_dim=X_train.shape[1],
                 num_classes=y_train.shape[1],
-                hidden_dim=int(hyper.get("hidden_dim", 128)),
-                dropout=float(hyper.get("dropout", 0.5)),
+                hidden_dim=train_params["hidden_dim"],
+                dropout=train_params["dropout"],
             )
-            model.to(hyper.get("device", "cpu"))
+            model.to(train_params["device"])
 
             train_metrics = model.fit(
                 X=X_train,
                 y=y_train,
-                epochs=int(hyper.get("epochs", 20)),
-                learning_rate=float(hyper.get("learning_rate", 1e-3)),
-                batch_size=int(hyper.get("batch_size", 32)),
-                device=hyper.get("device", "cpu"),
+                epochs=train_params["epochs"],
+                learning_rate=train_params["learning_rate"],
+                batch_size=train_params["batch_size"],
+                device=train_params["device"],
             )
 
             checkpoint_dir = self._ensure_dir(
@@ -922,8 +939,8 @@ class PAMActiveLearningService:
             self._save_classifier_checkpoint(
                 model=model,
                 checkpoint_path=checkpoint_path,
-                hidden_dim=int(hyper.get("hidden_dim", 128)),
-                dropout=float(hyper.get("dropout", 0.5)),
+                hidden_dim=train_params["hidden_dim"],
+                dropout=train_params["dropout"],
                 label_order=label_order,
             )
 
@@ -935,6 +952,13 @@ class PAMActiveLearningService:
                 "num_classes": int(y_train.shape[1]),
                 "train_samples": int(X_train.shape[0]),
             }
+            inference_params = self._resolve_inference_params(
+                threshold=None,
+                density_k=None,
+                wu=None,
+                wd=None,
+                wr=None,
+            )
 
             inference_metrics = self._run_and_store_inference(
                 dataset_id=dataset_id,
@@ -943,11 +967,7 @@ class PAMActiveLearningService:
                 X=X,
                 snippet_rows=snippet_rows,
                 label_order=label_order,
-                threshold=hyper.get("threshold"),
-                density_k=hyper.get("density_k"),
-                wu=hyper.get("composite_wu"),
-                wd=hyper.get("composite_wd"),
-                wr=hyper.get("composite_wr"),
+                **inference_params
             )
 
             job.status = ALRetrainStatus.COMPLETED
@@ -1139,7 +1159,7 @@ class PAMActiveLearningService:
             return 0
 
         for event in events:
-            if event.action not in {ALFeedbackAction.ACCEPT, ALFeedbackAction.MODIFY}:
+            if event.action not in {ALFeedbackActionSchema.ACCEPT, ALFeedbackActionSchema.MODIFY}:
                 continue
 
             labels_to_store = event.final_labels or []
@@ -1536,14 +1556,14 @@ class PAMActiveLearningService:
             wu: float | None,
             wd: float | None,
             wr: float | None,
-    ) -> tuple[float, int, float, float, float]:
-        return (
-            threshold if threshold is not None else DEFAULT_INFERENCE_THRESHOLD,
-            density_k if density_k is not None else DEFAULT_DENSITY_K,
-            wu if wu is not None else DEFAULT_COMPOSITE_WU,
-            wd if wd is not None else DEFAULT_COMPOSITE_WD,
-            wr if wr is not None else DEFAULT_COMPOSITE_WR,
-        )
+    ) -> dict:
+        return {
+            "threshold": threshold if threshold is not None else DEFAULT_INFERENCE_THRESHOLD,
+            "density_k": density_k if density_k is not None else DEFAULT_DENSITY_K,
+            "wu": wu if wu is not None else DEFAULT_COMPOSITE_WU,
+            "wd": wd if wd is not None else DEFAULT_COMPOSITE_WD,
+            "wr": wr if wr is not None else DEFAULT_COMPOSITE_WR,
+        }
 
     def _get_labeled_snippet_ids_for_dataset(self, dataset_id: int) -> set[int]:
         rows = (
@@ -1592,19 +1612,14 @@ class PAMActiveLearningService:
             X,
             snippet_rows,
             label_order: list[str],
-            threshold: float | None = None,
-            density_k: int | None = None,
-            wu: float | None = None,
-            wd: float | None = None,
-            wr: float | None = None,
+            **inference_params,
     ) -> dict:
-        threshold, density_k, wu, wd, wr = self._resolve_inference_params(
-            threshold=threshold,
-            density_k=density_k,
-            wu=wu,
-            wd=wd,
-            wr=wr,
-        )
+
+        threshold = inference_params["threshold"]
+        density_k = inference_params["density_k"]
+        wu = inference_params["wu"]
+        wd = inference_params["wd"]
+        wr = inference_params["wr"]
 
         device = next(model.parameters()).device
         x_tensor = torch.tensor(X, dtype=torch.float32, device=device)
@@ -1895,3 +1910,15 @@ class PAMActiveLearningService:
             self.db.add(row)
         else:
             row.active_model_checkpoint_id = checkpoint_id
+
+    def _resolve_retrain_hyperparameters(self, parent_ckpt: ALModelCheckpoint) -> dict:
+        hyper = parent_ckpt.hyperparameters or {}
+
+        return {
+            "epochs": int(hyper.get("epochs", DEFAULT_EPOCHS)),
+            "learning_rate": float(hyper.get("learning_rate", DEFAULT_LEARNING_RATE)),
+            "batch_size": int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)),
+            "hidden_dim": int(hyper.get("hidden_dim", DEFAULT_HIDDEN_DIM)),
+            "dropout": float(hyper.get("dropout", DEFAULT_DROPOUT)),
+            "device": str(hyper.get("device", DEFAULT_DEVICE)),
+        }
