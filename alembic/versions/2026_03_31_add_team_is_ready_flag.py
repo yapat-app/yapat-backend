@@ -1,7 +1,7 @@
 """add is_ready flag to teams table
 
 Revision ID: 2026_03_31_add_team_is_ready
-Revises: 2026_03_30_dataset_team_fk_set_null
+Revises: 2026_03_30_dataset_team_fk_null
 Create Date: 2026-03-31
 
 A team is marked ready (is_ready=True) once it has at least one OWNER member.
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 
 revision = "2026_03_31_add_team_is_ready"
-down_revision = "2026_03_30_dataset_team_fk_set_null"
+down_revision = "2026_03_30_dataset_team_fk_null"
 branch_labels = None
 depends_on = None
 

@@ -1,6 +1,6 @@
 """change datasets.team_id FK from CASCADE to SET NULL to preserve datasets on team deletion
 
-Revision ID: 2026_03_30_dataset_team_fk_set_null
+Revision ID: 2026_03_30_dataset_team_fk_null
 Revises: 2026_03_30_nullable_team_id
 Create Date: 2026-03-30
 
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "2026_03_30_dataset_team_fk_set_null"
+revision = "2026_03_30_dataset_team_fk_null"
 down_revision = "2026_03_30_nullable_team_id"
 branch_labels = None
 depends_on = None
