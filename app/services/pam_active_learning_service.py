@@ -25,6 +25,7 @@ from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
     ALInferenceRow,
     ALFeedbackSubmit,
+    ALFeedbackAction
 
 )
 from active_learning.al_classifier import MultiLabelMLPClassifier
@@ -619,7 +620,7 @@ class PAMActiveLearningService:
 
         new_ckpt = ALModelCheckpoint(
             dataset_id=dataset_id,
-            name=parent_ckpt.family_name,
+            model_family_name=parent_ckpt.model_family_name,
             version=new_version,
             checkpoint_path="",
             label_config_path=parent_ckpt.label_config_path,
