@@ -3,7 +3,7 @@ Team endpoints
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from typing import List
 
@@ -251,10 +251,17 @@ def read_teams(
     - All other users only see teams they are a member of.
     """
     if current_user.role == UserRole.ADMIN:
-        teams = db.query(TeamModel).offset(skip).limit(limit).all()
+        teams = (
+            db.query(TeamModel)
+            .options(joinedload(TeamModel.datasets))
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
     else:
         teams = (
             db.query(TeamModel)
+            .options(joinedload(TeamModel.datasets))
             .join(TeamMembershipModel, TeamModel.id == TeamMembershipModel.team_id)
             .filter(TeamMembershipModel.user_id == current_user.id)
             .offset(skip)
@@ -274,7 +281,12 @@ def get_team(
 
     Accessible by admins and team members.
     """
-    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    team = (
+        db.query(TeamModel)
+        .options(joinedload(TeamModel.datasets))
+        .filter(TeamModel.id == team_id)
+        .first()
+    )
     if not team:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
     require_team_member(current_user, team_id, db)

@@ -32,6 +32,10 @@ class Team(Base):
     datasets = relationship("Dataset", back_populates="team")
     invitations = relationship("TeamInvitation", back_populates="team", cascade="all, delete-orphan")
 
+    @property
+    def dataset_ids(self):
+        return [d.id for d in (self.datasets or [])]
+
 
 class TeamMembership(Base):
     __tablename__ = "team_memberships"

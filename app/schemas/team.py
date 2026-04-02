@@ -37,6 +37,7 @@ class TeamUpdate(BaseModel):
 class Team(TeamBase):
     id: int
     is_ready: bool = False
+    dataset_ids: List[int] = Field(default_factory=list)
     created_at: datetime
     updated_at: Optional[datetime] = None
 
