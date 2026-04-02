@@ -20,6 +20,7 @@ from app.models.team import (
 from app.models.user import User, User as UserModel, UserRole
 from app.models.dataset import Dataset as DatasetModel, user_datasets
 from app.models.recording import Recording
+from app.models.embedding import SnippetSet, SnippetSetStatus
 from app.core.permissions import require_team_owner, require_team_member
 from datetime import datetime, timezone, timedelta
 
@@ -199,8 +200,27 @@ def get_available_datasets(
     else:
         count_map = {}
 
+    # Compute feed readiness (same logic as GET /api/datasets)
+    snippet_set_ids = [ds.default_snippet_set_id for ds in datasets if ds.default_snippet_set_id]
+    if snippet_set_ids:
+        ready_snippet_sets = (
+            db.query(SnippetSet.id)
+            .filter(
+                SnippetSet.id.in_(snippet_set_ids),
+                SnippetSet.status == SnippetSetStatus.READY,
+            )
+            .all()
+        )
+        ready_set_ids = {ss_id for (ss_id,) in ready_snippet_sets}
+    else:
+        ready_set_ids = set()
+
     result = []
     for ds in datasets:
+        is_ready = (
+            ds.default_snippet_set_id is not None
+            and ds.default_snippet_set_id in ready_set_ids
+        )
         ds_dict = {
             "id": ds.id,
             "name": ds.name,
@@ -211,7 +231,7 @@ def get_available_datasets(
             "created_at": ds.created_at,
             "updated_at": ds.updated_at,
             "recording_count": count_map.get(ds.id, 0),
-            "is_ready_for_feed": False,
+            "is_ready_for_feed": is_ready,
         }
         result.append(DatasetSchema(**ds_dict))
 
