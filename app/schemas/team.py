@@ -13,6 +13,14 @@ class TeamBase(BaseModel):
     description: Optional[str] = None
 
 
+class TeamDatasetRef(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
 class TeamCreate(TeamBase):
     dataset_ids: Optional[List[int]] = Field(
         None,
@@ -38,6 +46,7 @@ class Team(TeamBase):
     id: int
     is_ready: bool = False
     dataset_ids: List[int] = Field(default_factory=list)
+    datasets: List[TeamDatasetRef] = Field(default_factory=list)
     created_at: datetime
     updated_at: Optional[datetime] = None
 
