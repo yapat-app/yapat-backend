@@ -293,22 +293,6 @@ class ALVis(Base):
         index=True,
     )
 
-    # AL scores
-    uncertainty = Column(Float, nullable=True)
-    diversity = Column(Float, nullable=True)
-    density = Column(Float, nullable=True)
-    composite_score = Column(Float, nullable=True)
-
-    # Model output
-    model_predicted_labels = Column(JSON, nullable=True)
-    model_predicted_probabilities = Column(JSON, nullable=True)
-
-    # Trusted / user-facing labels
-    trusted_labels = Column(JSON, nullable=True)
-
-    # Classifier embedding (optional, useful if you want to avoid recomputation)
-    latent_embedding = Column(JSON, nullable=True)
-
     # PCA
     pca_2d_x = Column(Float, nullable=True)
     pca_2d_y = Column(Float, nullable=True)
