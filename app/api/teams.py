@@ -59,6 +59,16 @@ def create_team(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Datasets not found: {list(missing_ids)}"
             )
+
+        # Admins can select any dataset, but must not select datasets already assigned to a team.
+        # This avoids silently moving datasets between teams.
+        if is_admin:
+            already_assigned = [d.id for d in datasets if d.team_id is not None]
+            if already_assigned:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Datasets already assigned to a team: {already_assigned}"
+                )
         
         if not is_admin:
             # For non-admin users, verify they have access to all requested datasets
