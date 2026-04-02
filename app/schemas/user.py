@@ -4,7 +4,7 @@ User schemas
 
 from pydantic import BaseModel, field_validator
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from app.models.user import UserRole
 
 
@@ -62,6 +62,10 @@ class UserInDB(UserBase):
 
 class User(UserInDB):
     pass
+
+
+class UserMe(UserInDB):
+    team_ids: List[int] = []
 
 
 class LoginRequest(BaseModel):

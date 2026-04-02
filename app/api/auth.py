@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 
 from app.api.deps import get_db, get_current_active_user
-from app.schemas.user import User, UserCreate, LoginRequest, LoginResponse
+from app.schemas.user import User, UserMe, UserCreate, LoginRequest, LoginResponse
 from app.models.user import User as UserModel, UserRole
 from app.models.invitation import InvitationLink as InvitationLinkModel
 from app.models.team import (
@@ -250,7 +250,7 @@ def logout(current_user: UserModel = Depends(get_current_active_user)):
     return {"message": "Successfully logged out"}
 
 
-@router.get("/me", response_model=User)
+@router.get("/me", response_model=UserMe)
 def read_users_me(current_user: UserModel = Depends(get_current_active_user)):
     """Get current user information"""
     return current_user

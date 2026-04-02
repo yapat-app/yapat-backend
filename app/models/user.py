@@ -38,3 +38,7 @@ class User(Base):
         cascade="all, delete-orphan"
     )
 
+    @property
+    def team_ids(self):
+        return [m.team_id for m in (self.team_memberships or [])]
+
