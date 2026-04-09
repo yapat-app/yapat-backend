@@ -5,7 +5,7 @@ from app.services.visualisation_service import VISService
 from app.schemas.visualisation import FPVRequest, FPVResponse
 router = APIRouter()
 
-@router.post("visualisation/fpv", response_model=FPVResponse)
+@router.post("/fpv", response_model=FPVResponse)
 def generate_fpv(body: FPVRequest, db: Session = Depends(get_db)):
     service = VISService(db)
     try:
@@ -15,7 +15,7 @@ def generate_fpv(body: FPVRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"FPV generation failed: {str(e)}")
 
-@router.get("visualisation/fpv", response_model=FPVResponse)
+@router.get("/fpv", response_model=FPVResponse)
 def get_fpv(
     dataset_id: int,
     model_family_name: str,
