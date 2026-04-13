@@ -96,7 +96,7 @@ class ALCheckpointResponse(BaseModel):
 
 # ── Inference / Predictions ────────────────────────────────────────────
 class ALRunInferenceRequest(BaseModel):
-    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
+    model_family_name: Optional[str] = Field(default=None, description="Model family name shared across checkpoint versions")
     dataset_id : int
     snippet_set_id: int = Field(..., description="Snippet set to retrieve predictions for")
     device: Optional[str] = Field(default="cpu", description="cpu or cuda")
@@ -127,16 +127,16 @@ class ALRunInferenceRequest(BaseModel):
 
 
 class ALPredictionResponse(BaseModel):
-    id: int
-    model_checkpoint_id: int
+    id: Optional[int] = None
+    model_checkpoint_id: Optional[int] = None
     snippet_id: int
-    predicted_labels: List[str]
-    predicted_probabilities: Optional[Dict[str, float]]
-    uncertainty: Optional[float]
-    diversity: Optional[float]
-    density: Optional[float]
-    composite_score: Optional[float]
-    created_at: datetime
+    predicted_labels: Optional[List[str]] = None
+    predicted_probabilities: Optional[Dict[str, float]] = None
+    uncertainty: Optional[float] = None
+    diversity: Optional[float] = None
+    density: Optional[float] = None
+    composite_score: Optional[float] = None
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -145,7 +145,7 @@ class ALPredictionResponse(BaseModel):
 class ALPredictionListResponse(BaseModel):
     mode: Literal["predictions", "suggestions"]
     model_family_name: str
-    used_checkpoint_id: int
+    used_checkpoint_id: Optional[int] = None
     total_predictions: int
     returned_count: int
     suggestion_strategy: SamplingMode = Field(
@@ -258,11 +258,11 @@ class ALTrainFromScratchRequest(BaseModel):
         ...,
         description="Embedding model whose vectors should be used for training",
     )
-    metadata_path: str = Field(
-        ...,
+    metadata_path: Optional[str] = Field(
+        default=None,
         description="Path to metadata file containing ground-truth labels",
     )
-    label_config_path: str = Field(..., description="Path to label config file consisting of class names to train on")
+    label_config_path: Optional[str] = Field(default=None, description="Path to label config file consisting of class names to train on")
     min_samples_per_class: int = Field(
         default=1,
         ge=1,

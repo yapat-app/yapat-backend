@@ -4,6 +4,7 @@ import csv
 import json
 import logging
 import os
+import random
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Sequence
 
@@ -27,6 +28,8 @@ from app.schemas.pam_active_learning import (
     ALFeedbackSubmit,
     ALFeedbackActionSchema,
     ALRetrainRequest,
+    SamplingMode,
+    ALPredictionResponse
 
 )
 from active_learning.al_classifier import MultiLabelMLPClassifier
@@ -150,16 +153,39 @@ class PAMActiveLearningService:
             raise ValueError(
                 "No snippet_set_id provided and dataset has no default_snippet_set_id."
             )
-        metadata_path = os.path.join(DATA_ROOT, body.metadata_path)
-        label_config_path = os.path.join(DATA_ROOT, body.label_config_path)
-        species_list = self._load_species_from_label_config(label_config_path)
-        model_type = body.model_type.lower()
 
+        model_type = body.model_type.lower()
         if model_type != "pam_multilabel_classifier":
             raise ValueError(
                 f"Unsupported model_type '{body.model_type}'. "
                 "Only 'pam_multilabel_classifier' is currently supported."
             )
+
+
+        use_metadata_labels = bool(body.metadata_path)
+        metadata_path = None
+        resolved_input_label_config_path = None
+        annotations_by_snippet = None
+
+        if use_metadata_labels:
+            metadata_path = os.path.join(DATA_ROOT, body.metadata_path)
+            resolved_input_label_config_path = (os.path.join(DATA_ROOT, body.label_config_path)
+                                                if body.label_config_path else None)
+            if resolved_input_label_config_path is None:
+                raise ValueError("label_config_path is required when training from metadata.")
+            species_list = self._load_species_from_label_config(resolved_input_label_config_path)
+            label_source = "metadata"
+        else:
+            annotations_by_snippet = self._get_trusted_annotations(dataset_id=body.dataset_id, snippet_set_id=snippet_set_id)
+            if not annotations_by_snippet:
+                raise ValueError("No user annotations available for bootstrap training.")
+            species_list = sorted(
+                {label for labels in annotations_by_snippet.values() for label in labels}
+            )
+            if not species_list:
+                raise ValueError("No label set could be derived from user annotations.")
+
+            label_source = "user_feedback"
 
 
         logger.info("Creating an entry for model checkpoint")
@@ -169,13 +195,14 @@ class PAMActiveLearningService:
             model_family_name=body.model_family_name,
             version=body.version,
             checkpoint_path="",
-            label_config_path=body.label_config_path,
+            label_config_path=resolved_input_label_config_path or "",
             model_type=body.model_type,
             hyperparameters={
                 "training_mode": "cold_start",
+                "label_source": label_source,
                 "embedding_model_id": body.embedding_model_id,
                 "metadata_path": metadata_path,
-                "label_config_path": label_config_path,
+                "label_config_path": resolved_input_label_config_path,
                 "min_samples_per_class": body.min_samples_per_class,
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs,
@@ -218,23 +245,49 @@ class PAMActiveLearningService:
                 snippet_set_id=snippet_set_id,
                 embedding_model_id=body.embedding_model_id,
             )
-            logger.info("Loading ground truth labels")
-            gt_index = self._load_ground_truth_metadata(
+            if use_metadata_labels:
+                logger.info("Loading ground truth labels")
+                gt_index = self._load_ground_truth_metadata(
                 metadata_path=metadata_path,
                 species_list=species_list,
                 allowed_subsets=["train"]
-            )
+                )
 
-            X_train, y_train, used_snippet_ids = self._align_embeddings_and_labels(
+                X_train, y_train, used_snippet_ids = self._align_embeddings_and_labels(
                 X=X,
                 snippet_rows=snippet_rows,
                 gt_index=gt_index,
                 species_list=species_list,
-            )
+                )
+            else:
+                logger.info("Loading labels from user annotations")
+                snippet_ids = [row["snippet_id"] for row in snippet_rows]
+                keep_indices = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
+                if not keep_indices:
+                    raise ValueError("No embeddings found for snippets with user annotations.")
+                X_train = X[keep_indices]
+                used_snippet_ids = [snippet_ids[i] for i in keep_indices]
+
+                y_train = self._build_multihot_from_annotations(
+                    snippet_ids=used_snippet_ids,
+                    label_order=species_list,
+                    annotations_by_snippet=annotations_by_snippet,
+                )
+
+                keep_rows = y_train.sum(axis=1) > 0
+                X_train = X_train[keep_rows]
+                y_train = y_train[keep_rows]
+                used_snippet_ids = [sid for sid, keep in zip(used_snippet_ids, keep_rows) if keep]
+
+                if X_train.shape[0] == 0:
+                    raise ValueError(
+                        "No training samples remain after aligning embeddings and user labels."
+                    )
 
             model = MultiLabelMLPClassifier()
 
-            X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
+            if use_metadata_labels:
+                X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
                 model.filter_and_balance_classes(
                     X=X_train,
                     y=y_train,
@@ -244,6 +297,11 @@ class PAMActiveLearningService:
                     max_samples_per_class=body.max_samples_per_class,
                 )
             )
+            else:
+                    labeled_snippet_ids = used_snippet_ids
+                    used_species = species_list
+                    excluded_species = []
+                    class_counts = {species: int(y_train[:, i].sum()) for i, species in enumerate(species_list)}
 
             if y_train.shape[0] == 0:
                 raise ValueError(
@@ -319,16 +377,16 @@ class PAMActiveLearningService:
                 "excluded_species": excluded_species,
                 "class_counts": class_counts,
             }
-            self._store_snippet_annotations(
-                dataset_id=body.dataset_id,
-                snippet_ids=labeled_snippet_ids,
-                y=y_train,
-                label_order=used_species,
-                # Hardcoding source as groundtruth as this service would only be called for cold start
-                source=ALAnnotationSource.GROUND_TRUTH,
-                model_checkpoint_id=model_ckpt.id,
-                user_id=None,
-            )
+            if use_metadata_labels:
+                self._store_snippet_annotations(
+                    dataset_id=body.dataset_id,
+                    snippet_ids=labeled_snippet_ids,
+                    y=y_train,
+                    label_order=used_species,
+                    source=ALAnnotationSource.GROUND_TRUTH,
+                    model_checkpoint_id=model_ckpt.id,
+                    user_id=None,
+                )
 
             inference_metrics = None
             if body.run_inference:
@@ -399,7 +457,8 @@ class PAMActiveLearningService:
             model_family_name=body.model_family_name,
         )
         if model_ckpt is None:
-            raise ValueError(f"Model checkpoint {model_ckpt.id} not found.")
+            logger.info("No active model checkpoint found for the chosen dataset. Submitting in bootstrap mode.")
+            return self._submit_bootstrap_feedback(body)
 
         if model_ckpt.dataset_id != body.dataset_id:
             raise ValueError(
@@ -458,7 +517,7 @@ class PAMActiveLearningService:
         self.db.commit()
         self.db.refresh(feedback)
 
-        feedback_count = self._feedback_count_since_retrain(model_ckpt.id)
+        feedback_count = self._feedback_count_since_retrain(model_ckpt.id, body.dataset_id)
         retrain_triggered = False
 
         if (
@@ -467,7 +526,7 @@ class PAMActiveLearningService:
         ):
             retrain_triggered = True
             self._auto_retrain_from_feedback(model_ckpt.id)
-            feedback_count = self._feedback_count_since_retrain(model_ckpt.id)
+            feedback_count = self._feedback_count_since_retrain(model_ckpt.id, body.dataset_id)
 
         return {
             "id": feedback.id,
@@ -483,11 +542,54 @@ class PAMActiveLearningService:
             "retrain_triggered": retrain_triggered,
         }
 
+    def _submit_bootstrap_feedback(self, body: ALFeedbackSubmit) -> dict:
+        normalized_labels = self._normalize_feedback_labels(body.labels)
+        if not normalized_labels:
+            raise ValueError(
+                "Initial feedback must include explicit labels when no active checkpoint exists."
+            )
+        snippet = (
+            self.db.query(Snippet)
+            .join(Recording, Snippet.recording_id == Recording.id)
+            .filter(
+                Snippet.id == body.snippet_id,
+                Recording.dataset_id == body.dataset_id,
+            )
+            .one_or_none()
+        )
+        if snippet is None:
+            raise ValueError(
+                f"Snippet {body.snippet_id} not found in dataset {body.dataset_id}."
+            )
+        feedback = ALFeedbackEvent(
+            dataset_id=body.dataset_id,
+            model_checkpoint_id=None,
+            snippet_id=body.snippet_id,
+            user_id=body.user_id,
+            action=ALFeedbackActionSchema.MODIFY,
+            final_labels=normalized_labels,
+            notes=body.notes,
+        )
+        self.db.add(feedback)
+        self.db.flush()
+
+        self._store_user_labels_for_snippet(
+            dataset_id=body.dataset_id,
+            snippet_id=body.snippet_id,
+            labels=normalized_labels,
+            model_checkpoint_id=None,
+            user_id=body.user_id,
+        )
+        self.db.commit()
+        self.db.refresh(feedback)
+
     def get_or_create_predictions(self, body):
         model_ckpt = self._get_active_checkpoint_for_model_family(
             dataset_id=body.dataset_id,
             model_family_name=body.model_family_name,
         )
+        if model_ckpt is None:
+            return self._build_random_snippet_suggestions(body)
 
         hyper = model_ckpt.hyperparameters or {}
         embedding_model_id = hyper.get("embedding_model_id")
@@ -649,7 +751,7 @@ class PAMActiveLearningService:
         self.db.add(new_ckpt)
         self.db.flush()
 
-        recent_feedback_count = self._feedback_count_since_retrain(parent_ckpt.id)
+        recent_feedback_count = self._feedback_count_since_retrain(parent_ckpt.id, dataset_id)
 
         job = ALRetrainJob(
             model_checkpoint_id=new_ckpt.id,
@@ -861,7 +963,7 @@ class PAMActiveLearningService:
             model_checkpoint_id=new_ckpt.id,
             dataset_id=dataset_id,
             trigger="auto_feedback",
-            feedback_count=self._feedback_count_since_retrain(parent_checkpoint_id),
+            feedback_count=self._feedback_count_since_retrain(parent_checkpoint_id, dataset_id),
             status=ALRetrainStatus.PENDING,
             result_metrics=None,
             error_message=None,
@@ -1098,20 +1200,20 @@ class PAMActiveLearningService:
             )
         return ds
 
-    def _feedback_count_since_retrain(self, checkpoint_id: int) -> int:
-        """
-        Count feedback events created after the most recent completed retrain
-        for the given checkpoint.
-        """
-        last_retrain = (
-            self.db.query(ALRetrainJob.completed_at)
-            .filter(
-                ALRetrainJob.model_checkpoint_id == checkpoint_id,
-                ALRetrainJob.status == ALRetrainStatus.COMPLETED,
-            )
-            .order_by(ALRetrainJob.completed_at.desc())
-            .first()
+    def _feedback_count_since_retrain(
+            self,
+            checkpoint_id: int | None,
+            dataset_id: int | None = None,
+    ) -> int:
+        query_last_retrain = self.db.query(ALRetrainJob.completed_at).filter(
+            ALRetrainJob.model_checkpoint_id == checkpoint_id,
+            ALRetrainJob.status == ALRetrainStatus.COMPLETED,
         )
+
+        if dataset_id is not None:
+            query_last_retrain = query_last_retrain.filter(ALRetrainJob.dataset_id == dataset_id)
+
+        last_retrain = query_last_retrain.order_by(ALRetrainJob.completed_at.desc()).first()
 
         cutoff = (
             last_retrain[0]
@@ -1119,15 +1221,15 @@ class PAMActiveLearningService:
             else datetime.min.replace(tzinfo=timezone.utc)
         )
 
-        count = (
-            self.db.query(func.count(ALFeedbackEvent.id))
-            .filter(
-                ALFeedbackEvent.model_checkpoint_id == checkpoint_id,
-                ALFeedbackEvent.created_at > cutoff,
-            )
-            .scalar()
+        query_count = self.db.query(func.count(ALFeedbackEvent.id)).filter(
+            ALFeedbackEvent.model_checkpoint_id == checkpoint_id,
+            ALFeedbackEvent.created_at > cutoff,
         )
 
+        if dataset_id is not None:
+            query_count = query_count.filter(ALFeedbackEvent.dataset_id == dataset_id)
+
+        count = query_count.scalar()
         return int(count or 0)
 
     def _get_last_completed_retrain_cutoff(self, checkpoint_id: int) -> datetime:
@@ -1193,14 +1295,17 @@ class PAMActiveLearningService:
             .all()
         )
 
-    def _get_trusted_annotations(
+    def _get_trusted_annotations_for_snippet_set(
             self,
             dataset_id: int,
+            snippet_set_id: int,
     ) -> dict[int, set[str]]:
         rows = (
             self.db.query(ALSnippetAnnotation.snippet_id, ALSnippetAnnotation.label)
+            .join(Snippet, Snippet.id == ALSnippetAnnotation.snippet_id)
             .filter(
                 ALSnippetAnnotation.dataset_id == dataset_id,
+                Snippet.snippet_set_id == snippet_set_id,
                 ALSnippetAnnotation.source.in_([
                     ALAnnotationSource.GROUND_TRUTH,
                     ALAnnotationSource.USER,
@@ -1875,9 +1980,7 @@ class PAMActiveLearningService:
             .one_or_none()
         )
         if family is None or family.active_model_checkpoint_id is None:
-            raise ValueError(
-                f"No active checkpoint found for dataset={dataset_id}, model_family_name={model_family_name}."
-            )
+            return None
 
         ckpt = self._get_checkpoint(family.active_model_checkpoint_id)
         if ckpt is None:
@@ -1921,4 +2024,41 @@ class PAMActiveLearningService:
             "hidden_dim": int(hyper.get("hidden_dim", DEFAULT_HIDDEN_DIM)),
             "dropout": float(hyper.get("dropout", DEFAULT_DROPOUT)),
             "device": str(hyper.get("device", DEFAULT_DEVICE)),
+        }
+
+    def _build_random_snippet_suggestions(self, body) -> dict:
+        k = body.k or 20
+
+        snippets = (
+            self.db.query(Snippet)
+            .filter(Snippet.snippet_set_id == body.snippet_set_id)
+            .all()
+        )
+        if not snippets:
+            raise ValueError(f"No snippets found for snippet_set_id={body.snippet_set_id}.")
+
+        sampled_snippets = random.sample(snippets, min(k, len(snippets)))
+
+        rows = [
+            ALPredictionResponse(
+                snippet_id=snippet.id,
+                predicted_labels=None,
+                predicted_probabilities=None,
+                uncertainty=None,
+                diversity=None,
+                density=None,
+                composite_score=None,
+            )
+            for snippet in sampled_snippets
+        ]
+
+        return {
+            "mode": "suggestions",
+            "model_family_name": body.model_family_name,
+            "used_checkpoint_id": None,
+            "total_predictions": 0,
+            "returned_count": len(rows),
+            "suggestion_strategy": SamplingMode.RANDOM,
+            "k": k,
+            "rows": rows,
         }
