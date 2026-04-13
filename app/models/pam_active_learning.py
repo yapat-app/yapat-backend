@@ -231,7 +231,7 @@ class ALFeedbackEvent(Base):
     model_checkpoint_id = Column(
         Integer,
         ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
 
