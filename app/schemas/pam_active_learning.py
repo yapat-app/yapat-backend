@@ -171,7 +171,10 @@ class ALFeedbackSubmit(BaseModel):
     dataset_id: int = Field(..., description="Dataset ID")
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
     snippet_id: int = Field(..., description="Snippet being reviewed")
-
+    embedding_model_id: Optional[int] = Field(
+        default=1, # for birdnet
+        description="Required in bootstrap mode before the first checkpoint exists",
+    )
     action: ALFeedbackActionSchema = Field(
         ...,
         description="ACCEPT, REJECT, or MODIFY",
@@ -193,8 +196,8 @@ class ALFeedbackSubmit(BaseModel):
 
 class ALFeedbackResponse(BaseModel):
     id: int
-    model_family_name: str
-    model_checkpoint_id: int
+    model_family_name: Optional[str] = None
+    model_checkpoint_id: Optional[int] = None
     active_checkpoint_id: Optional[int] = None
     snippet_id: int
     action: ALFeedbackActionSchema
