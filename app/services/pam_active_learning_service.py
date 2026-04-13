@@ -439,19 +439,7 @@ class PAMActiveLearningService:
             raise
 
     def submit_feedback(self, body: ALFeedbackSubmit) -> dict:
-        """
-        Save snippet-level user feedback.
 
-        Flow
-        ----
-        1. Validate checkpoint and dataset
-        2. Resolve all predictions for (model_checkpoint_id, snippet_id)
-        3. Compute final labels for this snippet action
-        4. Store ALFeedbackEvent
-        5. If ACCEPT or MODIFY, store trusted labels into ALSnippetAnnotation
-        6. Count feedback since last retrain
-        7. If threshold reached and no retrain is active, trigger auto retrain
-        """
         model_ckpt = self._get_active_checkpoint_for_model_family(
             dataset_id=body.dataset_id,
             model_family_name=body.model_family_name,
@@ -582,6 +570,57 @@ class PAMActiveLearningService:
         )
         self.db.commit()
         self.db.refresh(feedback)
+
+        feedback_count = self._feedback_count_since_retrain(
+            checkpoint_id=None,
+            dataset_id=body.dataset_id,
+        )
+
+        retrain_triggered = False
+        active_checkpoint_id = None
+
+        if feedback_count >= RETRAIN_AFTER:
+            retrain_triggered = True
+
+            train_body = ALTrainFromScratchRequest(
+                dataset_id=body.dataset_id,
+                snippet_set_id=snippet.snippet_set_id,
+                embedding_model_id=body.embedding_model_id,
+                metadata_path=None,
+                label_config_path=None,
+                model_family_name=body.model_family_name,
+                version="v0",
+                model_type="pam_multilabel_classifier",
+                epochs=DEFAULT_EPOCHS,
+                learning_rate=DEFAULT_LEARNING_RATE,
+                batch_size=DEFAULT_BATCH_SIZE,
+                hidden_dim=DEFAULT_HIDDEN_DIM,
+                dropout=DEFAULT_DROPOUT,
+                device=DEFAULT_DEVICE,
+                run_inference=True,
+                threshold=DEFAULT_INFERENCE_THRESHOLD,
+                density_k=DEFAULT_DENSITY_K,
+                composite_wu=DEFAULT_COMPOSITE_WU,
+                composite_wd=DEFAULT_COMPOSITE_WD,
+                composite_wr=DEFAULT_COMPOSITE_WR,
+            )
+
+            new_ckpt = self.train_from_scratch(train_body)
+            active_checkpoint_id = new_ckpt.id
+
+        return {
+            "id": feedback.id,
+            "model_family_name": body.model_family_name,
+            "model_checkpoint_id": None,
+            "active_checkpoint_id": active_checkpoint_id,
+            "snippet_id": feedback.snippet_id,
+            "action": feedback.action,
+            "final_labels": feedback.final_labels,
+            "notes": feedback.notes,
+            "created_at": feedback.created_at,
+            "feedback_count_since_retrain": feedback_count,
+            "retrain_triggered": retrain_triggered,
+        }
 
     def get_or_create_predictions(self, body):
         model_ckpt = self._get_active_checkpoint_for_model_family(
@@ -1221,7 +1260,9 @@ class PAMActiveLearningService:
             else datetime.min.replace(tzinfo=timezone.utc)
         )
 
-        query_count = self.db.query(func.count(ALFeedbackEvent.id)).filter(
+        query_count = self.db.query(
+            func.count(func.distinct(ALFeedbackEvent.snippet_id))
+        ).filter(
             ALFeedbackEvent.model_checkpoint_id == checkpoint_id,
             ALFeedbackEvent.created_at > cutoff,
         )
@@ -1295,7 +1336,7 @@ class PAMActiveLearningService:
             .all()
         )
 
-    def _get_trusted_annotations_for_snippet_set(
+    def _get_trusted_annotations(
             self,
             dataset_id: int,
             snippet_set_id: int,
