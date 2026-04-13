@@ -231,7 +231,7 @@ class ALFeedbackEvent(Base):
     model_checkpoint_id = Column(
         Integer,
         ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
 
@@ -264,92 +264,6 @@ class ALFeedbackEvent(Base):
     snippet = relationship("Snippet")
     model_checkpoint = relationship("ALModelCheckpoint")
 
-# ── Fields required for VIS ─────────────────────────────────────────────────────
-
-
-class ALVis(Base):
-    __tablename__ = "al_vis"
-
-    id = Column(Integer, primary_key=True, index=True)
-
-    dataset_id = Column(
-        Integer,
-        ForeignKey("datasets.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    model_checkpoint_id = Column(
-        Integer,
-        ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    snippet_id = Column(
-        Integer,
-        ForeignKey("snippets.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    # AL scores
-    uncertainty = Column(Float, nullable=True)
-    diversity = Column(Float, nullable=True)
-    density = Column(Float, nullable=True)
-    composite_score = Column(Float, nullable=True)
-
-    # Model output
-    model_predicted_labels = Column(JSON, nullable=True)
-    model_predicted_probabilities = Column(JSON, nullable=True)
-
-    # Trusted / user-facing labels
-    trusted_labels = Column(JSON, nullable=True)
-
-    # Classifier embedding (optional, useful if you want to avoid recomputation)
-    latent_embedding = Column(JSON, nullable=True)
-
-    # PCA
-    pca_2d_x = Column(Float, nullable=True)
-    pca_2d_y = Column(Float, nullable=True)
-    pca_3d_x = Column(Float, nullable=True)
-    pca_3d_y = Column(Float, nullable=True)
-    pca_3d_z = Column(Float, nullable=True)
-
-    # UMAP
-    umap_2d_x = Column(Float, nullable=True)
-    umap_2d_y = Column(Float, nullable=True)
-    umap_3d_x = Column(Float, nullable=True)
-    umap_3d_y = Column(Float, nullable=True)
-    umap_3d_z = Column(Float, nullable=True)
-
-    # t-SNE
-    tsne_2d_x = Column(Float, nullable=True)
-    tsne_2d_y = Column(Float, nullable=True)
-    tsne_3d_x = Column(Float, nullable=True)
-    tsne_3d_y = Column(Float, nullable=True)
-    tsne_3d_z = Column(Float, nullable=True)
-
-    # Isomap
-    isomap_2d_x = Column(Float, nullable=True)
-    isomap_2d_y = Column(Float, nullable=True)
-    isomap_3d_x = Column(Float, nullable=True)
-    isomap_3d_y = Column(Float, nullable=True)
-    isomap_3d_z = Column(Float, nullable=True)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
-
-    model_checkpoint = relationship("ALModelCheckpoint")
-    snippet = relationship("Snippet")
-
-    __table_args__ = (
-        UniqueConstraint(
-            "model_checkpoint_id",
-            "snippet_id",
-            name="uq_al_vis_checkpoint_snippet",
-        ),
-    )
 
 # ── Retrain Job ────────────────────────────────────────────────────────
 

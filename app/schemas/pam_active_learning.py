@@ -96,10 +96,10 @@ class ALCheckpointResponse(BaseModel):
 
 # ── Inference / Predictions ────────────────────────────────────────────
 class ALRunInferenceRequest(BaseModel):
-    model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
+    model_family_name: Optional[str] = Field(default=None, description="Model family name shared across checkpoint versions")
     dataset_id : int
     snippet_set_id: int = Field(..., description="Snippet set to retrieve predictions for")
-    device: str = Field(default="cpu", description="cpu or cuda")
+    device: Optional[str] = Field(default="cpu", description="cpu or cuda")
 
     threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     density_k: Optional[int] = Field(default=None, ge=1)
@@ -116,28 +116,27 @@ class ALRunInferenceRequest(BaseModel):
         default=False,
         description="If true, return ranked annotation suggestions instead of the full prediction set.",
     )
-    suggestion_strategy: SamplingMode = Field(
+    suggestion_strategy: Optional[SamplingMode] = Field(
         default=SamplingMode.COMPOSITE,
         description="Ranking strategy used when sample_suggestion=true.",
     )
     k: Optional[int] = Field(
-        default=None,
-        ge=1,
+        default=5,
         description="Number of suggestions to return when sample_suggestion=true.",
     )
 
 
 class ALPredictionResponse(BaseModel):
-    id: int
-    model_checkpoint_id: int
+    id: Optional[int] = None
+    model_checkpoint_id: Optional[int] = None
     snippet_id: int
-    predicted_labels: List[str]
-    predicted_probabilities: Optional[Dict[str, float]]
-    uncertainty: Optional[float]
-    diversity: Optional[float]
-    density: Optional[float]
-    composite_score: Optional[float]
-    created_at: datetime
+    predicted_labels: Optional[List[str]] = None
+    predicted_probabilities: Optional[Dict[str, float]] = None
+    uncertainty: Optional[float] = None
+    diversity: Optional[float] = None
+    density: Optional[float] = None
+    composite_score: Optional[float] = None
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -146,7 +145,7 @@ class ALPredictionResponse(BaseModel):
 class ALPredictionListResponse(BaseModel):
     mode: Literal["predictions", "suggestions"]
     model_family_name: str
-    used_checkpoint_id: int
+    used_checkpoint_id: Optional[int] = None
     total_predictions: int
     returned_count: int
     suggestion_strategy: SamplingMode = Field(
@@ -172,7 +171,10 @@ class ALFeedbackSubmit(BaseModel):
     dataset_id: int = Field(..., description="Dataset ID")
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
     snippet_id: int = Field(..., description="Snippet being reviewed")
-
+    embedding_model_id: Optional[int] = Field(
+        default=1, # for birdnet
+        description="Required in bootstrap mode before the first checkpoint exists",
+    )
     action: ALFeedbackActionSchema = Field(
         ...,
         description="ACCEPT, REJECT, or MODIFY",
@@ -194,8 +196,8 @@ class ALFeedbackSubmit(BaseModel):
 
 class ALFeedbackResponse(BaseModel):
     id: int
-    model_family_name: str
-    model_checkpoint_id: int
+    model_family_name: Optional[str] = None
+    model_checkpoint_id: Optional[int] = None
     active_checkpoint_id: Optional[int] = None
     snippet_id: int
     action: ALFeedbackActionSchema
@@ -214,13 +216,6 @@ class ALFeedbackResponse(BaseModel):
 class ALRetrainRequest(BaseModel):
     dataset_id: int = Field(..., description="Dataset ID")
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
-
-    epochs: Optional[int] = Field(default=None, ge=1, le=500)
-    learning_rate: Optional[float] = Field(default=None, gt=0)
-    batch_size: Optional[int] = Field(default=None, ge=1, le=4096)
-    hidden_dim: Optional[int] = Field(default=None, ge=1)
-    dropout: Optional[float] = Field(default=None, ge=0.0, le=0.9)
-    device: Optional[str] = Field(default=None, description="cpu or cuda")
 
     run_inference: bool = Field(default=True)
     threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
@@ -266,11 +261,11 @@ class ALTrainFromScratchRequest(BaseModel):
         ...,
         description="Embedding model whose vectors should be used for training",
     )
-    metadata_path: str = Field(
-        ...,
+    metadata_path: Optional[str] = Field(
+        default=None,
         description="Path to metadata file containing ground-truth labels",
     )
-    label_config_path: str = Field(..., description="Path to label config file consisting of class names to train on")
+    label_config_path: Optional[str] = Field(default=None, description="Path to label config file consisting of class names to train on")
     min_samples_per_class: int = Field(
         default=1,
         ge=1,

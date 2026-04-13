@@ -10,7 +10,22 @@ from app.logging_config import configure_logging
 
 configure_logging()
 
-from app.api import auth, teams, datasets, recordings, snippets, annotations, feed, invitations, tasks, taxonomy, embeddings, custom_taxonomy, pam_active_learning
+from app.api import (
+    annotations,
+    auth,
+    custom_taxonomy,
+    datasets,
+    embeddings,
+    feed,
+    invitations,
+    pam_active_learning,
+    recordings,
+    snippets,
+    tasks,
+    taxonomy,
+    teams,
+    visualisations,
+)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -44,6 +59,7 @@ app.include_router(taxonomy.router, prefix=f"{settings.API_STR}/taxonomy", tags=
 app.include_router(custom_taxonomy.router, prefix=f"{settings.API_STR}/taxonomy", tags=["custom-taxonomy"])
 app.include_router(embeddings.router, prefix=f"{settings.API_STR}", tags=["embeddings"])
 app.include_router(pam_active_learning.router, prefix=f"{settings.API_STR}/pam-al", tags=["pam-active-learning"])
+app.include_router(visualisations.router, prefix=f"{settings.API_STR}/visualisations", tags=["visualisations"])
 
 
 @app.get("/")

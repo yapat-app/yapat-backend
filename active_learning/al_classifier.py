@@ -70,29 +70,10 @@ class MultiLabelMLPClassifier(nn.Module):
         return self.model(x)
 
     def predict(
-        self,
-        x: torch.Tensor,
-        threshold: Union[float, torch.Tensor] = 0.3,
+            self,
+            x: torch.Tensor,
+            threshold: Union[float, torch.Tensor] = 0.3,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Return both probabilities and binary predictions.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input tensor of shape [batch_size, n_dim].
-        threshold : float or torch.Tensor
-            Either:
-            - a single global threshold
-            - a tensor of shape [num_classes] for per-class thresholds
-
-        Returns
-        -------
-        probs : torch.Tensor
-            Sigmoid probabilities of shape [batch_size, num_classes].
-        preds : torch.Tensor
-            Binary multi-label predictions of shape [batch_size, num_classes].
-        """
         self.eval()
 
         with torch.no_grad():
@@ -101,9 +82,13 @@ class MultiLabelMLPClassifier(nn.Module):
 
             if isinstance(threshold, (float, int)):
                 preds = (probs >= threshold).int()
-            else:
+            elif isinstance(threshold, torch.Tensor):
                 threshold = threshold.to(probs.device)
                 preds = (probs >= threshold).int()
+            else:
+                raise TypeError(
+                    f"threshold must be float, int, or torch.Tensor, got {type(threshold).__name__}: {threshold}"
+                )
 
         return probs, preds
 
