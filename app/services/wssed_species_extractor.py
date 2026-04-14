@@ -22,6 +22,44 @@ def _normpath(p: str) -> str:
     # Keep behaviour stable across OSes / trailing slashes.
     return os.path.normpath(p).rstrip(os.sep)
 
+def _candidate_bases(source_uri: str, data_root: str = "/data") -> list[str]:
+    """
+    Build possible dataset-root prefixes that may appear in Recording.file_path.
+
+    - `DatasetService` stores Recording.file_path relative to DATA_ROOT.
+    - Some datasets may store `source_uri` as absolute (e.g. /data/...) or relative.
+    """
+    bases: list[str] = []
+    if not source_uri:
+        return bases
+
+    src = _normpath(source_uri)
+    data_root_n = _normpath(data_root)
+
+    # If source_uri is absolute under DATA_ROOT, convert to DATA_ROOT-relative.
+    if os.path.isabs(src):
+        try:
+            rel = _normpath(os.path.relpath(src, data_root_n))
+            if rel and rel != ".":
+                bases.append(rel)
+        except Exception:
+            pass
+
+    # Plain relative source_uri (as provided)
+    bases.append(_normpath(source_uri.lstrip(os.sep)))
+
+    # Also include the absolute form for completeness (in case file_path is absolute).
+    bases.append(src)
+
+    # Deduplicate while preserving order
+    seen = set()
+    out: list[str] = []
+    for b in bases:
+        if b and b not in seen:
+            seen.add(b)
+            out.append(b)
+    return out
+
 
 def get_dataset_species_list(dataset_id: int, db: Session) -> List[str]:
     """
@@ -36,7 +74,7 @@ def get_dataset_species_list(dataset_id: int, db: Session) -> List[str]:
     if not ds.source_uri:
         return []
 
-    base = _normpath(ds.source_uri)
+    bases = _candidate_bases(ds.source_uri, data_root="/data")
 
     # Pull only the column we need.
     rec_paths = (
@@ -51,12 +89,15 @@ def get_dataset_species_list(dataset_id: int, db: Session) -> List[str]:
             continue
         fp = _normpath(file_path)
 
-        # Compute relative path to dataset root.
+        # Compute relative path to dataset root (try all plausible bases).
         rel = fp
-        if fp == base:
-            rel = ""
-        elif fp.startswith(base + os.sep):
-            rel = fp[len(base) + 1 :]
+        for base in bases:
+            if fp == base:
+                rel = ""
+                break
+            if fp.startswith(base + os.sep):
+                rel = fp[len(base) + 1 :]
+                break
 
         if not rel:
             continue
