@@ -51,7 +51,7 @@ services:
       - ACCESS_TOKEN_EXPIRE_MINUTES=30
       - API_STR=/api
       - PROJECT_NAME=YAPAT Backend
-      - BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}
       - DATA_ROOT=/data
       - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
       - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
