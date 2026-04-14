@@ -11,6 +11,7 @@ from app.models.dataset import Dataset
 from app.services.embedding_service import EmbeddingService
 from app.services.snippet_set_service import SnippetSetService
 from app.tasks.embedding_tasks import run_embedding
+from app.models.embedding import SnippetSet as SnippetSetModel, SnippetSetStatus
 from app.schemas.embedding import (
     EmbeddingModel,
     EmbeddingJobCreateRequest,
@@ -89,6 +90,28 @@ def create_embedding_job(
     )
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # --------------------------
+    # Guard: dataset processing must be complete
+    # --------------------------
+    # We consider a dataset "ready" once it has a default snippet set and that set is READY.
+    # This prevents starting embeddings while scan/snippet generation is still ongoing.
+    if not dataset.default_snippet_set_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Dataset processing has not completed yet (no default snippet set).",
+        )
+
+    default_ss = (
+        db.query(SnippetSetModel)
+        .filter(SnippetSetModel.id == dataset.default_snippet_set_id)
+        .first()
+    )
+    if (not default_ss) or (default_ss.status != SnippetSetStatus.READY):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Dataset processing has not completed yet (default snippet set not READY).",
+        )
 
     # --------------------------
     # Validate embedding model
