@@ -128,9 +128,7 @@ def get_active_checkpoint_for_model_family(
         .one_or_none()
     )
     if family is None or family.active_model_checkpoint_id is None:
-        raise ValueError(
-            f"No active checkpoint found for dataset={dataset_id}, model_family_name={model_family_name}."
-        )
+        return None
 
     ckpt = get_checkpoint(db, family.active_model_checkpoint_id)
     if ckpt is None:

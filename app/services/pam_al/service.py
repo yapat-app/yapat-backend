@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -25,9 +26,12 @@ from app.models.pam_active_learning import (
     ALRetrainStatus,
     ALAnnotationSource,
 )
+from app.models.snippet import Snippet
 from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
     ALFeedbackSubmit,
+    ALPredictionResponse,
+    SamplingMode,
 )
 
 from active_learning.al_classifier import MultiLabelMLPClassifier
@@ -287,6 +291,9 @@ class PAMActiveLearningService:
     def get_or_create_predictions(self, body):
         model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(self.db, body.dataset_id, body.model_family_name)
 
+        if model_ckpt is None:
+            return self._build_random_snippet_suggestions(body)
+
         hyper = model_ckpt.hyperparameters or {}
         embedding_model_id = hyper.get("embedding_model_id")
         if embedding_model_id is None:
@@ -343,6 +350,11 @@ class PAMActiveLearningService:
 
     def manual_retrain(self, body) -> ALModelCheckpoint:
         parent_ckpt = ckpt_h.get_active_checkpoint_for_model_family(self.db, body.dataset_id, body.model_family_name)
+        if parent_ckpt is None:
+            raise ValueError(
+                f"No active checkpoint found for dataset={body.dataset_id}, "
+                f"model_family_name='{body.model_family_name}'."
+            )
         hyper = parent_ckpt.hyperparameters or {}
 
         dataset_id = parent_ckpt.dataset_id
@@ -822,3 +834,44 @@ class PAMActiveLearningService:
         if dataset_id is not None:
             q = q.filter(ALRetrainJob.dataset_id == dataset_id)
         return q.order_by(ALRetrainJob.created_at.desc()).limit(limit).all()
+
+    # ==================================================================
+    # Bootstrap helpers (no checkpoint available)
+    # ==================================================================
+
+    def _build_random_snippet_suggestions(self, body) -> dict:
+        k = body.k or 20
+
+        snippets = (
+            self.db.query(Snippet)
+            .filter(Snippet.snippet_set_id == body.snippet_set_id)
+            .all()
+        )
+        if not snippets:
+            raise ValueError(f"No snippets found for snippet_set_id={body.snippet_set_id}.")
+
+        sampled = random.sample(snippets, min(k, len(snippets)))
+
+        rows = [
+            ALPredictionResponse(
+                snippet_id=snippet.id,
+                predicted_labels=None,
+                predicted_probabilities=None,
+                uncertainty=None,
+                diversity=None,
+                density=None,
+                composite_score=None,
+            )
+            for snippet in sampled
+        ]
+
+        return {
+            "mode": "suggestions",
+            "model_family_name": body.model_family_name,
+            "used_checkpoint_id": None,
+            "total_predictions": 0,
+            "returned_count": len(rows),
+            "suggestion_strategy": SamplingMode.RANDOM,
+            "k": k,
+            "rows": rows,
+        }
