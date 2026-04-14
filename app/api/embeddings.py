@@ -91,27 +91,11 @@ def create_embedding_job(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # --------------------------
-    # Guard: dataset processing must be complete
-    # --------------------------
-    # We consider a dataset "ready" once it has a default snippet set and that set is READY.
-    # This prevents starting embeddings while scan/snippet generation is still ongoing.
-    if not dataset.default_snippet_set_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Dataset processing has not completed yet (no default snippet set).",
-        )
-
-    default_ss = (
-        db.query(SnippetSetModel)
-        .filter(SnippetSetModel.id == dataset.default_snippet_set_id)
-        .first()
-    )
-    if (not default_ss) or (default_ss.status != SnippetSetStatus.READY):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Dataset processing has not completed yet (default snippet set not READY).",
-        )
+    # NOTE:
+    # In the SnippetSet architecture, the embedding pipeline materializes snippets
+    # and marks the SnippetSet READY inside `run_embedding`. For new datasets,
+    # `default_snippet_set_id` may be null until the first embedding job runs.
+    # Therefore we must not block job creation based on default snippet set state.
 
     # --------------------------
     # Validate embedding model
