@@ -218,6 +218,15 @@ class ALRetrainRequest(BaseModel):
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
 
     run_inference: bool = Field(default=True)
+    # Optional hyperparameters for manual retrain. These are read by the service layer
+    # (and defaulted to values from the active checkpoint when omitted).
+    epochs: Optional[int] = Field(default=None, ge=1, le=500)
+    learning_rate: Optional[float] = Field(default=None)
+    batch_size: Optional[int] = Field(default=None, ge=1)
+    hidden_dim: Optional[int] = Field(default=None, ge=1)
+    dropout: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    device: Optional[str] = Field(default=None, description="cpu or cuda")
+
     threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     density_k: Optional[int] = Field(default=None, ge=1)
     composite_wu: Optional[float] = Field(default=None)
