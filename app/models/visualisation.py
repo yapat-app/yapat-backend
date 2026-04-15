@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, DateTime, ForeignKey, Float, Text, JSON,
-    Enum as SQLEnum, UniqueConstraint,
+    Enum as SQLEnum, UniqueConstraint, Index, column,
 )
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
@@ -26,7 +26,16 @@ class FPVVis(Base):
     model_checkpoint_id = Column(
         Integer,
         ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+        index=True,
+    )
+
+    # When model_checkpoint_id is NULL, this row represents a dataset-level projection
+    # computed from snippet embeddings for a specific embedding model.
+    embedding_model_id = Column(
+        Integer,
+        ForeignKey("embedding_models.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
     )
 
@@ -69,12 +78,24 @@ class FPVVis(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
 
     model_checkpoint = relationship("ALModelCheckpoint")
+    embedding_model = relationship("EmbeddingModel")
     snippet = relationship("Snippet")
 
     __table_args__ = (
-        UniqueConstraint(
+        # Keep uniqueness for checkpoint-based projections.
+        Index(
+            "uq_fpv_vis_checkpoint_snippet_nonnull",
             "model_checkpoint_id",
             "snippet_id",
-            name="uq_fpv_vis_checkpoint_snippet",
+            unique=True,
+            postgresql_where=column("model_checkpoint_id").isnot(None),
+        ),
+        # And uniqueness for dataset-level projections (checkpoint is NULL), keyed by embedding model.
+        Index(
+            "uq_fpv_vis_embedding_model_snippet_null_ckpt",
+            "embedding_model_id",
+            "snippet_id",
+            unique=True,
+            postgresql_where=column("model_checkpoint_id").is_(None),
         ),
     )
