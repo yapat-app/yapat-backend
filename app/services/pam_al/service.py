@@ -94,6 +94,9 @@ class PAMActiveLearningService:
     def register_checkpoint(self, **kwargs) -> ALModelCheckpoint:
         return ckpt_h.register_checkpoint(self.db, **kwargs)
 
+    def list_active_family_checkpoints(self, dataset_id: Optional[int] = None) -> List[ALModelCheckpoint]:
+        return ckpt_h.list_active_family_checkpoints(self.db, dataset_id=dataset_id)
+
     def list_checkpoints(self, dataset_id: Optional[int] = None) -> List[ALModelCheckpoint]:
         return ckpt_h.list_checkpoints(self.db, dataset_id=dataset_id)
 
