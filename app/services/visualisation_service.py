@@ -12,6 +12,10 @@ from app.schemas.visualisation import (
     FPVPointMetadata,
     FPVProjection2D,
     FPVProjection3D,
+    FPVVisibilityField,
+    FPVVisibilityRangeResponse,
+    FPVColorField,
+    FPVColorMetadata
 )
 from utils.dr_methods import run_dr_isomap, run_dr_pca, run_dr_tsne, run_dr_umap
 
@@ -20,11 +24,37 @@ class VISService:
     def __init__(self, db: Session):
         self.db = db
 
-    def generate_fpv_for_checkpoint(self, body: FPVRequest) -> FPVResponse:
+    def get_or_create_fpv(self, body: FPVRequest) -> FPVResponse:
         checkpoint_id = self._get_active_checkpoint_id(
             dataset_id=body.dataset_id,
             model_family_name=body.model_family_name,
         )
+
+        has_fpv = self._fpv_exists(checkpoint_id, body.run_3d)
+        if not has_fpv:
+            self._generate_and_store_fpv(
+                dataset_id=body.dataset_id,
+                checkpoint_id=checkpoint_id,
+                run_3d=body.run_3d,
+            )
+
+        return self._build_fpv_response(body=body, checkpoint_id=checkpoint_id)
+
+    def _fpv_exists(self, checkpoint_id: int, run_3d: bool) -> bool:
+        row = (
+            self.db.query(FPVVis)
+            .filter(FPVVis.model_checkpoint_id == checkpoint_id)
+            .first()
+        )
+        if row is None:
+            return False
+
+        if run_3d:
+            return row.pca_3d_x is not None or row.umap_3d_x is not None or row.tsne_3d_x is not None or row.isomap_3d_x is not None
+
+        return True
+
+    def _generate_and_store_fpv(self, dataset_id: int, checkpoint_id: int, run_3d: bool) -> None:
 
         predictions = (
             self.db.query(ALPrediction)
@@ -42,10 +72,10 @@ class VISService:
         snippet_ids = [p.snippet_id for p in rows_with_embeddings]
         X = np.array([p.embedding for p in rows_with_embeddings], dtype=np.float32)
 
-        coords = self._compute_visualizations(X=X, run_3d=body.run_3d)
+        coords = self._compute_visualizations(X=X, run_3d=run_3d)
 
         self._upsert_fpv_vis_rows(
-            dataset_id=body.dataset_id,
+            dataset_id=dataset_id,
             model_checkpoint_id=checkpoint_id,
             snippet_ids=snippet_ids,
             coords=coords,
@@ -53,13 +83,7 @@ class VISService:
 
         self.db.commit()
 
-        return self.get_fpv_for_checkpoint(body)
-
-    def get_fpv_for_checkpoint(self, body: FPVRequest) -> FPVResponse:
-        checkpoint_id = self._get_active_checkpoint_id(
-            dataset_id=body.dataset_id,
-            model_family_name=body.model_family_name,
-        )
+    def _build_fpv_response(self, body: FPVRequest, checkpoint_id: int) -> FPVResponse:
 
         rows = (
             self.db.query(FPVVis, ALPrediction)
@@ -95,8 +119,14 @@ class VISService:
         }
 
         has_any_3d = False
+        color_values = []
+        color_mode = "none"
 
         for vis_row, pred_row in rows:
+            if not self._passes_visibility_filter(pred_row, body):
+                continue
+            color_value, color_mode = self._build_color_values(pred_row, body.color_filter_value)
+            color_values.append(color_value)
             points.append(
                 FPVPointMetadata(
                     snippet_id=pred_row.snippet_id,
@@ -173,6 +203,13 @@ class VISService:
             model_family_name=body.model_family_name,
             model_checkpoint_id=checkpoint_id,
             embedding_model_id=None,
+            color_filter_value=body.color_filter_value,
+            visibility_filter_value=body.visibility_filter_value,
+            color=FPVColorMetadata(
+                field=body.color_filter_value,
+                values=color_values,
+                mode=color_mode,
+            ),
             points=points,
             projections_2d=projections_2d,
             projections_3d=projections_3d if has_any_3d else None,
@@ -502,3 +539,110 @@ class VISService:
                 row.isomap_3d_x = float(coords["isomap_3d"][i, 0])
                 row.isomap_3d_y = float(coords["isomap_3d"][i, 1])
                 row.isomap_3d_z = float(coords["isomap_3d"][i, 2])
+
+    def get_fpv_vis_range(self, visibility_filter_value: FPVVisibilityField) -> FPVVisibilityRangeResponse:
+        if visibility_filter_value in {
+            FPVVisibilityField.UNCERTAINTY,
+            FPVVisibilityField.DIVERSITY,
+            FPVVisibilityField.DENSITY,
+            FPVVisibilityField.COMPOSITE,
+        }:
+            return FPVVisibilityRangeResponse(
+                field=visibility_filter_value,
+                min_value=0.0,
+                max_value=1.0,
+                step=0.01,
+                label="score",
+            )
+
+        if visibility_filter_value == FPVVisibilityField.YEAR_CYCLE:
+            return FPVVisibilityRangeResponse(
+                field=visibility_filter_value,
+                min_value=1,
+                max_value=12,
+                step=1,
+                label="month",
+            )
+
+        if visibility_filter_value == FPVVisibilityField.DAY_CYCLE:
+            return FPVVisibilityRangeResponse(
+                field=visibility_filter_value,
+                min_value=0,
+                max_value=23,
+                step=1,
+                label="hour (0–23)",
+            )
+
+        return FPVVisibilityRangeResponse(
+            field=visibility_filter_value,
+            min_value=0,
+            max_value=0,
+            step=1,
+            label="none",
+        )
+
+    def _passes_visibility_filter(self, pred_row: ALPrediction, body: FPVRequest) -> bool:
+        field = body.visibility_filter_value
+
+        if field == FPVVisibilityField.NONE:
+            return True
+
+        min_v = body.visibility_range_min
+        max_v = body.visibility_range_max
+
+        if min_v is None or max_v is None:
+            return True
+
+        value = None
+
+        if field == FPVVisibilityField.UNCERTAINTY:
+            value = pred_row.uncertainty
+        elif field == FPVVisibilityField.DIVERSITY:
+            value = pred_row.diversity
+        elif field == FPVVisibilityField.DENSITY:
+            value = pred_row.density
+        elif field == FPVVisibilityField.COMPOSITE:
+            value = pred_row.composite_score
+        elif field == FPVVisibilityField.YEAR_CYCLE:
+            # metadata not implemented yet
+            return True
+        elif field == FPVVisibilityField.DAY_CYCLE:
+            # metadata not implemented yet
+            return True
+
+        if value is None:
+            return False
+
+        return min_v <= value <= max_v
+
+    def _build_color_values(self, pred_row: ALPrediction, color_field: FPVColorField):
+        if color_field == FPVColorField.NONE:
+            return None, "none"
+
+        if color_field == FPVColorField.PREDICTED_LABEL:
+            labels = pred_row.predicted_labels or []
+            return (labels[0] if labels else None), "categorical"
+
+        if color_field == FPVColorField.UNCERTAINTY:
+            return pred_row.uncertainty, "continuous"
+
+        if color_field == FPVColorField.DIVERSITY:
+            return pred_row.diversity, "continuous"
+
+        if color_field == FPVColorField.DENSITY:
+            return pred_row.density, "continuous"
+
+        if color_field == FPVColorField.COMPOSITE:
+            return pred_row.composite_score, "continuous"
+
+        # Not implemented yet because metadata is not available
+        if color_field in {
+            FPVColorField.YEAR_CYCLE,
+            FPVColorField.DAY_CYCLE,
+            FPVColorField.SOUND_TYPE,
+            FPVColorField.BIRDNET_LABEL,
+            FPVColorField.YAMNET_LABEL,
+        }:
+            return None, "categorical"
+
+        return None, "none"

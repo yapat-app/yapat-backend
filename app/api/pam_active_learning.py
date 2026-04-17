@@ -71,7 +71,7 @@ def list_checkpoints(
 ):
     """List all registered PAM model checkpoints."""
     svc = PAMActiveLearningService(db)
-    return svc.list_checkpoints(dataset_id=dataset_id)
+    return svc.list_active_family_checkpoints(dataset_id=dataset_id)
 
 
 @router.get("/checkpoints/{checkpoint_id}", response_model=ALCheckpointResponse)

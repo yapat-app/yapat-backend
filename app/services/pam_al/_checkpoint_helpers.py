@@ -46,6 +46,22 @@ def get_checkpoint(db: Session, checkpoint_id: int) -> Optional[ALModelCheckpoin
         .first()
     )
 
+def list_active_family_checkpoints(
+    db: Session,
+    dataset_id: Optional[int] = None,
+) -> List[ALModelCheckpoint]:
+    q = (
+        db.query(ALModelCheckpoint)
+        .join(
+            ALModelFamilyState,
+            ALModelFamilyState.active_model_checkpoint_id == ALModelCheckpoint.id,
+        )
+    )
+
+    if dataset_id is not None:
+        q = q.filter(ALModelFamilyState.dataset_id == dataset_id)
+
+    return q.order_by(ALModelFamilyState.created_at.desc()).all()
 
 def list_checkpoints(
     db: Session, dataset_id: Optional[int] = None
