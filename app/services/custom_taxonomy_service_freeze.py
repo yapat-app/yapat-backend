@@ -16,14 +16,10 @@ from app.models import (
     MessageRole,
     TaxonomyStatus,
 )
+from app.services.custom_taxonomy_service import CustomTaxonomyServiceError
 
 
 logger = logging.getLogger(__name__)
-
-
-class CustomTaxonomyServiceError(Exception):
-    """Base exception for custom taxonomy service errors"""
-    pass
 
 
 def freeze_label_space(
@@ -62,6 +58,11 @@ def freeze_label_space(
     
     if conversation.status != ConversationStatus.IN_PROGRESS:
         raise CustomTaxonomyServiceError("Conversation is not in progress")
+
+    if conversation.team_id is None:
+        raise CustomTaxonomyServiceError(
+            "This conversation has no team. Start the conversation with a team_id (or join a team) before freezing."
+        )
     
     # Check if label_space has items
     if not conversation.label_space or len(conversation.label_space) == 0:
