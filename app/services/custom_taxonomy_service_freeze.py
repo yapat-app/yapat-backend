@@ -6,6 +6,7 @@ import logging
 import secrets
 from typing import Optional
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 
 from app.models import (
@@ -130,7 +131,14 @@ def freeze_label_space(
         metadata={"action": "frozen", "taxonomy_id": taxonomy_id}
     )
     
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        # Convert low-level DB constraint error into a clean 4xx
+        raise CustomTaxonomyServiceError(
+            "Failed to create taxonomy. The conversation is missing a valid team_id."
+        ) from e
     db.refresh(custom_taxonomy)
     db.refresh(conversation)
     
