@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision = "2026_03_30_nullable_team_id"
-down_revision = "2026_02_16_taxon_constraint"
+down_revision = "2026_03_02_pam_active_learning"
 branch_labels = None
 depends_on = None
 

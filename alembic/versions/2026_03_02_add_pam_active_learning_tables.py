@@ -11,7 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = '2026_03_02_pam_active_learning'
-down_revision = '2026_02_16_taxon_constraint'
+down_revision = '2026_02_16_relax_taxon_id_constraint'
 branch_labels = None
 depends_on = None
 
