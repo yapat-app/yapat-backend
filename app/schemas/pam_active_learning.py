@@ -357,3 +357,25 @@ class ALRetrainJobStatusResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ── User Study-mode helpers (labeled pool / ground-truth coloring) ──────────
+
+
+class ALLabeledSnippetsResponse(BaseModel):
+    """List of snippet IDs that already have at least one annotation."""
+    dataset_id: int
+    snippet_set_id: Optional[int] = None
+    snippet_ids: List[int]
+
+
+class ALSnippetLabel(BaseModel):
+    snippet_id: int
+    labels: List[str]
+
+
+class ALSnippetLabelsResponse(BaseModel):
+    """Per-snippet ground-truth / user labels — used for `actual_label` coloring."""
+    dataset_id: int
+    snippet_set_id: Optional[int] = None
+    items: List[ALSnippetLabel]

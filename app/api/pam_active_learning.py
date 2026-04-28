@@ -27,6 +27,9 @@ from app.schemas.pam_active_learning import (
     ALPredictionListResponse,
     ALJobDispatch,
     ALRetrainJobStatusResponse,
+    ALLabeledSnippetsResponse,
+    ALSnippetLabelsResponse,
+    ALSnippetLabel,
 )
 from app.services.pam_active_learning_service import PAMActiveLearningService
 
@@ -138,6 +141,9 @@ def submit_feedback(
     """
     service = PAMActiveLearningService(db)
     try:
+        # Ensure feedback is attributable; also used when persisting confirmed labels.
+        if body.user_id is None:
+            body.user_id = current_user.id
         result = service.submit_feedback(body)
 
         if result.get("auto_retrain_job_id"):
@@ -277,3 +283,72 @@ def get_retrain_job(
     if job is None:
         raise HTTPException(status_code=404, detail=f"Retrain job {job_id} not found.")
     return job
+
+
+# ============ USER STUDY-MODE HELPERS ============
+
+@router.get(
+    "/labeled-snippets",
+    response_model=ALLabeledSnippetsResponse,
+)
+def list_labeled_snippets(
+    dataset_id: int = Query(..., description="Dataset ID"),
+    snippet_set_id: Optional[int] = Query(
+        None,
+        description="Optional snippet-set scope (recommended for large datasets).",
+    ),
+    scope: str = Query(
+        "any",
+        description="any=all sources, user=only current user's USER labels",
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Snippet IDs that already have at least one annotation. Used by the
+    visualisation to mark the labeled pool (border / highlight).
+    """
+    svc = PAMActiveLearningService(db)
+    try:
+        snippet_ids = svc.list_labeled_snippets(
+            dataset_id,
+            snippet_set_id,
+            scope=scope,
+            user_id=current_user.id,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load labeled snippets: {e}")
+    return ALLabeledSnippetsResponse(
+        dataset_id=dataset_id,
+        snippet_set_id=snippet_set_id,
+        snippet_ids=snippet_ids,
+    )
+
+
+@router.get(
+    "/snippet-labels",
+    response_model=ALSnippetLabelsResponse,
+)
+def list_snippet_labels(
+    dataset_id: int = Query(..., description="Dataset ID"),
+    snippet_set_id: Optional[int] = Query(
+        None,
+        description="Optional snippet-set scope (recommended for large datasets).",
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Per-snippet ground-truth / user labels — feeds the `actual_label` color
+    filter on the projection view.
+    """
+    svc = PAMActiveLearningService(db)
+    try:
+        items = svc.list_snippet_labels(dataset_id, snippet_set_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load snippet labels: {e}")
+    return ALSnippetLabelsResponse(
+        dataset_id=dataset_id,
+        snippet_set_id=snippet_set_id,
+        items=[ALSnippetLabel(**item) for item in items],
+    )

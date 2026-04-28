@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,10 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core import taxonomy
+from app.models.annotation import Annotation as AnnotationModel
+from app.models.custom_taxonomy import CustomTaxonomy
+from app.models.team import TeamMembership
 from app.models.pam_active_learning import (
     ALModelCheckpoint,
     ALPrediction,
@@ -260,6 +265,26 @@ class PAMActiveLearningService:
 
         if action_value in {"ACCEPT", "MODIFY"} and final_labels:
             ann_h.store_user_labels_for_snippet(self.db, body.dataset_id, body.snippet_id, final_labels, model_ckpt.id, body.user_id)
+            self._try_store_final_annotations(
+                dataset_id=body.dataset_id,
+                snippet_id=body.snippet_id,
+                labels=final_labels,
+                user_id=body.user_id,
+                notes=body.notes,
+            )
+        elif action_value == "REJECT":
+            # Rejection means: remove the user's AL labels for this snippet so it
+            # becomes "unlabeled" again (no border) unless it has ground-truth.
+            ann_h.delete_user_labels_for_snippet(
+                self.db,
+                dataset_id=body.dataset_id,
+                snippet_id=body.snippet_id,
+                user_id=body.user_id,
+            )
+            self._delete_final_annotations_from_active_learning(
+                snippet_id=body.snippet_id,
+                user_id=body.user_id,
+            )
 
         self.db.commit()
         self.db.refresh(feedback)
@@ -286,6 +311,196 @@ class PAMActiveLearningService:
             "auto_retrain_checkpoint_id": auto_retrain_checkpoint_id,
             "auto_retrain_job_id": auto_retrain_job_id,
         }
+
+    def _try_store_final_annotations(
+        self,
+        dataset_id: int,
+        snippet_id: int,
+        labels: list[str],
+        user_id: int | None,
+        notes: str | None = None,
+    ) -> None:
+        """
+        Persistence of confirmed labels into the canonical `annotations` table.
+
+        This only works when AL labels are resolvable as either:
+          - a namespaced taxon id (e.g. gbif:123 / custom:uuid), or
+          - a species name resolvable via the taxonomy matcher.
+
+        If labels are project-specific codes (common in PAM), they are still
+        stored in `ALSnippetAnnotation` but may not be representable as
+        `Annotation.taxon_id` without a mapping.
+        """
+        if user_id is None:
+            return
+
+        resolved_items: list[dict[str, str]] = []
+        for label in labels:
+            label = (label or "").strip()
+            if not label:
+                continue
+
+            # Case 1: label already is a taxon_id
+            if taxonomy.parse_taxon_id(label):
+                resolved = taxonomy.resolve_taxon_id(label, db_session=self.db)
+                if resolved:
+                    resolved_items.append(
+                        {
+                            "taxon_id": label,
+                            "resolved_name_snapshot": resolved.get("canonical_name")
+                            or resolved.get("scientific_name")
+                            or label,
+                        }
+                    )
+                continue
+
+            # Case 2: try to resolve as a species name
+            matched = taxonomy.match_species_name(label)
+            if matched and matched.get("taxon_id"):
+                resolved_items.append(
+                    {
+                        "taxon_id": matched["taxon_id"],
+                        "resolved_name_snapshot": matched.get("canonical_name")
+                        or matched.get("scientific_name")
+                        or label,
+                    }
+                )
+                continue
+
+            # Case 3: fall back to dataset-specific label codes by creating (or reusing)
+            # a minimal custom taxonomy entry *per code*. This keeps `Annotation.taxon_id`
+            # valid (custom:<uuid>) even when labels are not GBIF-resolvable.
+            custom_taxon_id = self._get_or_create_custom_taxon_id_for_code(
+                dataset_id=dataset_id,
+                code=label,
+                user_id=user_id,
+            )
+            if custom_taxon_id:
+                resolved_items.append(
+                    {
+                        "taxon_id": custom_taxon_id,
+                        "resolved_name_snapshot": label,
+                    }
+                )
+
+        if not resolved_items:
+            return
+
+        # Replace the user's annotations for this snippet with the confirmed set.
+        self.db.query(AnnotationModel).filter(
+            AnnotationModel.snippet_id == snippet_id,
+            AnnotationModel.user_id == user_id,
+        ).delete(synchronize_session=False)
+
+        for item in resolved_items:
+            self.db.add(
+                AnnotationModel(
+                    snippet_id=snippet_id,
+                    user_id=user_id,
+                    taxon_id=item["taxon_id"],
+                    resolved_name_snapshot=item["resolved_name_snapshot"],
+                    notes=notes,
+                    extra_metadata={
+                        "source": "active_learning",
+                        "dataset_id": dataset_id,
+                    },
+                )
+            )
+
+    def _delete_final_annotations_from_active_learning(
+        self,
+        snippet_id: int,
+        user_id: int | None,
+    ) -> None:
+        """Delete canonical annotations that were created by the AL flow."""
+        if user_id is None:
+            return
+        rows = (
+            self.db.query(AnnotationModel)
+            .filter(
+                AnnotationModel.snippet_id == snippet_id,
+                AnnotationModel.user_id == user_id,
+            )
+            .all()
+        )
+        for row in rows:
+            meta = getattr(row, "extra_metadata", None) or {}
+            if isinstance(meta, dict) and meta.get("source") == "active_learning":
+                self.db.delete(row)
+
+    def _get_or_create_custom_taxon_id_for_code(
+        self,
+        dataset_id: int,
+        code: str,
+        user_id: int,
+    ) -> str | None:
+        """
+        Create or reuse a CustomTaxonomy row to represent a single label code.
+
+        Why per-code taxonomy?
+        - The canonical `Annotation.taxon_id` only accepts `custom:<uuid>`.
+        - The current custom taxonomy subsystem does not expose stable per-node IDs
+          that fit that constraint.
+        - Creating a minimal CustomTaxonomy per code yields a valid, resolvable ID
+          and keeps dataset stats consistent.
+        """
+        code = (code or "").strip()
+        if not code:
+            return None
+
+        # Resolve a team_id to attach this custom taxonomy to.
+        ds = ckpt_h.get_pam_dataset(self.db, dataset_id)
+        team_id = getattr(ds, "team_id", None)
+        if team_id is None:
+            membership = (
+                self.db.query(TeamMembership)
+                .filter(TeamMembership.user_id == user_id)
+                .order_by(TeamMembership.id.asc())
+                .first()
+            )
+            team_id = membership.team_id if membership else None
+        # If we cannot associate this dataset/user with a team (e.g. admin-created
+        # dataset + user has no team memberships), we still return a valid custom
+        # taxon id so we can store canonical final annotations and dataset stats
+        # reflect AL progress. In that edge case, taxonomy resolution will not
+        # be available (no CustomTaxonomy row), but stats and exports work.
+        if team_id is None:
+            return f"custom:{uuid.uuid4()}"
+
+        existing = (
+            self.db.query(CustomTaxonomy)
+            .filter(CustomTaxonomy.team_id == team_id, CustomTaxonomy.name == code)
+            .first()
+        )
+        if existing:
+            return existing.taxonomy_id
+
+        taxonomy_id = f"custom:{uuid.uuid4()}"
+        taxonomy_data: dict[str, Any] = {
+            "nodes": [
+                {
+                    "id": code,
+                    "name": code,
+                    "rank": "label_code",
+                    "metadata": {"source": "al_auto", "dataset_id": dataset_id},
+                    "children": [],
+                }
+            ]
+        }
+
+        row = CustomTaxonomy(
+            taxonomy_id=taxonomy_id,
+            team_id=team_id,
+            created_by_user_id=user_id,
+            name=code,
+            description=f"Auto-created label code from AL for dataset {dataset_id}",
+            taxonomy_data=taxonomy_data,
+            status="active",
+            is_global=False,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return taxonomy_id
 
     # ==================================================================
     # Inference / predictions
@@ -346,6 +561,48 @@ class PAMActiveLearningService:
             "returned_count": min(k, len(ranked)), "suggestion_strategy": body.suggestion_strategy,
             "k": k, "rows": ranked[:k],
         }
+
+    # ==================================================================
+    # User Study-mode helpers (labeled pool + ground-truth label lookup)
+    # ==================================================================
+
+    def list_labeled_snippets(
+        self,
+        dataset_id: int,
+        snippet_set_id: Optional[int] = None,
+        scope: str = "any",
+        user_id: Optional[int] = None,
+    ) -> List[int]:
+        """Snippet IDs that already have at least one annotation."""
+        if scope == "user":
+            if user_id is None:
+                return []
+            if snippet_set_id is None:
+                return sorted(
+                    ann_h.get_user_labeled_snippet_ids_for_dataset(self.db, dataset_id, user_id)
+                )
+            return sorted(
+                ann_h.get_user_labeled_snippet_ids_for_snippet_set(
+                    self.db, dataset_id, snippet_set_id, user_id
+                )
+            )
+        if snippet_set_id is None:
+            return sorted(ann_h.get_labeled_snippet_ids_for_dataset(self.db, dataset_id))
+        return sorted(
+            ann_h.get_labeled_snippet_ids_for_snippet_set(self.db, dataset_id, snippet_set_id)
+        )
+
+    def list_snippet_labels(
+        self,
+        dataset_id: int,
+        snippet_set_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Per-snippet ground-truth / user labels — feeds the `actual_label` color filter."""
+        labels_by_snippet = ann_h.get_labels_by_snippet(self.db, dataset_id, snippet_set_id)
+        return [
+            {"snippet_id": sid, "labels": labels}
+            for sid, labels in sorted(labels_by_snippet.items())
+        ]
 
     # ==================================================================
     # Manual retrain  (sync — kept for backward compat)
