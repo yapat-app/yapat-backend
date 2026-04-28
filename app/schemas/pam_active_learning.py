@@ -179,6 +179,10 @@ class ALFeedbackSubmit(BaseModel):
         default=1, # for birdnet
         description="Required in bootstrap mode before the first checkpoint exists",
     )
+    model_type: ALModelType = Field(
+        default=ALModelType.PAM_LINEAR_MULTILABEL,
+        description="Classifier type to train if bootstrap feedback reaches retrain threshold",
+    )
     action: ALFeedbackActionSchema = Field(
         ...,
         description="ACCEPT, REJECT, or MODIFY",

@@ -38,12 +38,26 @@ from app.schemas.pam_active_learning import (
 from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
 from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
 from active_learning.config import RETRAIN_AFTER
-
+from active_learning.config import (
+    DEFAULT_INFERENCE_THRESHOLD,
+    DEFAULT_DENSITY_K,
+    DEFAULT_COMPOSITE_WU,
+    DEFAULT_COMPOSITE_WD,
+    DEFAULT_COMPOSITE_WR,
+    RETRAIN_AFTER,
+    DEFAULT_EPOCHS,
+    DEFAULT_LEARNING_RATE,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_HIDDEN_DIM,
+    DEFAULT_DROPOUT,
+    DEFAULT_DEVICE
+)
 from app.services.pam_al import _checkpoint_helpers as ckpt_h
 from app.services.pam_al import _data_helpers as data_h
 from app.services.pam_al import _annotation_helpers as ann_h
 from app.services.pam_al import _inference_helpers as inf_h
 from app.services.pam_al import _feedback_helpers as fb_h
+
 
 logger = logging.getLogger(__name__)
 
@@ -116,9 +130,31 @@ class PAMActiveLearningService:
         if snippet_set_id is None:
             raise ValueError("No snippet_set_id provided and dataset has no default_snippet_set_id.")
 
-        metadata_path = os.path.join(DATA_ROOT, body.metadata_path)
-        label_config_path = os.path.join(DATA_ROOT, body.label_config_path)
-        species_list = ckpt_h.load_species_from_label_config(label_config_path)
+        use_metadata_labels = bool(body.metadata_path and body.label_config_path)
+        if use_metadata_labels:
+            metadata_path = os.path.join(DATA_ROOT, body.metadata_path)
+            label_config_path = os.path.join(DATA_ROOT, body.label_config_path)
+            species_list = ckpt_h.load_species_from_label_config(label_config_path)
+        else:
+            metadata_path = None
+            label_config_path = None
+
+            annotations_by_snippet = ann_h.get_trusted_annotations(
+                self.db,
+                body.dataset_id,
+            )
+
+            if not annotations_by_snippet:
+                raise ValueError("No user annotations available for bootstrap training.")
+
+            species_list = sorted({
+                label
+                for labels in annotations_by_snippet.values()
+                for label in labels
+            })
+
+            if not species_list:
+                raise ValueError("No labels found in user annotations.")
 
         model = ckpt_h.make_model(body.model_type)
 
@@ -127,13 +163,14 @@ class PAMActiveLearningService:
         hidden_dim = body.hidden_dim if is_mlp else None
         dropout = body.dropout if is_mlp else None
 
+        initial_label_config_path = label_config_path or ""
         model_ckpt = ALModelCheckpoint(
             dataset_id=body.dataset_id, model_family_name=body.model_family_name,
-            version=body.version, checkpoint_path="", label_config_path=body.label_config_path,
+            version=body.version, checkpoint_path="", label_config_path=initial_label_config_path,
             model_type=body.model_type.value if hasattr(body.model_type, "value") else body.model_type,
             hyperparameters={
                 "training_mode": "cold_start", "embedding_model_id": body.embedding_model_id,
-                "metadata_path": metadata_path, "label_config_path": label_config_path,
+                "metadata_path": metadata_path, "label_config_path": initial_label_config_path,
                 "min_samples_per_class": body.min_samples_per_class,
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs, "learning_rate": body.learning_rate,
@@ -160,8 +197,28 @@ class PAMActiveLearningService:
             self.db.commit()
 
             X, snippet_rows = data_h.load_embeddings(self.db, snippet_set_id, body.embedding_model_id)
-            gt_index = data_h.load_ground_truth_metadata(metadata_path, species_list, allowed_subsets=["train"])
-            X_train, y_train, used_snippet_ids = data_h.align_embeddings_and_labels(X, snippet_rows, gt_index, species_list)
+            if use_metadata_labels:
+                gt_index = data_h.load_ground_truth_metadata(metadata_path, species_list, allowed_subsets=["train"])
+                X_train, y_train, used_snippet_ids = data_h.align_embeddings_and_labels(X, snippet_rows, gt_index, species_list)
+            else:
+                snippet_ids = [row["snippet_id"] for row in snippet_rows]
+
+                keep_indices = [
+                    i for i, sid in enumerate(snippet_ids)
+                    if sid in annotations_by_snippet
+                ]
+
+                if not keep_indices:
+                    raise ValueError("No embeddings found for user-annotated snippets.")
+
+                X_train = X[keep_indices]
+                used_snippet_ids = [snippet_ids[i] for i in keep_indices]
+
+                y_train = ann_h.build_multihot_from_annotations(
+                    used_snippet_ids,
+                    species_list,
+                    annotations_by_snippet,
+                )
 
             X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
                 model.filter_and_balance_classes(
@@ -983,7 +1040,7 @@ class PAMActiveLearningService:
                 label_config_path=None,
                 model_family_name=body.model_family_name,
                 version="v0",
-                model_type=ALModelType.PAM_LINEAR_MULTILABEL,
+                model_type=body.model_type,
                 epochs=DEFAULT_EPOCHS,
                 learning_rate=DEFAULT_LEARNING_RATE,
                 batch_size=DEFAULT_BATCH_SIZE,
@@ -1014,3 +1071,4 @@ class PAMActiveLearningService:
             "feedback_count_since_retrain": feedback_count,
             "retrain_triggered": retrain_triggered,
         }
+
