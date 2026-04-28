@@ -39,7 +39,7 @@ class Dataset(Base):
     description = Column(Text, nullable=True)
     source_uri = Column(String, nullable=False, index=True)  # Path to audio files directory
     dataset_type = Column(SQLEnum(DatasetType), nullable=False, default=DatasetType.PAM, index=True)
-    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"),
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="SET NULL"),
                      nullable=True)  # Nullable for admin-created datasets
     default_snippet_set_id = Column(
         Integer,
