@@ -12,6 +12,10 @@ from enum import Enum
 
 # ── Enums (mirror ORM enums for API layer) ─────────────────────────────
 
+class ALModelType(str, Enum):
+    PAM_MLP_MULTILABEL = "pam_mlp_multilabel_classifier"
+    PAM_LINEAR_MULTILABEL = "pam_linear_multilabel_classifier"
+
 class ALModelStatusSchema(str, Enum):
     AVAILABLE = "AVAILABLE"
     LOADING = "LOADING"
@@ -292,12 +296,12 @@ class ALTrainFromScratchRequest(BaseModel):
         description="Model family name shared across checkpoint versions",
     )
     version: str = Field(default="v0", description="Version tag for the new checkpoint")
-    model_type: Optional[str] = Field(default="pam_multilabel_classifier", description="Classifier type identifier")
+    model_type: ALModelType = Field(default=ALModelType.PAM_LINEAR_MULTILABEL, description="Classifier type identifier")
     epochs: Optional[int] = Field(default=20, ge=1, le=500)
     learning_rate: Optional[float] = Field(default=1e-3)
     batch_size: Optional[int] = Field(default=16)
-    hidden_dim: Optional[int] = Field(default=128)
-    dropout: Optional[float] = Field(default=0.5)
+    hidden_dim: Optional[int] = Field(default=128, nullable=True)
+    dropout: Optional[float] = Field(default=0.5, nullable=True)
     device: Optional[str] = Field(default="cpu", description="cpu or cuda")
 
     run_inference: bool = Field(default=False)

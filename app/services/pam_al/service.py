@@ -31,10 +31,12 @@ from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
     ALFeedbackSubmit,
     ALPredictionResponse,
+    ALModelType,
     SamplingMode,
 )
 
-from active_learning.al_classifier import MultiLabelMLPClassifier
+from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
+from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
 from active_learning.config import RETRAIN_AFTER
 
 from app.services.pam_al import _checkpoint_helpers as ckpt_h
@@ -118,21 +120,25 @@ class PAMActiveLearningService:
         label_config_path = os.path.join(DATA_ROOT, body.label_config_path)
         species_list = ckpt_h.load_species_from_label_config(label_config_path)
 
-        if (body.model_type or "").lower() != "pam_multilabel_classifier":
-            raise ValueError(f"Unsupported model_type '{body.model_type}'. Only 'pam_multilabel_classifier' is supported.")
+        model = ckpt_h.make_model(body.model_type)
+
+        # Hyperparameters not valid for linear classifiers
+        is_mlp = body.model_type == ALModelType.PAM_MLP_MULTILABEL
+        hidden_dim = body.hidden_dim if is_mlp else None
+        dropout = body.dropout if is_mlp else None
 
         model_ckpt = ALModelCheckpoint(
             dataset_id=body.dataset_id, model_family_name=body.model_family_name,
             version=body.version, checkpoint_path="", label_config_path=body.label_config_path,
-            model_type=body.model_type,
+            model_type=body.model_type.value if hasattr(body.model_type, "value") else body.model_type,
             hyperparameters={
                 "training_mode": "cold_start", "embedding_model_id": body.embedding_model_id,
                 "metadata_path": metadata_path, "label_config_path": label_config_path,
                 "min_samples_per_class": body.min_samples_per_class,
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs, "learning_rate": body.learning_rate,
-                "batch_size": body.batch_size, "hidden_dim": body.hidden_dim,
-                "dropout": body.dropout, "device": body.device,
+                "batch_size": body.batch_size, "hidden_dim": hidden_dim,
+                "dropout": dropout, "device": body.device,
             },
             is_base=1, parent_checkpoint_id=None, status=ALModelStatus.LOADING,
         )
@@ -157,7 +163,6 @@ class PAMActiveLearningService:
             gt_index = data_h.load_ground_truth_metadata(metadata_path, species_list, allowed_subsets=["train"])
             X_train, y_train, used_snippet_ids = data_h.align_embeddings_and_labels(X, snippet_rows, gt_index, species_list)
 
-            model = MultiLabelMLPClassifier()
             X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
                 model.filter_and_balance_classes(
                     X=X_train, y=y_train, snippet_ids=used_snippet_ids,
@@ -173,7 +178,7 @@ class PAMActiveLearningService:
                 raise ValueError("No species remain after min_samples_per_class filtering.")
 
             n_dim, num_classes = X_train.shape[1], y_train.shape[1]
-            model.create_classifier(n_dim=n_dim, num_classes=num_classes, hidden_dim=body.hidden_dim, dropout=body.dropout)
+            model.create_classifier(n_dim=n_dim, num_classes=num_classes, hidden_dim=hidden_dim, dropout=dropout)
             model.to(body.device)
 
             train_metrics = model.fit(X=X_train, y=y_train, epochs=body.epochs, learning_rate=body.learning_rate, batch_size=body.batch_size, device=body.device)
@@ -182,7 +187,13 @@ class PAMActiveLearningService:
             resolved_lcp = ckpt_h.make_label_config_path(ds.id, body.model_family_name, body.version, model_ckpt.id)
 
             ckpt_h.save_label_config(resolved_lcp, used_species)
-            ckpt_h.save_classifier_checkpoint(model, checkpoint_path, body.hidden_dim, body.dropout, used_species)
+            ckpt_h.save_classifier_checkpoint(
+                model=model,
+                checkpoint_path=checkpoint_path,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
+                label_order=used_species,
+            )
 
             model_ckpt.checkpoint_path = checkpoint_path
             model_ckpt.label_config_path = resolved_lcp
@@ -193,7 +204,6 @@ class PAMActiveLearningService:
                 "train_samples": int(X_train.shape[0]), "label_order": used_species,
                 "used_species": used_species, "excluded_species": excluded_species, "class_counts": class_counts,
             }
-
             ann_h.store_snippet_annotations(self.db, body.dataset_id, labeled_snippet_ids, y_train, used_species, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
 
             inference_metrics = None
@@ -229,6 +239,9 @@ class PAMActiveLearningService:
 
     def submit_feedback(self, body: ALFeedbackSubmit) -> dict:
         model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(self.db, body.dataset_id, body.model_family_name)
+        if model_ckpt is None:
+            logger.info("No active checkpoint found. Submitting bootstrap feedback.")
+            return self._submit_bootstrap_feedback(body)
 
         if model_ckpt.dataset_id != body.dataset_id:
             raise ValueError(f"Checkpoint {model_ckpt.id} does not belong to dataset {body.dataset_id}.")
@@ -311,7 +324,7 @@ class PAMActiveLearningService:
         if not predictions or body.force_refresh:
             X, snippet_rows = data_h.load_embeddings(self.db, body.snippet_set_id, embedding_model_id)
 
-            model = MultiLabelMLPClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=body.device)
+            model = ckpt_h.load_model_from_checkpoint(model_ckpt, device=body.device)
 
             label_order = getattr(model, "label_order", None) or hyper.get("label_order")
             if not label_order:
@@ -375,8 +388,10 @@ class PAMActiveLearningService:
         epochs = body.epochs if body.epochs is not None else int(hyper.get("epochs", 20))
         lr = body.learning_rate if body.learning_rate is not None else float(hyper.get("learning_rate", 1e-3))
         bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", 32))
-        hd = body.hidden_dim if body.hidden_dim is not None else int(hyper.get("hidden_dim", 128))
-        do = body.dropout if body.dropout is not None else float(hyper.get("dropout", 0.5))
+        is_mlp = parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
+
+        hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
+        do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
         dev = body.device if body.device is not None else str(hyper.get("device", "cpu"))
 
         new_version = f"{parent_ckpt.version}_manual_{int(datetime.now(timezone.utc).timestamp())}"
@@ -430,8 +445,17 @@ class PAMActiveLearningService:
             if X_train.shape[0] == 0:
                 raise ValueError("No training rows remain after filtering empty rows.")
 
-            model = MultiLabelMLPClassifier()
-            model.create_classifier(n_dim=X_train.shape[1], num_classes=y_train.shape[1], hidden_dim=hd, dropout=do)
+            is_mlp = parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
+
+            hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
+            do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
+            model = ckpt_h.make_model(parent_ckpt.model_type)
+            model.create_classifier(
+                n_dim=X_train.shape[1],
+                num_classes=y_train.shape[1],
+                hidden_dim=hd,
+                dropout=do,
+            )
             model.to(dev)
 
             train_metrics = model.fit(X=X_train, y=y_train, epochs=epochs, learning_rate=lr, batch_size=bs, device=dev)
@@ -483,11 +507,16 @@ class PAMActiveLearningService:
         if snippet_set_id is None:
             raise ValueError("No snippet_set_id provided and dataset has no default_snippet_set_id.")
 
+        is_mlp = body.model_type == ALModelType.PAM_MLP_MULTILABEL
+
+        hidden_dim = body.hidden_dim if is_mlp else None
+        dropout = body.dropout if is_mlp else None
+
         model_ckpt = ALModelCheckpoint(
             dataset_id=body.dataset_id, model_family_name=body.model_family_name,
             version=body.version, checkpoint_path="",
             label_config_path=body.label_config_path,
-            model_type=body.model_type or "pam_multilabel_classifier",
+            model_type=body.model_type.value if hasattr(body.model_type, "value") else body.model_type,
             hyperparameters={
                 "training_mode": "cold_start", "embedding_model_id": body.embedding_model_id,
                 "snippet_set_id": snippet_set_id,
@@ -496,8 +525,8 @@ class PAMActiveLearningService:
                 "min_samples_per_class": body.min_samples_per_class,
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs, "learning_rate": body.learning_rate,
-                "batch_size": body.batch_size, "hidden_dim": body.hidden_dim,
-                "dropout": body.dropout, "device": body.device,
+                "batch_size": body.batch_size, "hidden_dim": hidden_dim,
+                "dropout": dropout, "device": body.device,
                 "run_inference": body.run_inference, "threshold": body.threshold,
                 "density_k": body.density_k, "composite_wu": body.composite_wu,
                 "composite_wd": body.composite_wd, "composite_wr": body.composite_wr,
@@ -556,8 +585,7 @@ class PAMActiveLearningService:
                 int(y_train.shape[0]),
                 int(y_train.shape[1]),
             )
-
-            model = MultiLabelMLPClassifier()
+            model = ckpt_h.make_model(model_ckpt.model_type)
             X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = model.filter_and_balance_classes(
                 X=X_train, y=y_train, snippet_ids=used_sids, species_list=species_list,
                 min_samples_per_class=hyper.get("min_samples_per_class", 1),
@@ -570,7 +598,11 @@ class PAMActiveLearningService:
                 raise ValueError("No species remain.")
 
             n_dim, num_classes = X_train.shape[1], y_train.shape[1]
-            hd, do, dev = int(hyper.get("hidden_dim", 128)), float(hyper.get("dropout", 0.5)), hyper.get("device", "cpu")
+            is_mlp = model_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or model_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
+
+            hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
+            do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
+            dev = hyper.get("device", "cpu")
 
             model.create_classifier(n_dim=n_dim, num_classes=num_classes, hidden_dim=hd, dropout=do)
             model.to(dev)
@@ -637,8 +669,9 @@ class PAMActiveLearningService:
         epochs = body.epochs if body.epochs is not None else int(hyper.get("epochs", 20))
         lr = body.learning_rate if body.learning_rate is not None else float(hyper.get("learning_rate", 1e-3))
         bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", 32))
-        hd = body.hidden_dim if body.hidden_dim is not None else int(hyper.get("hidden_dim", 128))
-        do = body.dropout if body.dropout is not None else float(hyper.get("dropout", 0.5))
+        is_mlp = parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
+        hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
+        do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
         dev = body.device if body.device is not None else str(hyper.get("device", "cpu"))
 
         new_version = f"{parent_ckpt.version}_manual_{int(datetime.now(timezone.utc).timestamp())}"
@@ -777,12 +810,19 @@ class PAMActiveLearningService:
                 int(y_train.shape[1]),
             )
 
-            hd = int(hyper.get("hidden_dim", 128))
-            do = float(hyper.get("dropout", 0.5))
+            is_mlp = new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
+
+            hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
+            do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
             dev = hyper.get("device", "cpu")
 
-            model = MultiLabelMLPClassifier()
-            model.create_classifier(n_dim=X_train.shape[1], num_classes=y_train.shape[1], hidden_dim=hd, dropout=do)
+            model = ckpt_h.make_model(new_ckpt.model_type)
+            model.create_classifier(
+                n_dim=X_train.shape[1],
+                num_classes=y_train.shape[1],
+                hidden_dim=hd,
+                dropout=do,
+            )
             model.to(dev)
             train_metrics = model.fit(X=X_train, y=y_train,
                 epochs=int(hyper.get("epochs", 20)), learning_rate=float(hyper.get("learning_rate", 1e-3)),
@@ -877,4 +917,100 @@ class PAMActiveLearningService:
             "suggestion_strategy": SamplingMode.RANDOM,
             "k": k,
             "rows": rows,
+        }
+
+    def _submit_bootstrap_feedback(self, body: ALFeedbackSubmit) -> dict:
+        normalized_labels = fb_h.normalize_feedback_labels(body.labels)
+        if not normalized_labels:
+            raise ValueError(
+                "Initial feedback must include explicit labels when no active checkpoint exists."
+            )
+
+        if body.embedding_model_id is None:
+            raise ValueError(
+                "embedding_model_id is required when submitting bootstrap feedback."
+            )
+
+        snippet = (
+            self.db.query(Snippet)
+            .filter(Snippet.id == body.snippet_id)
+            .one_or_none()
+        )
+        if snippet is None:
+            raise ValueError(f"Snippet {body.snippet_id} not found.")
+
+        feedback = ALFeedbackEvent(
+            dataset_id=body.dataset_id,
+            model_checkpoint_id=None,
+            snippet_id=body.snippet_id,
+            user_id=body.user_id,
+            action="MODIFY",
+            final_labels=normalized_labels,
+            notes=body.notes,
+        )
+        self.db.add(feedback)
+        self.db.flush()
+
+        ann_h.store_user_labels_for_snippet(
+            db=self.db,
+            dataset_id=body.dataset_id,
+            snippet_id=body.snippet_id,
+            labels=normalized_labels,
+            model_checkpoint_id=None,
+            user_id=body.user_id,
+        )
+
+        self.db.commit()
+        self.db.refresh(feedback)
+
+        feedback_count = fb_h.feedback_count_since_retrain(
+            db=self.db,
+            checkpoint_id=None,
+            dataset_id=body.dataset_id,
+        )
+
+        retrain_triggered = False
+        active_checkpoint_id = None
+
+        if feedback_count >= RETRAIN_AFTER:
+            retrain_triggered = True
+
+            train_body = ALTrainFromScratchRequest(
+                dataset_id=body.dataset_id,
+                snippet_set_id=snippet.snippet_set_id,
+                embedding_model_id=body.embedding_model_id,
+                metadata_path=None,
+                label_config_path=None,
+                model_family_name=body.model_family_name,
+                version="v0",
+                model_type=ALModelType.PAM_LINEAR_MULTILABEL,
+                epochs=DEFAULT_EPOCHS,
+                learning_rate=DEFAULT_LEARNING_RATE,
+                batch_size=DEFAULT_BATCH_SIZE,
+                hidden_dim=DEFAULT_HIDDEN_DIM,
+                dropout=DEFAULT_DROPOUT,
+                device=DEFAULT_DEVICE,
+                run_inference=True,
+                threshold=DEFAULT_INFERENCE_THRESHOLD,
+                density_k=DEFAULT_DENSITY_K,
+                composite_wu=DEFAULT_COMPOSITE_WU,
+                composite_wd=DEFAULT_COMPOSITE_WD,
+                composite_wr=DEFAULT_COMPOSITE_WR,
+            )
+
+            new_ckpt = self.train_from_scratch(train_body)
+            active_checkpoint_id = new_ckpt.id
+
+        return {
+            "id": feedback.id,
+            "model_family_name": body.model_family_name,
+            "model_checkpoint_id": None,
+            "active_checkpoint_id": active_checkpoint_id,
+            "snippet_id": feedback.snippet_id,
+            "action": feedback.action,
+            "final_labels": feedback.final_labels,
+            "notes": feedback.notes,
+            "created_at": feedback.created_at,
+            "feedback_count_since_retrain": feedback_count,
+            "retrain_triggered": retrain_triggered,
         }
