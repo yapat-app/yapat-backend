@@ -137,7 +137,7 @@ def get_available_datasets(
     
     Returns:
     - For admins: all datasets (both with and without teams)
-    - For other users: datasets from teams where they have OWNER membership + 
+    - For other users: datasets from teams where they are a member (any role) +
                       datasets they have direct access to (granted via invitation)
     """
     # Check if user is admin
@@ -148,25 +148,24 @@ def get_available_datasets(
         datasets = db.query(DatasetModel).all()
     else:
         # Collect datasets from two sources:
-        # 1. Datasets from teams where user is OWNER
+        # 1. Datasets from teams where user is any member (owner or user)
         # 2. Datasets with direct access (via invitation)
         
-        # Get all teams where current user is an owner (via team membership)
-        owned_teams = db.query(TeamModel).join(
+        # Get all teams where current user is a member (any role)
+        member_teams = db.query(TeamModel).join(
             TeamMembershipModel,
             TeamModel.id == TeamMembershipModel.team_id
         ).filter(
-            TeamMembershipModel.user_id == current_user.id,
-            TeamMembershipModel.role == TeamRole.OWNER
+            TeamMembershipModel.user_id == current_user.id
         ).all()
         
-        owned_team_ids = [t.id for t in owned_teams]
+        member_team_ids = [t.id for t in member_teams]
         
-        # Get datasets from owned teams
+        # Get datasets from member teams
         team_datasets = []
-        if owned_team_ids:
+        if member_team_ids:
             team_datasets = db.query(DatasetModel).filter(
-                DatasetModel.team_id.in_(owned_team_ids)
+                DatasetModel.team_id.in_(member_team_ids)
             ).all()
         
         # Get datasets with direct access (via user_datasets table)
@@ -194,8 +193,22 @@ def read_teams(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Get list of teams"""
-    teams = db.query(TeamModel).offset(skip).limit(limit).all()
+    """Get list of teams.
+
+    - Admins see all teams.
+    - All other users only see teams they are a member of.
+    """
+    if current_user.role == UserRole.ADMIN:
+        teams = db.query(TeamModel).offset(skip).limit(limit).all()
+    else:
+        teams = (
+            db.query(TeamModel)
+            .join(TeamMembershipModel, TeamModel.id == TeamMembershipModel.team_id)
+            .filter(TeamMembershipModel.user_id == current_user.id)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
     return teams
 
 
@@ -297,6 +310,35 @@ def create_team_invitation(
     db.refresh(invitation)
     
     return invitation
+
+
+@router.delete("/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_team(
+    team_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Delete a team (admin or team owner only).
+
+    Datasets belonging to the team are unassigned (team_id set to NULL) rather
+    than deleted, so recordings and annotations are preserved.
+    Memberships and invitations are removed automatically via cascade.
+    """
+    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    require_team_owner(current_user, team_id, db)
+
+    # Unassign datasets via ORM so the relationship is properly tracked.
+    # The datasets relationship has no delete cascade, so this simply nulls the FK.
+    for dataset in list(team.datasets):
+        dataset.team_id = None
+
+    db.flush()
+    db.delete(team)
+    db.commit()
+    return None
 
 
 @router.delete("/{team_id}/invitations/{invitation_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -108,21 +108,29 @@ def get_user_custom_taxonomy_ids(
     Returns:
         List of custom taxonomy IDs (e.g., ['custom:abc123', 'custom:def456'])
     """
-    memberships = db.query(TeamMembership).filter(
-        TeamMembership.user_id == current_user.id
-    ).all()
-    
-    all_custom_taxonomy_ids = []
+    if check_admin(current_user):
+        from app.models.custom_taxonomy import CustomTaxonomy
+        rows = (
+            db.query(CustomTaxonomy.taxonomy_id)
+            .filter(CustomTaxonomy.status == TaxonomyStatus.ACTIVE.value)
+            .all()
+        )
+        return [r[0] for r in rows]
+
+    memberships = (
+        db.query(TeamMembership).filter(TeamMembership.user_id == current_user.id).all()
+    )
+
+    all_custom_taxonomy_ids: List[str] = []
     for membership in memberships:
         team_taxonomies = custom_taxonomy_service.get_available_taxonomies(
             team_id=membership.team_id,
             user_id=current_user.id,
             db=db,
-            status=TaxonomyStatus.ACTIVE.value
+            status=TaxonomyStatus.ACTIVE.value,
         )
         all_custom_taxonomy_ids.extend([t.taxonomy_id for t in team_taxonomies])
-    
-    # Remove duplicates
+
     return list(set(all_custom_taxonomy_ids))
 
 

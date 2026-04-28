@@ -35,17 +35,17 @@ class CustomTaxonomyServiceError(Exception):
 
 def create_conversation(
     user_id: int,
-    team_id: int,
-    db: Session
+    db: Session,
+    team_id: Optional[int] = None,
 ) -> TaxonomyConversation:
     """
     Create a new taxonomy conversation.
-    
+
     Args:
         user_id: User creating the conversation
-        team_id: Team the conversation belongs to
         db: Database session
-        
+        team_id: Team the conversation belongs to (None for personal conversations)
+
     Returns:
         Created TaxonomyConversation
     """
@@ -57,7 +57,7 @@ def create_conversation(
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
-    
+
     logger.info(f"Created conversation {conversation.id} for user {user_id} in team {team_id}")
     return conversation
 
@@ -139,10 +139,14 @@ async def process_user_prompt(
     )
     
     try:
-        # Call OE_YAPAT service
+        # Call OE_YAPAT service with domain context
+        system_context = (
+            "We are going to annotate an audio dataset in the domain of wildlife monitoring. "
+        )
+        effective_prompt = f"{system_context}User request: {sanitized_prompt}"
         logger.info(f"Processing prompt for conversation {conversation_id}")
         response = await oe_yapat_service.generate_taxonomy(
-            prompt=sanitized_prompt,
+            prompt=effective_prompt,
             context={"conversation_id": conversation_id}
         )
         
@@ -193,7 +197,7 @@ async def process_user_prompt(
             db=db,
             metadata={"error": True}
         )
-        raise CustomTaxonomyServiceError(str(e)) from e
+        raise  # re-raise the original OEYapatServiceError so the API returns 503
 
 
 def add_to_label_space(
@@ -290,10 +294,10 @@ def add_to_label_space(
     
     if not nodes_to_add:
         raise CustomTaxonomyServiceError("No valid indices provided or all indices were out of range")
-    
+
     # Check for existing IDs to avoid duplicates
     existing_ids = {item.get("taxon_id") for item in conversation.label_space if item.get("taxon_id")}
-    
+
     added_items = []
     for node in nodes_to_add:
         # Each node has: id, name, scientific_name, rank, metadata (from oe_yapat)
@@ -328,47 +332,40 @@ def add_to_label_space(
         if taxon_id:
             existing_ids.add(taxon_id)
         added_items.append(new_item)
-    
-    # SQLAlchemy does not detect in-place mutations of JSONB; must flag for persistence
-    flag_modified(conversation, "label_space")
-    conversation.updated_at = datetime.utcnow()
-    
-    names_added = ", ".join(i["name"] for i in added_items)
-    add_message(
-        conversation_id=conversation_id,
-        role=MessageRole.SYSTEM,
-        content=f"✓ Added '{names_added}' to your label space.",
-        db=db,
-        metadata={"action": "added_to_label_space", "item_ids": [i["id"] for i in added_items]}
-    )
-    
-    db.commit()
-    db.refresh(conversation)
-    
+
     if not added_items:
-        raise CustomTaxonomyServiceError("All selected items were duplicates or invalid")
-    
-    # SQLAlchemy does not detect in-place mutations of JSONB; must flag for persistence
+        # All selected items were duplicates: return success so UI keeps label space and can show "Already in label space"
+        db.refresh(conversation)
+        logger.info(
+            "Add to label space: all %d item(s) already in label space (conversation %s)",
+            len(nodes_to_add),
+            conversation_id,
+        )
+        return {
+            "conversation": conversation,
+            "added_items": [],
+            "skipped_count": skipped_count,
+        }
+
+    # Persist new items and add system message
     flag_modified(conversation, "label_space")
     conversation.updated_at = datetime.utcnow()
-    
     names_added = ", ".join(i["name"] for i in added_items)
     add_message(
         conversation_id=conversation_id,
         role=MessageRole.SYSTEM,
         content=f"✓ Added '{names_added}' to your label space.",
         db=db,
-        metadata={"action": "added_to_label_space", "item_ids": [i["id"] for i in added_items]}
+        metadata={"action": "added_to_label_space", "item_ids": [i["id"] for i in added_items]},
     )
-    
     db.commit()
     db.refresh(conversation)
-    
+
     logger.info(f"Added %d item(s) to label space in conversation {conversation_id}", len(added_items))
     return {
         "conversation": conversation,
         "added_items": added_items,
-        "skipped_count": skipped_count
+        "skipped_count": skipped_count,
     }
 
 

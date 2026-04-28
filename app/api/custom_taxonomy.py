@@ -5,6 +5,7 @@ Provides chatbot interface for taxonomy generation and management endpoints.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from typing import List, Optional
@@ -12,7 +13,7 @@ from typing import List, Optional
 from app.api.deps import get_current_active_user, get_db
 from app.models.user import User
 from app.models.team import Team, TeamMembership
-from app.core.permissions import require_team_member, check_team_member, check_admin
+from app.core.permissions import require_team_member, check_team_member, check_admin, require_conversation_access
 from app.schemas.custom_taxonomy import (
     CustomTaxonomyResponse,
     CustomTaxonomyUpdate,
@@ -81,23 +82,35 @@ def start_conversation(
     Start a new taxonomy generation conversation.
     
     Creates a new conversation context for generating a custom taxonomy.
-    User must be a member of the specified team.
+    User must be a member of the specified team. If no team_id is provided,
+    the user's first team is used automatically.
     """
-    # Verify team exists
-    team = db.query(Team).filter(Team.id == request.team_id).first()
-    if not team:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Team {request.team_id} not found"
-        )
-    # Verify user is member of the team
-    require_team_member(current_user, request.team_id, db)
-    
+    # Resolve team_id: use provided value, fall back to user's first team, or None for personal
+    team_id = request.team_id
+    if team_id is None:
+        first_membership = db.query(TeamMembership).filter(
+            TeamMembership.user_id == current_user.id
+        ).first()
+        if first_membership:
+            team_id = first_membership.team_id
+        # Users with no team membership get a personal (teamless) conversation
+
+    if team_id is not None:
+        # Verify team exists
+        team = db.query(Team).filter(Team.id == team_id).first()
+        if not team:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Team {team_id} not found"
+            )
+        # Verify user is member of the team
+        require_team_member(current_user, team_id, db)
+
     try:
         conversation = custom_taxonomy_service.create_conversation(
             user_id=current_user.id,
-            team_id=request.team_id,
-            db=db
+            team_id=team_id,
+            db=db,
         )
         return conversation
     except Exception as e:
@@ -128,9 +141,8 @@ async def send_message(
             detail=f"Conversation {conversation_id} not found"
         )
     
-    # Verify user is member of the conversation's team
-    require_team_member(current_user, conversation.team_id, db)
-    
+    require_conversation_access(current_user, conversation, db)
+
     try:
         # Process the prompt and generate taxonomy
         result = await custom_taxonomy_service.process_user_prompt(
@@ -187,9 +199,8 @@ def get_conversation(
             detail=f"Conversation {conversation_id} not found"
         )
     
-    # Verify user is member of the conversation's team
-    require_team_member(current_user, conversation.team_id, db)
-    
+    require_conversation_access(current_user, conversation, db)
+
     return conversation
 
 
@@ -212,9 +223,8 @@ def get_label_space(
             detail=f"Conversation {conversation_id} not found"
         )
     
-    # Verify user is member of the conversation's team
-    require_team_member(current_user, conversation.team_id, db)
-    
+    require_conversation_access(current_user, conversation, db)
+
     # Convert label_space from dict/list to LabelSpaceItem objects using Pydantic validation
     label_space_items = []
     if conversation.label_space:
@@ -251,9 +261,8 @@ def add_to_label_space(
             detail=f"Conversation {conversation_id} not found"
         )
     
-    # Verify user is member of the conversation's team
-    require_team_member(current_user, conversation.team_id, db)
-    
+    require_conversation_access(current_user, conversation, db)
+
     try:
         result = custom_taxonomy_service.add_to_label_space(
             conversation_id=conversation_id,
@@ -298,10 +307,16 @@ def freeze_label_space(
             detail=f"Conversation {conversation_id} not found"
         )
     
-    # Verify user is member of the conversation's team
-    require_team_member(current_user, conversation.team_id, db)
-    
+    require_conversation_access(current_user, conversation, db)
+
     try:
+        # Ensure we never hit a DB IntegrityError on NOT NULL team_id
+        if conversation.team_id is None:
+            raise CustomTaxonomyServiceError(
+                "This conversation has no team_id, so a team-scoped taxonomy cannot be created. "
+                "Start the conversation with a team_id (or ensure the user is a member of a team) and try again."
+            )
+
         from app.services.custom_taxonomy_service_freeze import freeze_label_space as freeze_func
         
         result = freeze_func(
@@ -321,6 +336,13 @@ def freeze_label_space(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
+        )
+    except IntegrityError:
+        # Defensive: this has shown up in prod as a 500 when team_id is NULL.
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create taxonomy due to invalid/missing team_id for this conversation."
         )
 
 
@@ -344,9 +366,8 @@ def remove_from_label_space(
             detail=f"Conversation {conversation_id} not found"
         )
     
-    # Verify user is member of the conversation's team
-    require_team_member(current_user, conversation.team_id, db)
-    
+    require_conversation_access(current_user, conversation, db)
+
     if conversation.is_frozen:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -395,9 +416,8 @@ def cancel_conversation(
             detail=f"Conversation {conversation_id} not found"
         )
     
-    # Verify user is member of the conversation's team
-    require_team_member(current_user, conversation.team_id, db)
-    
+    require_conversation_access(current_user, conversation, db)
+
     try:
         conversation = custom_taxonomy_service.reject_taxonomy(conversation_id, db)
         return conversation

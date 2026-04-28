@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_active_user, get_db
 from app.models.user import User
 from app.models.team import TeamMembership
+from app.core.permissions import check_admin
 from app.core import taxonomy
 from app.services import custom_taxonomy_service
 from app.services.taxonomy_search_service import (
@@ -145,35 +146,34 @@ def get_available_taxonomies(
         has_more_labels=True  # GBIF always has more
     ))
     
-    # Get user's team memberships
-    memberships = db.query(TeamMembership).filter(
-        TeamMembership.user_id == current_user.id
-    ).all()
-    
-    # Get custom taxonomies from user's teams and global taxonomies
     seen_taxonomy_ids = {"gbif"}  # Track to avoid duplicates
-    for membership in memberships:
-        team_taxonomies = custom_taxonomy_service.get_available_taxonomies(
-            team_id=membership.team_id,
-            user_id=current_user.id,
-            db=db,
-            status=TaxonomyStatus.ACTIVE.value  # Only active taxonomies
+
+    # Admins can operate across teams; expose all ACTIVE custom taxonomies to admins.
+    if check_admin(current_user):
+        from app.models.custom_taxonomy import CustomTaxonomy
+
+        taxonomies = (
+            db.query(CustomTaxonomy)
+            .filter(CustomTaxonomy.status == TaxonomyStatus.ACTIVE.value)
+            .order_by(CustomTaxonomy.created_at.desc())
+            .all()
         )
-        for t in team_taxonomies:
-            if t.taxonomy_id not in seen_taxonomy_ids:
-                # Extract all labels from the taxonomy_data
-                all_labels = extract_labels_from_taxonomy_data(t.taxonomy_data)
-                labels_count = len(all_labels)
-                
-                # Determine preview and has_more
-                if include_labels:
-                    labels_preview_list = all_labels[:labels_preview]
-                    has_more = labels_count > labels_preview
-                else:
-                    labels_preview_list = []
-                    has_more = labels_count > 0
-                
-                taxonomies_list.append(AvailableTaxonomy(
+        for t in taxonomies:
+            if t.taxonomy_id in seen_taxonomy_ids:
+                continue
+
+            all_labels = extract_labels_from_taxonomy_data(t.taxonomy_data)
+            labels_count = len(all_labels)
+
+            if include_labels:
+                labels_preview_list = all_labels[:labels_preview]
+                has_more = labels_count > labels_preview
+            else:
+                labels_preview_list = []
+                has_more = labels_count > 0
+
+            taxonomies_list.append(
+                AvailableTaxonomy(
                     taxonomy_id=t.taxonomy_id,
                     name=t.name,
                     type="custom",
@@ -183,8 +183,55 @@ def get_available_taxonomies(
                     status=t.status,
                     labels_count=labels_count,
                     labels_preview=labels_preview_list,
-                    has_more_labels=has_more
-                ))
+                    has_more_labels=has_more,
+                )
+            )
+            seen_taxonomy_ids.add(t.taxonomy_id)
+
+    else:
+        # Get user's team memberships
+        memberships = (
+            db.query(TeamMembership)
+            .filter(TeamMembership.user_id == current_user.id)
+            .all()
+        )
+
+        # Get custom taxonomies from user's teams and global taxonomies
+        for membership in memberships:
+            team_taxonomies = custom_taxonomy_service.get_available_taxonomies(
+                team_id=membership.team_id,
+                user_id=current_user.id,
+                db=db,
+                status=TaxonomyStatus.ACTIVE.value,  # Only active taxonomies
+            )
+            for t in team_taxonomies:
+                if t.taxonomy_id in seen_taxonomy_ids:
+                    continue
+
+                all_labels = extract_labels_from_taxonomy_data(t.taxonomy_data)
+                labels_count = len(all_labels)
+
+                if include_labels:
+                    labels_preview_list = all_labels[:labels_preview]
+                    has_more = labels_count > labels_preview
+                else:
+                    labels_preview_list = []
+                    has_more = labels_count > 0
+
+                taxonomies_list.append(
+                    AvailableTaxonomy(
+                        taxonomy_id=t.taxonomy_id,
+                        name=t.name,
+                        type="custom",
+                        description=t.description,
+                        team_id=t.team_id,
+                        is_global=t.is_global,
+                        status=t.status,
+                        labels_count=labels_count,
+                        labels_preview=labels_preview_list,
+                        has_more_labels=has_more,
+                    )
+                )
                 seen_taxonomy_ids.add(t.taxonomy_id)
     
     return AvailableTaxonomiesResponse(
@@ -232,18 +279,18 @@ def get_taxonomy_labels(
         )
     
     # Check access permissions
-    if not taxonomy_obj.is_global:
-        # Check if user is member of the taxonomy's team
-        membership = db.query(TeamMembership).filter(
-            TeamMembership.user_id == current_user.id,
-            TeamMembership.team_id == taxonomy_obj.team_id
-        ).first()
-        
-        if not membership:
-            raise HTTPException(
-                status_code=403,
-                detail="You don't have access to this taxonomy"
+    if not taxonomy_obj.is_global and not check_admin(current_user):
+        membership = (
+            db.query(TeamMembership)
+            .filter(
+                TeamMembership.user_id == current_user.id,
+                TeamMembership.team_id == taxonomy_obj.team_id,
             )
+            .first()
+        )
+
+        if not membership:
+            raise HTTPException(status_code=403, detail="You don't have access to this taxonomy")
     
     # Check if taxonomy is active
     if taxonomy_obj.status != TaxonomyStatus.ACTIVE:
@@ -415,11 +462,15 @@ def resolve_taxon(
     Returns full taxonomic hierarchy, common names, and other metadata.
     Used for validating taxon IDs and displaying detailed information.
     """
-    # Validate format (both GBIF and custom patterns)
-    if not taxonomy.TAXON_ID_PATTERN.match(id) and not taxonomy.CUSTOM_TAXON_ID_PATTERN.match(id):
+    # Validate format (digits key, alphanumeric key e.g. local:slug, or custom:uuid)
+    if not (
+        taxonomy.TAXON_ID_PATTERN.match(id)
+        or taxonomy.TAXON_ID_ALNUM_PATTERN.match(id)
+        or taxonomy.CUSTOM_TAXON_ID_PATTERN.match(id)
+    ):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid taxon ID format. Expected format: 'namespace:key' (e.g., 'gbif:2420576' or 'custom:uuid')"
+            detail=f"Invalid taxon ID format. Expected format: 'namespace:key' (e.g., 'gbif:2420576', 'local:species_slug', or 'custom:uuid')"
         )
     
     result = taxonomy.resolve_taxon_id(id, db_session=db)
@@ -443,10 +494,14 @@ def batch_resolve_taxa(
     Returns a dictionary mapping each taxon ID to its resolved data.
     If a taxon ID cannot be resolved, its value will be null.
     """
-    # Validate all IDs first
+    # Validate all IDs first (digits key, alphanumeric key, or custom:uuid)
     invalid_ids = []
     for taxon_id in request.taxon_ids:
-        if not taxonomy.TAXON_ID_PATTERN.match(taxon_id):
+        if not (
+            taxonomy.TAXON_ID_PATTERN.match(taxon_id)
+            or taxonomy.TAXON_ID_ALNUM_PATTERN.match(taxon_id)
+            or taxonomy.CUSTOM_TAXON_ID_PATTERN.match(taxon_id)
+        ):
             invalid_ids.append(taxon_id)
     
     if invalid_ids:

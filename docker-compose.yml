@@ -58,6 +58,7 @@ services:
       - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
       - PAM_CHECKPOINTS_DIR=/app/models_AL/pam/checkpoints
       - PAM_DEFAULT_DEVICE=${PAM_DEFAULT_DEVICE:-cpu}
+      - OE_YAPAT_TIMEOUT=120
     ports:
       - "8000:8000"
     volumes:

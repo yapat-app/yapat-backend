@@ -4,7 +4,7 @@ Configuration
 
 from typing import Optional, Union
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -61,8 +61,8 @@ class Settings(BaseSettings):
     # OE_YAPAT Service (Custom Taxonomy Generation)
     OE_YAPAT_SERVICE_URL: str = "http://localhost:8002"  
     OE_YAPAT_API_KEY: Optional[str] = None
-    OE_YAPAT_TIMEOUT: int = 60  # seconds
-    OE_YAPAT_RETRY_ATTEMPTS: int = 3
+    OE_YAPAT_TIMEOUT: int = 120  # seconds — needs to cover up to 6 LLM calls in oe_yapat http_api_server
+    OE_YAPAT_RETRY_ATTEMPTS: int = 2  # 2 retries max; 3× is too long when timeout is 120s
     
     # WSSED GPU Server
     WSSED_GPU_SERVER_URL: str = "http://localhost:8003"  # URL of GPU server running WSSED
@@ -79,9 +79,11 @@ class Settings(BaseSettings):
     PAM_BASE_MODEL_PATH: str = "models_AL/pam/base/base_pam_model.pt"  # Physical base model file
     PAM_CHECKPOINTS_DIR: str = "models_AL/pam/checkpoints"              # Versioned checkpoint storage
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore",  # Ignore env vars not in this model (e.g. ACTIVE_LEARNING_* from other branches)
+    )
 
 
 settings = Settings()

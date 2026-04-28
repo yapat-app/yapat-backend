@@ -30,7 +30,7 @@ class TaxonomyConversation(Base):
     __tablename__ = "taxonomy_conversations"
 
     id = Column(Integer, primary_key=True, index=True)
-    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     custom_taxonomy_id = Column(Integer, ForeignKey("custom_taxonomies.id", ondelete="SET NULL"), nullable=True)
     status = Column(String(50), nullable=False, default=ConversationStatus.IN_PROGRESS)

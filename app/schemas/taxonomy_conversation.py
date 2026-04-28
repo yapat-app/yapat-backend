@@ -27,7 +27,7 @@ class MessageResponse(BaseModel):
 
 class ConversationCreate(BaseModel):
     """Schema for creating a conversation"""
-    team_id: int = Field(..., description="Team ID for the conversation")
+    team_id: Optional[int] = Field(None, description="Team ID for the conversation. If not provided, the user's first team is used.")
 
 
 class LabelSpaceItem(BaseModel):
@@ -43,7 +43,7 @@ class LabelSpaceItem(BaseModel):
 class ConversationResponse(BaseModel):
     """Response schema for a conversation (label space building session)"""
     id: int
-    team_id: int
+    team_id: Optional[int] = None
     user_id: int
     custom_taxonomy_id: Optional[int] = None
     status: str = Field(..., description="Conversation status: in_progress, completed, cancelled")

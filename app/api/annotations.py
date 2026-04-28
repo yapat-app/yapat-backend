@@ -88,10 +88,31 @@ def create_annotation(
                         detail=f"You don't have access to use taxonomy {taxon_id}"
                     )
     
+    # Reject duplicate: same snippet already has this taxon_id
+    existing = (
+        db.query(AnnotationModel)
+        .filter(
+            AnnotationModel.snippet_id == annotation_in.snippet_id,
+            AnnotationModel.taxon_id == taxon_id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This snippet already has an annotation for this taxon ({taxon_id}). Duplicate annotations are not allowed.",
+        )
+
     # Create annotation with resolved name snapshot
-    annotation_data = annotation_in.model_dump(exclude={'species_name'})
+    annotation_data = annotation_in.model_dump(exclude={'species_name', 'display_name'})
     annotation_data['taxon_id'] = taxon_id
-    annotation_data['resolved_name_snapshot'] = resolved.get('canonical_name') or resolved.get('scientific_name')
+    # Prefer client-provided display_name (e.g. from Taxonomy Assistant) for wiki/envo/ols
+    snapshot = (
+        annotation_in.display_name
+        or resolved.get('canonical_name')
+        or resolved.get('scientific_name')
+    )
+    annotation_data['resolved_name_snapshot'] = snapshot or taxon_id
     annotation_data['user_id'] = current_user.id
     
     annotation = AnnotationModel(**annotation_data)
@@ -109,16 +130,25 @@ def create_annotations_batch(
 ):
     """
     Create multiple annotations for a single snippet.
-    
+
     Useful for multi-label annotations where multiple taxa are present
-    in the same audio snippet.
+    in the same audio snippet. Duplicate taxon_id for the same snippet are not allowed.
     """
+    snippet_id = batch_in.snippet_id
+    # Existing taxon_ids on this snippet (no duplicates allowed)
+    existing_taxon_ids = {
+        a.taxon_id
+        for a in db.query(AnnotationModel).filter(
+            AnnotationModel.snippet_id == snippet_id
+        ).all()
+    }
+    seen_in_batch = set()
     created_annotations = []
-    
+
     for annotation_in in batch_in.annotations:
         taxon_id = annotation_in.taxon_id
         resolved = None
-        
+
         # If species_name is provided, resolve it to taxon_id
         if annotation_in.species_name:
             matched = taxonomy.match_species_name(annotation_in.species_name)
@@ -165,12 +195,30 @@ def create_annotations_batch(
                             status_code=status.HTTP_403_FORBIDDEN,
                             detail=f"You don't have access to use taxonomy {taxon_id}"
                         )
-        
+
+        # Reject duplicate: already on snippet or repeated in this batch
+        if taxon_id in existing_taxon_ids:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"This snippet already has an annotation for this taxon ({taxon_id}). Duplicate annotations are not allowed.",
+            )
+        if taxon_id in seen_in_batch:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Duplicate taxon in request: {taxon_id} appears more than once.",
+            )
+        seen_in_batch.add(taxon_id)
+
         # Create annotation with resolved name snapshot
-        annotation_data = annotation_in.model_dump(exclude={'species_name'})
+        annotation_data = annotation_in.model_dump(exclude={'species_name', 'display_name'})
         annotation_data['taxon_id'] = taxon_id
         annotation_data['snippet_id'] = batch_in.snippet_id
-        annotation_data['resolved_name_snapshot'] = resolved.get('canonical_name') or resolved.get('scientific_name')
+        snapshot = (
+            annotation_in.display_name
+            or resolved.get('canonical_name')
+            or resolved.get('scientific_name')
+        )
+        annotation_data['resolved_name_snapshot'] = snapshot or taxon_id
         annotation_data['user_id'] = current_user.id
         
         annotation = AnnotationModel(**annotation_data)
