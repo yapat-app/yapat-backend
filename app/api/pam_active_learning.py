@@ -31,7 +31,7 @@ from app.schemas.pam_active_learning import (
     ALSnippetLabelsResponse,
     ALSnippetLabel,
 )
-from app.services.pam_active_learning_service import PAMActiveLearningService
+from app.services.pam_al.service import PAMActiveLearningService
 
 router = APIRouter()
 

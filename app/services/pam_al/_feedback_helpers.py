@@ -20,17 +20,19 @@ from app.models.pam_active_learning import (
 from app.services.pam_al._annotation_helpers import store_user_labels_for_snippet
 
 
-def feedback_count_since_retrain(db: Session, checkpoint_id: int) -> int:
-    """Count feedback events created after the most recent completed retrain."""
-    last_retrain = (
-        db.query(ALRetrainJob.completed_at)
-        .filter(
-            ALRetrainJob.model_checkpoint_id == checkpoint_id,
-            ALRetrainJob.status == ALRetrainStatus.COMPLETED,
-        )
-        .order_by(ALRetrainJob.completed_at.desc())
-        .first()
+def feedback_count_since_retrain(db:Session,
+        checkpoint_id: int | None,
+        dataset_id: int | None = None,
+) -> int:
+    query_last_retrain = db.query(ALRetrainJob.completed_at).filter(
+        ALRetrainJob.model_checkpoint_id == checkpoint_id,
+        ALRetrainJob.status == ALRetrainStatus.COMPLETED,
     )
+
+    if dataset_id is not None:
+        query_last_retrain = query_last_retrain.filter(ALRetrainJob.dataset_id == dataset_id)
+
+    last_retrain = query_last_retrain.order_by(ALRetrainJob.completed_at.desc()).first()
 
     cutoff = (
         last_retrain[0]
@@ -38,15 +40,17 @@ def feedback_count_since_retrain(db: Session, checkpoint_id: int) -> int:
         else datetime.min.replace(tzinfo=timezone.utc)
     )
 
-    count = (
-        db.query(func.count(ALFeedbackEvent.id))
-        .filter(
-            ALFeedbackEvent.model_checkpoint_id == checkpoint_id,
-            ALFeedbackEvent.created_at > cutoff,
-        )
-        .scalar()
+    query_count = db.query(
+        func.count(func.distinct(ALFeedbackEvent.snippet_id))
+    ).filter(
+        ALFeedbackEvent.model_checkpoint_id == checkpoint_id,
+        ALFeedbackEvent.created_at > cutoff,
     )
 
+    if dataset_id is not None:
+        query_count = query_count.filter(ALFeedbackEvent.dataset_id == dataset_id)
+
+    count = query_count.scalar()
     return int(count or 0)
 
 
@@ -173,3 +177,4 @@ def resolve_feedback_labels(
     if action == "MODIFY":
         return incoming_labels
     return []
+

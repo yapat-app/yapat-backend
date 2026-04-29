@@ -24,6 +24,9 @@ from app.models.pam_active_learning import (
     ALModelFamilyState,
     ALModelStatus,
 )
+from app.schemas.pam_active_learning import ALModelType
+from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
+from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -190,22 +193,26 @@ def ensure_dir(dir_path: str) -> str:
 def save_classifier_checkpoint(
     model,
     checkpoint_path: str,
-    hidden_dim: int,
-    dropout: float,
+    hidden_dim: int | None,
+    dropout: float | None,
     label_order: list[str],
 ) -> None:
     if model.model is None:
         raise ValueError("Cannot save checkpoint: classifier architecture has not been created.")
 
     checkpoint = {
-        "model_type": "pam_multilabel_classifier",
+        "model_type": getattr(model, "model_type", None),
         "n_dim": model.n_dim,
         "num_classes": model.num_classes,
-        "hidden_dim": hidden_dim,
-        "dropout": dropout,
         "state_dict": model.state_dict(),
         "label_order": label_order,
     }
+    if hidden_dim is not None:
+        checkpoint["hidden_dim"] = hidden_dim
+
+    if dropout is not None:
+        checkpoint["dropout"] = dropout
+
     torch.save(checkpoint, checkpoint_path)
 
 
@@ -243,3 +250,15 @@ def make_label_config_path(dataset_id: int, family_name: str, version: str, ckpt
         os.path.join(settings.PAM_CHECKPOINTS_DIR, "pam_active_learning", str(dataset_id))
     )
     return os.path.join(checkpoint_dir, f"{family_name}_{version}_labels_{ckpt_id}.json")
+
+def make_model(model_type: ALModelType | str):
+    if model_type == ALModelType.PAM_LINEAR_MULTILABEL or model_type == ALModelType.PAM_LINEAR_MULTILABEL.value:
+        return MultiLabelLinearClassifier()
+    if model_type == ALModelType.PAM_MLP_MULTILABEL or model_type == ALModelType.PAM_MLP_MULTILABEL.value:
+        return MultiLabelMLPClassifier()
+    raise ValueError(f"Unsupported model_type '{model_type}'")
+
+def load_model_from_checkpoint(model_ckpt, device: str):
+    if model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL or model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL.value:
+        return MultiLabelLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
+    return MultiLabelMLPClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
