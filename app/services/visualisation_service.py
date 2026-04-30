@@ -26,18 +26,29 @@ class VISService:
         self.db = db
 
     def get_or_create_fpv(self, body: FPVRequest) -> FPVResponse:
-        checkpoint_id = self._get_active_checkpoint_id(
+        model_ckpt = self._get_active_checkpoint(
             dataset_id=body.dataset_id,
             model_family_name=body.model_family_name,
         )
 
+        checkpoint_id = model_ckpt.id
+
+
         has_fpv = self._fpv_exists(checkpoint_id, body.run_3d)
+
         if not has_fpv:
-            self._generate_and_store_fpv(
-                dataset_id=body.dataset_id,
-                checkpoint_id=checkpoint_id,
-                run_3d=body.run_3d,
-            )
+            if model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL.value:
+                self._copy_dataset_fpv_to_checkpoint(
+                    dataset_id=body.dataset_id,
+                    model_ckpt=model_ckpt,
+                    run_3d=body.run_3d,
+                )
+            else:
+                self._generate_and_store_fpv(
+                    dataset_id=body.dataset_id,
+                    model_ckpt=model_ckpt,
+                    run_3d=body.run_3d,
+                )
 
         return self._build_fpv_response(body=body, checkpoint_id=checkpoint_id)
 
@@ -55,8 +66,10 @@ class VISService:
 
         return True
 
-    def _generate_and_store_fpv(self, dataset_id: int, checkpoint_id: int, run_3d: bool) -> None:
+    def _generate_and_store_fpv(self, dataset_id: int, model_ckpt: ALModelCheckpoint, run_3d: bool) -> None:
 
+        checkpoint_id = model_ckpt.id
+        embedding_model_id = (model_ckpt.hyperparameters or {}).get("embedding_model_id")
         predictions = (
             self.db.query(ALPrediction)
             .filter(ALPrediction.model_checkpoint_id == checkpoint_id)
@@ -77,7 +90,8 @@ class VISService:
 
         self._upsert_fpv_vis_rows(
             dataset_id=dataset_id,
-            model_checkpoint_id=checkpoint_id,
+            model_checkpoint_id = checkpoint_id,
+            embedding_model_id=embedding_model_id,
             snippet_ids=snippet_ids,
             coords=coords,
         )
@@ -203,7 +217,7 @@ class VISService:
             dataset_id=body.dataset_id,
             model_family_name=body.model_family_name,
             model_checkpoint_id=checkpoint_id,
-            embedding_model_id=None,
+            embedding_model_id=rows[0][0].embedding_model_id,
             color_filter_value=body.color_filter_value,
             visibility_filter_value=body.visibility_filter_value,
             color=FPVColorMetadata(
@@ -424,6 +438,7 @@ class VISService:
         self,
         dataset_id: int,
         model_checkpoint_id: int,
+        embedding_model_id: int,
         snippet_ids: list[int],
         coords: dict,
     ) -> None:
@@ -437,9 +452,11 @@ class VISService:
         for i, snippet_id in enumerate(snippet_ids):
             row = existing_by_snippet.get(snippet_id)
             if row is None:
+                row.embedding_model_id = embedding_model_id
                 row = FPVVis(
                     dataset_id=dataset_id,
                     model_checkpoint_id=model_checkpoint_id,
+                    embedding_model_id=embedding_model_id,
                     snippet_id=snippet_id,
                 )
                 self.db.add(row)
@@ -649,3 +666,92 @@ class VISService:
             return None, "categorical"
 
         return None, "none"
+
+    # ONLY FOR LINEAR CLASSIFIERS HAVING NO INTERMEDIATE EMBEDDINGS
+    def _copy_dataset_fpv_to_checkpoint(
+            self,
+            dataset_id: int,
+            model_ckpt: ALModelCheckpoint,
+            run_3d: bool,
+    ) -> None:
+        hyper = model_ckpt.hyperparameters or {}
+        embedding_model_id = hyper.get("embedding_model_id")
+
+        if embedding_model_id is None:
+            raise ValueError(f"Checkpoint {model_ckpt.id} missing embedding_model_id.")
+
+        dataset_body = FPVDatasetRequest(
+            dataset_id=dataset_id,
+            embedding_model_id=embedding_model_id,
+            run_3d=run_3d,
+        )
+
+        try:
+            self.get_fpv_for_dataset_embeddings(dataset_body)
+        except ValueError:
+            self.generate_fpv_for_dataset_embeddings(dataset_body)
+
+        source_rows = (
+            self.db.query(FPVVis)
+            .filter(FPVVis.dataset_id == dataset_id)
+            .filter(FPVVis.embedding_model_id == embedding_model_id)
+            .filter(FPVVis.model_checkpoint_id.is_(None))
+            .order_by(FPVVis.snippet_id.asc())
+            .all()
+        )
+
+        if not source_rows:
+            raise ValueError(
+                f"No dataset-level FPV rows available after generation for "
+                f"dataset_id={dataset_id}, embedding_model_id={embedding_model_id}."
+            )
+
+        existing_rows = (
+            self.db.query(FPVVis)
+            .filter(FPVVis.dataset_id == dataset_id)
+            .filter(FPVVis.model_checkpoint_id == model_ckpt.id)
+            .all()
+        )
+        existing_by_snippet = {row.snippet_id: row for row in existing_rows}
+
+        for src in source_rows:
+            row = existing_by_snippet.get(src.snippet_id)
+
+            if row is None:
+                row = FPVVis(
+                    dataset_id=dataset_id,
+                    model_checkpoint_id=model_ckpt.id,
+                    embedding_model_id=embedding_model_id,
+                    snippet_id=src.snippet_id,
+                )
+                self.db.add(row)
+
+            row.embedding_model_id = embedding_model_id
+
+            row.pca_2d_x = src.pca_2d_x
+            row.pca_2d_y = src.pca_2d_y
+            row.umap_2d_x = src.umap_2d_x
+            row.umap_2d_y = src.umap_2d_y
+            row.tsne_2d_x = src.tsne_2d_x
+            row.tsne_2d_y = src.tsne_2d_y
+            row.isomap_2d_x = src.isomap_2d_x
+            row.isomap_2d_y = src.isomap_2d_y
+
+            if run_3d:
+                row.pca_3d_x = src.pca_3d_x
+                row.pca_3d_y = src.pca_3d_y
+                row.pca_3d_z = src.pca_3d_z
+
+                row.umap_3d_x = src.umap_3d_x
+                row.umap_3d_y = src.umap_3d_y
+                row.umap_3d_z = src.umap_3d_z
+
+                row.tsne_3d_x = src.tsne_3d_x
+                row.tsne_3d_y = src.tsne_3d_y
+                row.tsne_3d_z = src.tsne_3d_z
+
+                row.isomap_3d_x = src.isomap_3d_x
+                row.isomap_3d_y = src.isomap_3d_y
+                row.isomap_3d_z = src.isomap_3d_z
+
+        self.db.commit()

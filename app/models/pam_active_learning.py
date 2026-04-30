@@ -9,6 +9,7 @@ from sqlalchemy.sql import func
 import enum
 
 from app.database import Base
+from app.schemas.pam_active_learning import ALModelType
 
 
 # ── Enums ──────────────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ class ALModelCheckpoint(Base):
     version = Column(String, nullable=False, default="v0")
     checkpoint_path = Column(String, nullable=False)  # filesystem path to weights
     label_config_path = Column(String, nullable=False)
-    model_type = Column(String, nullable=False, default="al_classifier")
+    model_type = Column(String, nullable=False, default=ALModelType.PAM_LINEAR_MULTILABEL)
     hyperparameters = Column(JSON, nullable=True)
     is_base = Column(Integer, nullable=False, default=0)  # 1 = base model entry
     parent_checkpoint_id = Column(
