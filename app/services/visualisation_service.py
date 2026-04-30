@@ -1,7 +1,8 @@
 import numpy as np
 from sqlalchemy.orm import Session
 
-from app.models.pam_active_learning import ALPrediction, ALModelFamilyState
+from app.models.pam_active_learning import ALPrediction, ALModelFamilyState, ALModelCheckpoint
+from app.schemas.pam_active_learning import ALModelType
 from app.models.embedding import EmbeddingVector, SnippetSet
 from app.models.snippet import Snippet
 from app.models.visualisation import FPVVis
@@ -365,7 +366,7 @@ class VISService:
             projections_3d=projections_3d if has_any_3d else None,
         )
 
-    def _get_active_checkpoint_id(self, dataset_id: int, model_family_name: str) -> int:
+    def _get_active_checkpoint(self, dataset_id: int, model_family_name: str) -> ALModelCheckpoint:
         family_state = (
             self.db.query(ALModelFamilyState)
             .filter(
@@ -375,20 +376,22 @@ class VISService:
             .first()
         )
 
-        if family_state is None:
-            raise ValueError(
-                f"No model family state found for dataset_id={dataset_id}, "
-                f"model_family_name='{model_family_name}'."
-            )
-
-        checkpoint_id = family_state.active_model_checkpoint_id
-        if checkpoint_id is None:
+        if family_state is None or family_state.active_model_checkpoint_id is None:
             raise ValueError(
                 f"No active checkpoint set for dataset_id={dataset_id}, "
                 f"model_family_name='{model_family_name}'."
             )
 
-        return checkpoint_id
+        ckpt = (
+            self.db.query(ALModelCheckpoint)
+            .filter(ALModelCheckpoint.id == family_state.active_model_checkpoint_id)
+            .first()
+        )
+
+        if ckpt is None:
+            raise ValueError(f"Active checkpoint {family_state.active_model_checkpoint_id} not found.")
+
+        return ckpt
 
     def _compute_visualizations(self, X: np.ndarray, run_3d: bool) -> dict:
         coords = {}
