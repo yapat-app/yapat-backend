@@ -55,7 +55,6 @@ def build_inference_rows(
     Compute prediction rows for all snippets and attach acquisition scores
     for unlabeled snippets.
     """
-    uncertainty_scores = uncertainty(probs)
 
     unlabeled_indices = [i for i, sid in enumerate(snippet_ids) if sid not in labeled_snippet_ids]
     labeled_indices = [i for i, sid in enumerate(snippet_ids) if sid in labeled_snippet_ids]
@@ -67,12 +66,14 @@ def build_inference_rows(
         (0, embeddings.shape[1]), device=embeddings.device
     )
 
+    uncertainty_scores_u = uncertainty(probs[unlabeled_indices]) if unlabeled_indices else torch.empty(
+        0, device=embeddings.device
+    )
+
     diversity_scores_u = diversity(z_u, z_l)
     density_scores_u = density(z_u, k=density_k)
     composite_scores_u = composite(
-        uncertainty_scores=uncertainty_scores[unlabeled_indices] if unlabeled_indices else torch.empty(
-            0, device=embeddings.device
-        ),
+        uncertainty_scores=uncertainty_scores_u,
         diversity_scores=diversity_scores_u,
         density_scores=density_scores_u,
         wu=wu,
@@ -80,11 +81,13 @@ def build_inference_rows(
         wr=wr,
     )
 
+    uncertainty_full = [None] * len(snippet_ids)
     diversity_full = [None] * len(snippet_ids)
     density_full = [None] * len(snippet_ids)
     composite_full = [None] * len(snippet_ids)
 
     for pos, idx in enumerate(unlabeled_indices):
+        uncertainty_full[idx] = float(uncertainty_scores_u[pos].item())
         diversity_full[idx] = float(diversity_scores_u[pos].item())
         density_full[idx] = float(density_scores_u[pos].item())
         composite_full[idx] = float(composite_scores_u[pos].item())
@@ -105,7 +108,7 @@ def build_inference_rows(
                 embedding=embeddings[i].detach().cpu().tolist(),
                 predicted_labels=pred_labels,
                 predicted_probabilities=prob_dict,
-                uncertainty=float(uncertainty_scores[i].item()),
+                uncertainty=uncertainty_full[i],
                 diversity=diversity_full[i],
                 density=density_full[i],
                 composite_score=composite_full[i],
