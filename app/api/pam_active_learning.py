@@ -9,6 +9,8 @@ REST API for the PAM-specific active learning flow:
   - Job polling
 """
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -21,6 +23,7 @@ from app.schemas.pam_active_learning import (
     ALRunInferenceRequest,
     ALFeedbackSubmit,
     ALFeedbackResponse,
+    ALFeedbackCountResponse,
     ALRetrainRequest,
     ALStats,
     ALTrainFromScratchRequest,
@@ -91,6 +94,47 @@ def get_checkpoint(
     return ckpt
 
 
+@router.get("/checkpoints/{checkpoint_id}/species", response_model=List[str])
+def get_checkpoint_species(
+    checkpoint_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return the species list stored in the checkpoint's label config file."""
+    from app.services.pam_al._checkpoint_helpers import load_species_from_label_config
+
+    svc = PAMActiveLearningService(db)
+    ckpt = svc._get_checkpoint(checkpoint_id)
+    if ckpt is None:
+        raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found.")
+    if not ckpt.label_config_path:
+        raise HTTPException(status_code=404, detail="Checkpoint has no label config path.")
+    try:
+        return load_species_from_label_config(ckpt.label_config_path)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/species-default", response_model=List[str])
+def get_default_species(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return the species list from the user-study labels file."""
+    from app.config import settings
+    from app.services.pam_al._checkpoint_helpers import load_species_from_label_config
+
+    default_path = os.path.join(settings.DATA_ROOT, "labels.json")
+    if not os.path.isfile(default_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Labels file not found at {default_path}.",
+        )
+    try:
+        return load_species_from_label_config(default_path)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 # ============ INFERENCE + SCORING ============
 
 @router.post(
@@ -120,6 +164,24 @@ def get_or_create_predictions(
 
 
 # ============ FEEDBACK ============
+
+@router.get(
+    "/feedback-count",
+    response_model=ALFeedbackCountResponse,
+    status_code=status.HTTP_200_OK,
+)
+def get_feedback_count(
+    dataset_id: int = Query(..., description="Dataset ID"),
+    model_family_name: str = Query(..., description="Model family name"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Current feedback counter used for auto-retrain gating."""
+    service = PAMActiveLearningService(db)
+    try:
+        return service.get_feedback_count_since_retrain(dataset_id, model_family_name)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load feedback count: {e}")
 
 @router.post(
     "/feedback",

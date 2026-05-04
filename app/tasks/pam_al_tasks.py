@@ -17,6 +17,7 @@ Flow
 """
 
 import logging
+from datetime import datetime, timezone
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
@@ -31,6 +32,38 @@ logger = logging.getLogger(__name__)
 def _make_service(db):
     from app.services.pam_active_learning_service import PAMActiveLearningService
     return PAMActiveLearningService(db)
+
+
+def _ensure_job_failed(job_id: int, error: Exception) -> None:
+    """
+    Ensure the retrain job is in a terminal FAILED state.
+
+    Uses a fresh DB session so failures can still be recorded after exceptions.
+    """
+    from app.models.pam_active_learning import ALRetrainJob, ALRetrainStatus
+
+    db2 = SessionLocal()
+    try:
+        job = db2.query(ALRetrainJob).filter(ALRetrainJob.id == job_id).first()
+        if job is None:
+            logger.warning(
+                "_ensure_job_failed: job %d not found — likely already cascade-deleted "
+                "(restart the service to apply the mark-instead-of-delete fix)",
+                job_id,
+            )
+            return
+        if job.status in {ALRetrainStatus.COMPLETED, ALRetrainStatus.FAILED}:
+            return  # already in a terminal state
+        job.status = ALRetrainStatus.FAILED
+        job.error_message = str(error)
+        job.completed_at = datetime.now(timezone.utc)
+        db2.commit()
+        logger.info("_ensure_job_failed: marked job %d as FAILED", job_id)
+    except Exception:
+        db2.rollback()
+        logger.exception("_ensure_job_failed: could not mark job %d as FAILED", job_id)
+    finally:
+        db2.close()
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +101,7 @@ def pam_al_train_from_scratch(self, checkpoint_id: int, job_id: int):
             "pam_al_train_from_scratch failed: checkpoint_id=%d job_id=%d error=%s",
             checkpoint_id, job_id, str(e),
         )
+        _ensure_job_failed(job_id, e)
         return {"status": "failed", "checkpoint_id": checkpoint_id, "job_id": job_id, "error": str(e)}
 
     finally:
@@ -109,6 +143,7 @@ def pam_al_manual_retrain(self, checkpoint_id: int, job_id: int):
             "pam_al_manual_retrain failed: checkpoint_id=%d job_id=%d error=%s",
             checkpoint_id, job_id, str(e),
         )
+        _ensure_job_failed(job_id, e)
         return {"status": "failed", "checkpoint_id": checkpoint_id, "job_id": job_id, "error": str(e)}
 
     finally:
@@ -152,6 +187,7 @@ def pam_al_auto_retrain(self, checkpoint_id: int, job_id: int):
             "pam_al_auto_retrain failed: checkpoint_id=%d job_id=%d error=%s",
             checkpoint_id, job_id, str(e),
         )
+        _ensure_job_failed(job_id, e)
         return {"status": "failed", "checkpoint_id": checkpoint_id, "job_id": job_id, "error": str(e)}
 
     finally:

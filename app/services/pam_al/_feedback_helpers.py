@@ -127,6 +127,36 @@ def has_active_retrain_job(db: Session, checkpoint_id: int) -> bool:
     )
 
 
+def has_pending_child_retrain(db: Session, parent_checkpoint_id: int) -> bool:
+    """Return True if any child checkpoint has a PENDING/RUNNING retrain job."""
+    from app.models.pam_active_learning import ALModelCheckpoint
+
+    return (
+        db.query(ALRetrainJob)
+        .join(ALModelCheckpoint, ALRetrainJob.model_checkpoint_id == ALModelCheckpoint.id)
+        .filter(
+            ALModelCheckpoint.parent_checkpoint_id == parent_checkpoint_id,
+            ALRetrainJob.status.in_([ALRetrainStatus.PENDING, ALRetrainStatus.RUNNING]),
+        )
+        .first()
+        is not None
+    )
+
+
+def has_failed_child_retrain(db: Session, parent_checkpoint_id: int) -> bool:
+    """Return True if the most recent child retrain ended in FAILED status."""
+    from app.models.pam_active_learning import ALModelCheckpoint
+
+    latest_child_job = (
+        db.query(ALRetrainJob)
+        .join(ALModelCheckpoint, ALRetrainJob.model_checkpoint_id == ALModelCheckpoint.id)
+        .filter(ALModelCheckpoint.parent_checkpoint_id == parent_checkpoint_id)
+        .order_by(ALRetrainJob.created_at.desc())
+        .first()
+    )
+    return latest_child_job is not None and latest_child_job.status == ALRetrainStatus.FAILED
+
+
 def collect_predicted_labels_for_snippet(
     predictions: list[ALPrediction],
 ) -> list[str]:

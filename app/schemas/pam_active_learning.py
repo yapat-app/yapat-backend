@@ -49,7 +49,7 @@ class ALCheckpointCreate(BaseModel):
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
     version: str = Field(default="v0", description="Version tag")
     checkpoint_path: Optional[str] = Field(None, description="Filesystem path to weights (optional)")
-    model_type: str = Field(default="pam_multi_label_classifier", description="Classifier type identifier")
+    model_type: str = Field(default=ALModelType.PAM_LINEAR_MULTILABEL, description="Classifier type identifier")
     hyperparameters: Optional[Dict[str, Any]] = None
     is_base: bool = Field(default=False, description="Mark as base model entry (uses shared base weights)")
     parent_checkpoint_id: Optional[int] = Field(None, description="Parent checkpoint ID for version lineage")
@@ -200,6 +200,14 @@ class ALFeedbackSubmit(BaseModel):
 
     notes: Optional[str] = None
     user_id: Optional[int] = None
+    persist_annotations: bool = Field(
+        default=True,
+        description=(
+            "If true, confirmed labels are also persisted into the canonical `annotations` table. "
+            "Set false for study flows where labels are dataset-specific codes and taxonomy resolution "
+            "would add avoidable latency."
+        ),
+    )
 
 
 class ALFeedbackResponse(BaseModel):
@@ -214,9 +222,21 @@ class ALFeedbackResponse(BaseModel):
     created_at: datetime
     feedback_count_since_retrain: int
     retrain_triggered: bool
+    last_retrain_failed: bool = False
+    auto_retrain_checkpoint_id: Optional[int] = None
+    auto_retrain_job_id: Optional[int] = None
 
     class Config:
         from_attributes = True
+
+
+class ALFeedbackCountResponse(BaseModel):
+    """Current feedback counter used for auto-retrain gating."""
+    dataset_id: int
+    model_family_name: str
+    active_checkpoint_id: Optional[int] = None
+    feedback_count_since_retrain: int
+    retrain_after: int
 
 
 # ── Retrain ────────────────────────────────────────────────────────────

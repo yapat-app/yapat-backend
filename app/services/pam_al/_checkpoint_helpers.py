@@ -82,7 +82,7 @@ def register_checkpoint(
     version: str = "v0",
     checkpoint_path: Optional[str] = None,
     label_config_path: Optional[str] = None,
-    model_type: str = "pam_multilabel_classifier",
+    model_type: str = ALModelType.PAM_LINEAR_MULTILABEL.value,
     hyperparameters: Optional[Dict[str, Any]] = None,
     is_base: bool = False,
     parent_checkpoint_id: Optional[int] = None,
@@ -252,6 +252,11 @@ def make_label_config_path(dataset_id: int, family_name: str, version: str, ckpt
     return os.path.join(checkpoint_dir, f"{family_name}_{version}_labels_{ckpt_id}.json")
 
 def make_model(model_type: ALModelType | str):
+    # Backward compatibility:
+    # older checkpoints used 'pam_multilabel_classifier' (and sometimes the typo
+    # 'pam_multi_label_classifier') as the linear model identifier.
+    if model_type in {"pam_multilabel_classifier", "pam_multi_label_classifier"}:
+        return MultiLabelLinearClassifier()
     if model_type == ALModelType.PAM_LINEAR_MULTILABEL or model_type == ALModelType.PAM_LINEAR_MULTILABEL.value:
         return MultiLabelLinearClassifier()
     if model_type == ALModelType.PAM_MLP_MULTILABEL or model_type == ALModelType.PAM_MLP_MULTILABEL.value:
@@ -259,6 +264,8 @@ def make_model(model_type: ALModelType | str):
     raise ValueError(f"Unsupported model_type '{model_type}'")
 
 def load_model_from_checkpoint(model_ckpt, device: str):
+    if model_ckpt.model_type in {"pam_multilabel_classifier", "pam_multi_label_classifier"}:
+        return MultiLabelLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
     if model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL or model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL.value:
         return MultiLabelLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
     return MultiLabelMLPClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
