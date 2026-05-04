@@ -416,6 +416,7 @@ class PAMActiveLearningService:
                 "active_checkpoint_id": None,
                 "feedback_count_since_retrain": feedback_count,
                 "retrain_after": RETRAIN_AFTER,
+                "retrain_pending": False,
             }
 
         # Reset the counter once a child retrain is queued/running.
@@ -426,6 +427,7 @@ class PAMActiveLearningService:
                 "active_checkpoint_id": model_ckpt.id,
                 "feedback_count_since_retrain": 0,
                 "retrain_after": RETRAIN_AFTER,
+                "retrain_pending": True,
             }
 
         feedback_count = fb_h.feedback_count_since_retrain(self.db, model_ckpt.id)
@@ -435,6 +437,7 @@ class PAMActiveLearningService:
             "active_checkpoint_id": model_ckpt.id,
             "feedback_count_since_retrain": feedback_count,
             "retrain_after": RETRAIN_AFTER,
+            "retrain_pending": False,
         }
 
     def _try_store_final_annotations(

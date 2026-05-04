@@ -237,6 +237,7 @@ class ALFeedbackCountResponse(BaseModel):
     active_checkpoint_id: Optional[int] = None
     feedback_count_since_retrain: int
     retrain_after: int
+    retrain_pending: bool = False
 
 
 # ── Retrain ────────────────────────────────────────────────────────────
