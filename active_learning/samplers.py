@@ -11,6 +11,7 @@ def uncertainty(P: torch.Tensor) -> torch.Tensor:
     Multi-label uncertainty: mean binary entropy across classes.
     P: [N, C] sigmoid probabilities
     """
+    # H(p) = -[p log p + (1-p) log(1-p)]
     return -(P * torch.log(P + 1e-12) + (1 - P) * torch.log(1 - P + 1e-12)).mean(dim=1)
 
 def diversity(Z_u: torch.Tensor, Z_l: torch.Tensor) -> torch.Tensor:
