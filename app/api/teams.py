@@ -100,13 +100,14 @@ def create_team(
     db.commit()
     db.refresh(team)
     
-    # Add creator as team owner
-    membership = TeamMembershipModel(
-        team_id=team.id,
-        user_id=current_user.id,
-        role=TeamRole.OWNER
-    )
-    db.add(membership)
+    # Add creator as team owner (but not for admins creating teams for others)
+    if current_user.role != UserRole.ADMIN:
+        membership = TeamMembershipModel(
+            team_id=team.id,
+            user_id=current_user.id,
+            role=TeamRole.OWNER
+        )
+        db.add(membership)
     
     # If dataset_ids were provided, assign them to the new team
     if datasets:
