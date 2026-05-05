@@ -684,7 +684,22 @@ class PAMActiveLearningService:
 
             label_order = getattr(model, "label_order", None) or hyper.get("label_order")
             if not label_order:
-                raise ValueError(f"No label_order found for checkpoint {model_ckpt.id}.")
+                # Backward compat: allow label order to come from the checkpoint label config file.
+                if getattr(model_ckpt, "label_config_path", None):
+                    try:
+                        label_order = ckpt_h.load_species_from_label_config(model_ckpt.label_config_path)
+                        model_ckpt.hyperparameters = {**(model_ckpt.hyperparameters or {}), "label_order": label_order}
+                        self.db.commit()
+                    except Exception as e:
+                        raise ValueError(
+                            f"No label_order found for checkpoint {model_ckpt.id} and failed to load "
+                            f"label_config_path='{model_ckpt.label_config_path}': {e}"
+                        )
+                else:
+                    raise ValueError(
+                        f"No label_order found for checkpoint {model_ckpt.id}. "
+                        "Provide hyperparameters.label_order or set label_config_path."
+                    )
 
             labeled_ids = ann_h.get_labeled_snippet_ids_for_dataset(self.db, model_ckpt.dataset_id)
             inf_h.run_and_store_inference(
