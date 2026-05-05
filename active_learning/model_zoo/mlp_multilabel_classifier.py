@@ -263,6 +263,29 @@ class MultiLabelMLPClassifier(nn.Module):
     def load_from_checkpoint(cls, checkpoint_path: str, device: str = "cpu"):
         checkpoint = torch.load(checkpoint_path, map_location=device)
 
+        # Backward compatibility: older checkpoints may not store shape metadata.
+        if "n_dim" not in checkpoint or "num_classes" not in checkpoint or "hidden_dim" not in checkpoint:
+            sd = checkpoint.get("state_dict") or {}
+            w0 = sd.get("model.0.weight")  # first Linear(hidden_dim, n_dim)
+            w3 = sd.get("model.3.weight")  # last Linear(num_classes, hidden_dim)
+            if w0 is None or w3 is None:
+                # Try to find first/last 2D weight tensors in order.
+                weights = [
+                    v for k, v in sd.items()
+                    if isinstance(v, torch.Tensor) and v.ndim == 2 and k.endswith("weight")
+                ]
+                if len(weights) >= 2:
+                    w0 = w0 or weights[0]
+                    w3 = w3 or weights[-1]
+            if w0 is None or w3 is None:
+                raise KeyError("n_dim")
+            checkpoint["hidden_dim"] = int(w0.shape[0])
+            checkpoint["n_dim"] = int(w0.shape[1])
+            checkpoint["num_classes"] = int(w3.shape[0])
+
+        if "dropout" not in checkpoint:
+            checkpoint["dropout"] = 0.0
+
         model = cls()
         model.create_classifier(
             n_dim=checkpoint["n_dim"],

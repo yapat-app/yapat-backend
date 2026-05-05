@@ -222,6 +222,21 @@ class MultiLabelLinearClassifier(nn.Module):
     def load_from_checkpoint(cls, checkpoint_path: str, device: str = "cpu"):
         checkpoint = torch.load(checkpoint_path, map_location=device)
 
+        # Backward compatibility: older checkpoints may not store n_dim/num_classes.
+        if "n_dim" not in checkpoint or "num_classes" not in checkpoint:
+            sd = checkpoint.get("state_dict") or {}
+            w = sd.get("model.weight")
+            if w is None:
+                # Fall back to any weight tensor we can find.
+                for k, v in sd.items():
+                    if isinstance(v, torch.Tensor) and v.ndim == 2 and k.endswith("weight"):
+                        w = v
+                        break
+            if w is None:
+                raise KeyError("n_dim")
+            checkpoint["num_classes"] = int(w.shape[0])
+            checkpoint["n_dim"] = int(w.shape[1])
+
         model = cls()
         model.create_classifier(
             n_dim=checkpoint["n_dim"],
