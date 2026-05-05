@@ -643,7 +643,33 @@ class PAMActiveLearningService:
         hyper = model_ckpt.hyperparameters or {}
         embedding_model_id = hyper.get("embedding_model_id")
         if embedding_model_id is None:
-            raise ValueError(f"Checkpoint {model_ckpt.id} is missing embedding_model_id in hyperparameters.")
+            # Backward-compat / manual checkpoint registration:
+            # if embedding_model_id wasn't stored on the checkpoint, infer it from the most
+            # recent COMPLETED embedding job for this dataset + snippet_set.
+            from app.models.embedding import EmbeddingJob, EmbeddingJobStatus
+
+            job = (
+                self.db.query(EmbeddingJob)
+                .filter(
+                    EmbeddingJob.dataset_id == body.dataset_id,
+                    EmbeddingJob.snippet_set_id == body.snippet_set_id,
+                    EmbeddingJob.status == EmbeddingJobStatus.COMPLETED,
+                )
+                .order_by(EmbeddingJob.created_at.desc())
+                .first()
+            )
+            if job is None:
+                raise ValueError(
+                    f"Checkpoint {model_ckpt.id} is missing embedding_model_id in hyperparameters, "
+                    f"and no COMPLETED embedding job found for dataset_id={body.dataset_id} "
+                    f"snippet_set_id={body.snippet_set_id}. Generate embeddings first, or re-register "
+                    f"the checkpoint with hyperparameters.embedding_model_id set."
+                )
+
+            embedding_model_id = job.embedding_model_id
+            # Persist the inferred embedding_model_id so future requests don't need the lookup.
+            model_ckpt.hyperparameters = {**hyper, "embedding_model_id": int(embedding_model_id)}
+            self.db.commit()
 
         threshold, density_k, wu, wd, wr = inf_h.resolve_inference_params(
             body.threshold, body.density_k, body.composite_wu, body.composite_wd, body.composite_wr,
