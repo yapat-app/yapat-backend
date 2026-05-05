@@ -3,8 +3,9 @@ Team endpoints
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List
+from sqlalchemy import func
 
 from app.api.deps import get_db, get_current_active_user
 from app.schemas.team import (
@@ -18,6 +19,7 @@ from app.models.team import (
 )
 from app.models.user import User, User as UserModel, UserRole
 from app.models.dataset import Dataset as DatasetModel, user_datasets
+from app.models.recording import Recording
 from app.core.permissions import require_team_owner, require_team_member
 from datetime import datetime, timezone, timedelta
 
@@ -184,7 +186,37 @@ def get_available_datasets(
         
         datasets = list(dataset_dict.values())
     
-    return datasets
+    # Add recording count for each dataset (used by frontend "Audio files" metric)
+    dataset_ids = [ds.id for ds in datasets]
+    if dataset_ids:
+        recording_counts = (
+            db.query(Recording.dataset_id, func.count(Recording.id).label("count"))
+            .filter(Recording.dataset_id.in_(dataset_ids))
+            .group_by(Recording.dataset_id)
+            .all()
+        )
+        count_map = {ds_id: count for ds_id, count in recording_counts}
+    else:
+        count_map = {}
+
+    result: List[DatasetSchema] = []
+    for dataset in datasets:
+        dataset_dict = {
+            "id": dataset.id,
+            "name": dataset.name,
+            "description": dataset.description,
+            "source_uri": dataset.source_uri,
+            "team_id": dataset.team_id,
+            "dataset_type": dataset.dataset_type,
+            "default_snippet_set_id": getattr(dataset, "default_snippet_set_id", None),
+            "created_at": dataset.created_at,
+            "updated_at": dataset.updated_at,
+            "recording_count": count_map.get(dataset.id, 0),
+            "is_ready_for_feed": False,
+        }
+        result.append(DatasetSchema(**dataset_dict))
+
+    return result
 
 
 @router.get("/", response_model=List[Team])
@@ -200,10 +232,17 @@ def read_teams(
     - All other users only see teams they are a member of.
     """
     if current_user.role == UserRole.ADMIN:
-        teams = db.query(TeamModel).offset(skip).limit(limit).all()
+        teams = (
+            db.query(TeamModel)
+            .options(joinedload(TeamModel.datasets))
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
     else:
         teams = (
             db.query(TeamModel)
+            .options(joinedload(TeamModel.datasets))
             .join(TeamMembershipModel, TeamModel.id == TeamMembershipModel.team_id)
             .filter(TeamMembershipModel.user_id == current_user.id)
             .offset(skip)
