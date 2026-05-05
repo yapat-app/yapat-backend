@@ -126,7 +126,9 @@ def get_checkpoint_species(
     try:
         return load_species_from_label_config(ckpt.label_config_path)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        # The checkpoint exists and the file might exist, but its contents are invalid.
+        # Treat this as a client/configuration error, not "not found".
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post(

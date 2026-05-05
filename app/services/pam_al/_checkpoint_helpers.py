@@ -231,9 +231,17 @@ def load_species_from_label_config(label_config_path: str) -> List[str]:
     with open(label_config_path, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
+    # Backward compatibility:
+    # Some deployments historically used {"labels": [...]} instead of
+    # {"species_list": [...]}.
     species_list = payload.get("species_list")
+    if species_list is None:
+        species_list = payload.get("labels")
+
     if not isinstance(species_list, list) or len(species_list) == 0:
-        raise ValueError("Label config must contain a non-empty 'species_list' field.")
+        raise ValueError(
+            "Label config must contain a non-empty 'species_list' field (or legacy 'labels' field)."
+        )
 
     return [str(s) for s in species_list]
 
