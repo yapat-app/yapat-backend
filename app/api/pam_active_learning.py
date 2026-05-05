@@ -75,9 +75,23 @@ def list_checkpoints(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """List all registered PAM model checkpoints."""
+    """List active PAM model checkpoints (one per model family).
+
+    This returns only checkpoints referenced by ALModelFamilyState.active_model_checkpoint_id.
+    """
     svc = PAMActiveLearningService(db)
     return svc.list_active_family_checkpoints(dataset_id=dataset_id)
+
+
+@router.get("/checkpoints/all", response_model=List[ALCheckpointResponse])
+def list_all_checkpoints(
+    dataset_id: Optional[int] = Query(None, description="Filter by dataset"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List all registered PAM model checkpoints (including inactive)."""
+    svc = PAMActiveLearningService(db)
+    return svc.list_checkpoints(dataset_id=dataset_id)
 
 
 @router.get("/checkpoints/{checkpoint_id}", response_model=ALCheckpointResponse)
@@ -114,6 +128,47 @@ def get_checkpoint_species(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+
+@router.post(
+    "/checkpoints/{checkpoint_id}/activate",
+    status_code=status.HTTP_200_OK,
+)
+def activate_checkpoint(
+    checkpoint_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Mark a registered checkpoint as the active checkpoint for its (dataset_id, model_family_name).
+
+    This affects which checkpoint is used by inference/feedback/retrain flows that resolve the
+    active model via ALModelFamilyState.
+    """
+    from app.models.pam_active_learning import ALModelCheckpoint, ALModelStatus
+    from app.services.pam_al import _checkpoint_helpers as ckpt_h
+
+    ckpt = (
+        db.query(ALModelCheckpoint)
+        .filter(ALModelCheckpoint.id == checkpoint_id)
+        .one_or_none()
+    )
+    if ckpt is None:
+        raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found.")
+
+    if ckpt.status != ALModelStatus.AVAILABLE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Checkpoint {checkpoint_id} is not AVAILABLE (status={ckpt.status}).",
+        )
+
+    ckpt_h.set_active_family_checkpoint(db, ckpt.dataset_id, ckpt.model_family_name, ckpt.id)
+    db.commit()
+
+    return {
+        "dataset_id": ckpt.dataset_id,
+        "model_family_name": ckpt.model_family_name,
+        "active_checkpoint_id": ckpt.id,
+    }
 
 @router.get("/species-default", response_model=List[str])
 def get_default_species(
