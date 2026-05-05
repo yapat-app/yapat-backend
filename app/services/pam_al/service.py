@@ -680,26 +680,67 @@ class PAMActiveLearningService:
         if not predictions or body.force_refresh:
             X, snippet_rows = data_h.load_embeddings(self.db, body.snippet_set_id, embedding_model_id)
 
-            model = ckpt_h.load_model_from_checkpoint(model_ckpt, device=body.device)
-
-            label_order = getattr(model, "label_order", None) or hyper.get("label_order")
-            if not label_order:
-                # Backward compat: allow label order to come from the checkpoint label config file.
-                if getattr(model_ckpt, "label_config_path", None):
-                    try:
-                        label_order = ckpt_h.load_species_from_label_config(model_ckpt.label_config_path)
-                        model_ckpt.hyperparameters = {**(model_ckpt.hyperparameters or {}), "label_order": label_order}
-                        self.db.commit()
-                    except Exception as e:
-                        raise ValueError(
-                            f"No label_order found for checkpoint {model_ckpt.id} and failed to load "
-                            f"label_config_path='{model_ckpt.label_config_path}': {e}"
-                        )
-                else:
+            # Resolve label order *before* loading the model so we can fall back to
+            # rebuilding the classifier when legacy checkpoint metadata is missing.
+            label_order = hyper.get("label_order")
+            if not label_order and getattr(model_ckpt, "label_config_path", None):
+                try:
+                    label_order = ckpt_h.load_species_from_label_config(model_ckpt.label_config_path)
+                    model_ckpt.hyperparameters = {**(model_ckpt.hyperparameters or {}), "label_order": label_order}
+                    self.db.commit()
+                except Exception as e:
                     raise ValueError(
-                        f"No label_order found for checkpoint {model_ckpt.id}. "
-                        "Provide hyperparameters.label_order or set label_config_path."
+                        f"Failed to load label_config_path='{model_ckpt.label_config_path}' "
+                        f"for checkpoint {model_ckpt.id}: {e}"
                     )
+
+            # Load the model; if legacy checkpoint is missing metadata like n_dim,
+            # rebuild the architecture from embeddings + label_order and load weights.
+            try:
+                model = ckpt_h.load_model_from_checkpoint(model_ckpt, device=body.device)
+            except KeyError as e:
+                if str(e).strip("'\"") != "n_dim":
+                    raise
+                if not label_order:
+                    raise ValueError(
+                        f"Checkpoint {model_ckpt.id} is missing n_dim metadata and no label_order is available. "
+                        "Set checkpoint.label_config_path (recommended) or hyperparameters.label_order."
+                    )
+                import torch
+
+                payload = torch.load(model_ckpt.checkpoint_path, map_location=body.device)
+                state_dict = payload.get("state_dict") if isinstance(payload, dict) else None
+                if not isinstance(state_dict, dict):
+                    raise ValueError(
+                        f"Legacy checkpoint {model_ckpt.id} missing 'state_dict'; cannot rebuild classifier."
+                    )
+
+                model = ckpt_h.make_model(model_ckpt.model_type)
+                model.create_classifier(
+                    n_dim=int(X.shape[1]),
+                    num_classes=len(label_order),
+                    hidden_dim=int((model_ckpt.hyperparameters or {}).get("hidden_dim"))
+                    if (model_ckpt.hyperparameters or {}).get("hidden_dim") is not None
+                    else None,
+                    dropout=float((model_ckpt.hyperparameters or {}).get("dropout"))
+                    if (model_ckpt.hyperparameters or {}).get("dropout") is not None
+                    else None,
+                )
+                model.load_state_dict(state_dict)
+                model.to(body.device)
+                model.eval()
+                model.label_order = label_order
+
+            # If the checkpoint stored label order in the .pt file, prefer it (and persist).
+            label_order = getattr(model, "label_order", None) or label_order
+            if not label_order:
+                raise ValueError(
+                    f"No label_order found for checkpoint {model_ckpt.id}. "
+                    "Provide hyperparameters.label_order or set label_config_path."
+                )
+            if not hyper.get("label_order"):
+                model_ckpt.hyperparameters = {**(model_ckpt.hyperparameters or {}), "label_order": label_order}
+                self.db.commit()
 
             labeled_ids = ann_h.get_labeled_snippet_ids_for_dataset(self.db, model_ckpt.dataset_id)
             inf_h.run_and_store_inference(
