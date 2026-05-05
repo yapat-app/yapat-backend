@@ -174,20 +174,22 @@ def activate_checkpoint(
 def get_default_species(
     current_user: User = Depends(get_current_active_user),
 ):
-    """Return the species list from the user-study labels file."""
+    """Return the species list from the user-study labels file.
+
+    If the labels file is not present in this deployment, return an empty list
+    (HTTP 200) instead of 404 so the frontend degrades gracefully without
+    spamming this endpoint.
+    """
     from app.config import settings
     from app.services.pam_al._checkpoint_helpers import load_species_from_label_config
 
     default_path = os.path.join(settings.DATA_ROOT, "labels.json")
     if not os.path.isfile(default_path):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Labels file not found at {default_path}.",
-        )
+        return []
     try:
         return load_species_from_label_config(default_path)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError:
+        return []
 
 
 # ============ INFERENCE + SCORING ============
