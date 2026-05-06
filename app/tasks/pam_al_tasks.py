@@ -228,7 +228,12 @@ def pam_al_create_predictions(self, job_id: int, inference_body: dict):
 
         # Force refresh so the job is deterministic.
         inference_body = {**(inference_body or {}), "force_refresh": True}
-        svc.get_or_create_predictions(inference_body)
+
+        # Service method expects a request object with attribute access.
+        from app.schemas.pam_active_learning import ALRunInferenceRequest
+
+        req = ALRunInferenceRequest(**inference_body)
+        svc.get_or_create_predictions(req)
 
         job.status = ALRetrainStatus.COMPLETED
         job.completed_at = datetime.now(timezone.utc)
