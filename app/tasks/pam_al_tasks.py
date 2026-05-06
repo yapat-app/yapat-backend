@@ -192,3 +192,55 @@ def pam_al_auto_retrain(self, checkpoint_id: int, job_id: int):
 
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Inference / prediction creation (async)
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.pam_al_tasks.pam_al_create_predictions",
+    max_retries=0,
+)
+def pam_al_create_predictions(self, job_id: int, inference_body: dict):
+    """Run inference and (re)create predictions asynchronously.
+
+    This is used by POST /api/pam-al/inference/get-or-create so the API doesn't
+    synchronously load embeddings/models and serialize large prediction payloads.
+    """
+    from app.models.pam_active_learning import ALRetrainJob, ALRetrainStatus
+    from app.services.pam_al.service import PAMActiveLearningService
+
+    db = SessionLocal()
+    try:
+        svc = PAMActiveLearningService(db)
+
+        job = db.query(ALRetrainJob).filter(ALRetrainJob.id == job_id).one_or_none()
+        if job is None:
+            raise ValueError(f"Inference job {job_id} not found")
+
+        job.status = ALRetrainStatus.RUNNING
+        job.started_at = datetime.now(timezone.utc)
+        db.commit()
+
+        self.update_state(state="RUNNING", meta={"job_id": job_id})
+
+        # Force refresh so the job is deterministic.
+        inference_body = {**(inference_body or {}), "force_refresh": True}
+        svc.get_or_create_predictions(inference_body)
+
+        job.status = ALRetrainStatus.COMPLETED
+        job.completed_at = datetime.now(timezone.utc)
+        db.commit()
+
+        logger.info("pam_al_create_predictions completed: job_id=%d", job_id)
+        return {"status": "completed", "job_id": job_id}
+
+    except Exception as e:
+        logger.exception("pam_al_create_predictions failed: job_id=%d error=%s", job_id, str(e))
+        _ensure_job_failed(job_id, e)
+        return {"status": "failed", "job_id": job_id, "error": str(e)}
+
+    finally:
+        db.close()

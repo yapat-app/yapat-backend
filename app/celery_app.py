@@ -47,6 +47,8 @@ celery_app.conf.update(
     worker_prefetch_multiplier=4,
     worker_max_tasks_per_child=1000,
     worker_hijack_root_logger=False,
+    # Celery 6 deprecation: make startup broker retries explicit.
+    broker_connection_retry_on_startup=True,
 )
 
 if __name__ == "__main__":

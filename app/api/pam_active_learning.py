@@ -198,7 +198,7 @@ def get_default_species(
 
 @router.post(
     "/inference/get-or-create",
-    response_model=ALPredictionListResponse,
+    response_model=ALPredictionListResponse | ALJobDispatch,
     status_code=status.HTTP_200_OK,
 )
 def get_or_create_predictions(
@@ -212,7 +212,51 @@ def get_or_create_predictions(
     """
     service = PAMActiveLearningService(db)
     try:
-        return service.get_or_create_predictions(body)
+        # Fast path: if predictions exist and no refresh requested, return them immediately.
+        if not body.force_refresh:
+            try:
+                return service.get_or_create_predictions(body)
+            except Exception:
+                # If anything goes wrong on the fast path, fall back to async creation.
+                pass
+
+        # Async path: create a job record and let the pam_al worker handle inference.
+        from datetime import datetime, timezone
+
+        from app.models.pam_active_learning import ALRetrainJob, ALRetrainStatus
+        from app.services.pam_al import _checkpoint_helpers as ckpt_h
+
+        model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(db, body.dataset_id, body.model_family_name)
+        if model_ckpt is None:
+            # No checkpoint: keep previous behavior (random suggestions).
+            return service.get_or_create_predictions(body)
+
+        job = ALRetrainJob(
+            model_checkpoint_id=model_ckpt.id,
+            dataset_id=body.dataset_id,
+            trigger="inference",
+            feedback_count=0,
+            status=ALRetrainStatus.PENDING,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+
+        from app.tasks.pam_al_tasks import pam_al_create_predictions
+
+        pam_al_create_predictions.delay(job_id=job.id, inference_body=body.model_dump())
+
+        return ALJobDispatch(
+            job_id=job.id,
+            checkpoint_id=model_ckpt.id,
+            status=ALRetrainStatus.PENDING,
+            message=(
+                f"Inference job {job.id} dispatched. "
+                f"Poll GET /retrain/jobs/{job.id} for status."
+            ),
+        )
+
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
