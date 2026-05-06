@@ -1125,6 +1125,16 @@ class PAMActiveLearningService:
             )
         hyper = parent_ckpt.hyperparameters or {}
 
+        snippet_set_id = hyper.get("resolved_snippet_set_id")
+        if snippet_set_id is None:
+            ds = ckpt_h.get_pam_dataset(self.db, parent_ckpt.dataset_id)
+            snippet_set_id = ds.default_snippet_set_id
+        if snippet_set_id is None:
+            raise ValueError(
+                f"Parent checkpoint {parent_ckpt.id} missing resolved_snippet_set_id and "
+                "dataset has no default_snippet_set_id."
+            )
+
         epochs = body.epochs if body.epochs is not None else int(hyper.get("epochs", 20))
         lr = body.learning_rate if body.learning_rate is not None else float(hyper.get("learning_rate", 1e-3))
         bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", 32))
@@ -1139,6 +1149,7 @@ class PAMActiveLearningService:
             version=new_version, checkpoint_path="", label_config_path=parent_ckpt.label_config_path,
             model_type=parent_ckpt.model_type,
             hyperparameters={**hyper, "training_mode": "manual_retrain", "parent_checkpoint_id": parent_ckpt.id,
+                "resolved_snippet_set_id": snippet_set_id,
                 "epochs": epochs, "learning_rate": lr, "batch_size": bs, "hidden_dim": hd, "dropout": do, "device": dev,
                 "run_inference": body.run_inference, "threshold": body.threshold, "density_k": body.density_k,
                 "composite_wu": body.composite_wu, "composite_wd": body.composite_wd, "composite_wr": body.composite_wr},

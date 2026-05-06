@@ -164,10 +164,10 @@ class ALInferenceRow(BaseModel):
     embedding: list[float] | None = None
     predicted_labels: list[str]
     predicted_probabilities: dict[str, float]
-    uncertainty: float
-    diversity: float | None
-    density: float | None
-    composite_score: float | None
+    uncertainty: float | None = None
+    diversity: float | None = None
+    density: float | None = None
+    composite_score: float | None = None
 
 
 # ── Feedback ───────────────────────────────────────────────────────────
