@@ -1167,6 +1167,27 @@ class PAMActiveLearningService:
             raise ValueError(f"Parent checkpoint {parent_checkpoint_id} not found.")
 
         hyper = parent_ckpt.hyperparameters or {}
+    # Auto-retrain checkpoints must carry all required hyperparameters so
+    # the worker can execute without additional lookups.
+        snippet_set_id = hyper.get("resolved_snippet_set_id")
+        if snippet_set_id is None:
+            # Fallback for older checkpoints that don't persist this field.
+            ds = ckpt_h.get_pam_dataset(self.db, parent_ckpt.dataset_id)
+            snippet_set_id = ds.default_snippet_set_id
+        if snippet_set_id is None:
+            raise ValueError(
+                f"Parent checkpoint {parent_checkpoint_id} missing resolved_snippet_set_id and "
+                "dataset has no default_snippet_set_id."
+            )
+
+        embedding_model_id = hyper.get("embedding_model_id")
+        if embedding_model_id is None:
+            raise ValueError(f"Parent checkpoint {parent_checkpoint_id} missing embedding_model_id.")
+
+        label_order = hyper.get("label_order")
+        if not label_order:
+            raise ValueError(f"Parent checkpoint {parent_checkpoint_id} missing label_order.")
+
         new_version = f"{parent_ckpt.version}_r{int(datetime.now(timezone.utc).timestamp())}"
 
         new_ckpt = ALModelCheckpoint(
@@ -1177,6 +1198,9 @@ class PAMActiveLearningService:
                 **hyper,
                 "training_mode": "feedback_retrain",
                 "parent_checkpoint_id": parent_checkpoint_id,
+                "resolved_snippet_set_id": snippet_set_id,
+                "embedding_model_id": embedding_model_id,
+                "label_order": label_order,
                 # Always run inference after auto-retrain so predictions exist for
                 # the new checkpoint immediately.  The parent may have been created
                 # with run_inference=False (e.g. cold-start default), but retrain
