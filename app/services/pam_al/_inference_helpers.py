@@ -4,7 +4,8 @@ Inference helpers: scoring, prediction CRUD, and suggestion ranking.
 
 from __future__ import annotations
 
-from typing import List, Sequence
+import logging
+from typing import Iterable, List, Sequence
 
 import torch
 from sqlalchemy.orm import Session
@@ -21,6 +22,9 @@ from active_learning.config import (
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_inference_params(
@@ -123,30 +127,72 @@ def save_prediction_rows(
     model_checkpoint_id: int,
     rows,
 ) -> None:
-    for row in rows:
-        existing = (
+    """Upsert prediction rows.
+
+    Notes:
+    - Uses chunked reads/writes to keep ORM memory and query payload sizes
+      bounded for large snippet sets.
+    """
+
+    # Chunked upserts keep ORM memory and query payload sizes bounded.
+    chunk_size = 2000
+    rows = list(rows)
+
+    total = len(rows)
+    total_chunks = (total + chunk_size - 1) // chunk_size
+    logger.info(
+        "pam-al inference: saving %s prediction rows for checkpoint_id=%s in %s chunks (chunk_size=%s)",
+        total,
+        model_checkpoint_id,
+        total_chunks,
+        chunk_size,
+    )
+
+    for chunk_idx, start in enumerate(range(0, len(rows), chunk_size), start=1):
+        chunk = rows[start : start + chunk_size]
+        snippet_ids = [r.snippet_id for r in chunk]
+
+        existing_rows = (
             db.query(ALPrediction)
             .filter(
                 ALPrediction.model_checkpoint_id == model_checkpoint_id,
-                ALPrediction.snippet_id == row.snippet_id,
+                ALPrediction.snippet_id.in_(snippet_ids),
             )
-            .one_or_none()
+            .all()
+        )
+        existing_by_sid = {p.snippet_id: p for p in existing_rows}
+
+        to_add: list[ALPrediction] = []
+        for row in chunk:
+            pred = existing_by_sid.get(row.snippet_id)
+            if pred is None:
+                pred = ALPrediction(model_checkpoint_id=model_checkpoint_id, snippet_id=row.snippet_id)
+                to_add.append(pred)
+
+            pred.embedding = row.embedding
+            pred.predicted_labels = row.predicted_labels
+            pred.predicted_probabilities = row.predicted_probabilities
+            pred.uncertainty = row.uncertainty
+            pred.diversity = row.diversity
+            pred.density = row.density
+            pred.composite_score = row.composite_score
+
+        if to_add:
+            db.add_all(to_add)
+        db.flush()
+
+        logger.info(
+            "pam-al inference: upsert chunk %s/%s (rows=%s, created=%s)",
+            chunk_idx,
+            total_chunks,
+            len(chunk),
+            len(to_add),
         )
 
-        if existing is None:
-            existing = ALPrediction(
-                model_checkpoint_id=model_checkpoint_id,
-                snippet_id=row.snippet_id,
-            )
-            db.add(existing)
 
-        existing.embedding = row.embedding
-        existing.predicted_labels = row.predicted_labels
-        existing.predicted_probabilities = row.predicted_probabilities
-        existing.uncertainty = row.uncertainty
-        existing.diversity = row.diversity
-        existing.density = row.density
-        existing.composite_score = row.composite_score
+def _iter_batches(n: int, batch_size: int) -> Iterable[tuple[int, int]]:
+    for start in range(0, n, batch_size):
+        yield start, min(n, start + batch_size)
 
 
 def run_and_store_inference(
@@ -169,11 +215,55 @@ def run_and_store_inference(
     )
 
     device = next(model.parameters()).device
-    x_tensor = torch.tensor(X, dtype=torch.float32, device=device)
 
-    features = model.extract_features(x_tensor)
-    probs, preds = model.predict(x_tensor, threshold=threshold)
     snippet_ids = [row["snippet_id"] for row in snippet_rows]
+
+    # Batch size keeps GPU/CPU memory bounded. If the checkpoint stored a batch
+    # size, prefer that; otherwise use a conservative default.
+    h = getattr(model_ckpt, "hyperparameters", None) or {}
+    batch_size = int(h.get("batch_size") or 256)
+    batch_size = max(1, batch_size)
+
+    n = int(X.shape[0])
+    num_batches = (n + batch_size - 1) // batch_size
+    logger.info(
+        "pam-al inference: running inference dataset_id=%s checkpoint_id=%s on device=%s (n=%s, batch_size=%s, num_batches=%s)",
+        dataset_id,
+        getattr(model_ckpt, "id", None),
+        device,
+        n,
+        batch_size,
+        num_batches,
+    )
+
+    # Acquisition scoring needs features/probabilities for the full snippet set.
+    # Keep intermediate tensors on CPU to reduce VRAM, and process GPU batches
+    # sequentially.
+    features_cpu: list[torch.Tensor] = []
+    probs_cpu: list[torch.Tensor] = []
+    preds_cpu: list[torch.Tensor] = []
+
+    with torch.inference_mode():
+        for batch_idx, (start, end) in enumerate(_iter_batches(n, batch_size), start=1):
+            x_batch = torch.as_tensor(X[start:end], dtype=torch.float32, device=device)
+            feat_b = model.extract_features(x_batch).detach().cpu()
+            prob_b, pred_b = model.predict(x_batch, threshold=threshold)
+            features_cpu.append(feat_b)
+            probs_cpu.append(prob_b.detach().cpu())
+            preds_cpu.append(pred_b.detach().cpu())
+
+            if batch_idx == 1 or batch_idx == num_batches or (batch_idx % 10 == 0):
+                logger.info(
+                    "pam-al inference: batch %s/%s (snippets %s..%s)",
+                    batch_idx,
+                    num_batches,
+                    start,
+                    end,
+                )
+
+    features = torch.cat(features_cpu, dim=0)
+    probs = torch.cat(probs_cpu, dim=0)
+    preds = torch.cat(preds_cpu, dim=0)
 
     rows = build_inference_rows(
         probs=probs,
@@ -190,6 +280,14 @@ def run_and_store_inference(
 
     save_prediction_rows(db=db, model_checkpoint_id=model_ckpt.id, rows=rows)
 
+    logger.info(
+        "pam-al inference: completed checkpoint_id=%s (rows=%s, batch_size=%s, num_batches=%s)",
+        getattr(model_ckpt, "id", None),
+        len(rows),
+        batch_size,
+        num_batches,
+    )
+
     return {
         "num_predictions": len(rows),
         "num_labeled_snippets": len(labeled_snippet_ids),
@@ -198,6 +296,7 @@ def run_and_store_inference(
         "composite_wu": wu,
         "composite_wd": wd,
         "composite_wr": wr,
+        "batch_size": batch_size,
     }
 
 
