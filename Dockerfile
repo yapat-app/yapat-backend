@@ -17,7 +17,8 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
-RUN pip install --prefer-binary --progress-bar off -r requirements.txt
+RUN pip install --prefer-binary --progress-bar off -r requirements.txt \
+    && pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 # Copy application code
 COPY . .
