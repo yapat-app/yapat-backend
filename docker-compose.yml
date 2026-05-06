@@ -117,6 +117,10 @@ services:
           memory: 8G
         reservations:
           memory: 2G
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
       - CELERY_BROKER_URL=redis://redis:6379/0
