@@ -105,7 +105,7 @@ services:
   celery-worker-pam-al:
     build: .
     container_name: yapat-celery-worker-pam-al
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=1 --queues=pam_al -n pam_al@%h
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=pam_al -n pam_al@%h
     depends_on:
       db:
         condition: service_healthy
@@ -114,12 +114,12 @@ services:
     deploy:
       resources:
         limits:
-          memory: 8G
+          memory: 16G
         reservations:
-          memory: 2G
+          memory: 8G
           devices:
             - driver: nvidia
-              count: all
+              count: 1
               capabilities: [gpu]
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
