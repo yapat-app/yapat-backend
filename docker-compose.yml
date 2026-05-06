@@ -21,7 +21,7 @@ services:
     image: redis:7-alpine
     container_name: yapat-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -35,6 +35,7 @@ services:
   # FastAPI application
   api:
     build: .
+    gpus: all
     container_name: yapat-api
     command: ["bash", "/app/startup.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
