@@ -17,10 +17,14 @@ Flow
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
+
+# How long a job can stay RUNNING before the cleanup task marks it FAILED.
+_RETRAIN_STALE_HOURS = 6      # training / retrain jobs
+_INFERENCE_STALE_HOURS = 2    # inference-only jobs
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +206,10 @@ def pam_al_auto_retrain(self, checkpoint_id: int, job_id: int):
     bind=True,
     name="app.tasks.pam_al_tasks.pam_al_create_predictions",
     max_retries=0,
+    # Hard-kill the worker process after 2 h; soft limit triggers SoftTimeLimitExceeded
+    # 5 min before that so the job can be marked FAILED cleanly.
+    time_limit=_INFERENCE_STALE_HOURS * 3600,
+    soft_time_limit=_INFERENCE_STALE_HOURS * 3600 - 300,
 )
 def pam_al_create_predictions(self, job_id: int, inference_body: dict):
     """Run inference and (re)create predictions asynchronously.
@@ -209,6 +217,8 @@ def pam_al_create_predictions(self, job_id: int, inference_body: dict):
     This is used by POST /api/pam-al/inference/get-or-create so the API doesn't
     synchronously load embeddings/models and serialize large prediction payloads.
     """
+    from celery.exceptions import SoftTimeLimitExceeded
+
     from app.models.pam_active_learning import ALRetrainJob, ALRetrainStatus
     from app.services.pam_al.service import PAMActiveLearningService
 
@@ -242,10 +252,86 @@ def pam_al_create_predictions(self, job_id: int, inference_body: dict):
         logger.info("pam_al_create_predictions completed: job_id=%d", job_id)
         return {"status": "completed", "job_id": job_id}
 
+    except SoftTimeLimitExceeded:
+        logger.error("pam_al_create_predictions timed out: job_id=%d", job_id)
+        _ensure_job_failed(job_id, TimeoutError(f"Inference job {job_id} exceeded time limit"))
+        return {"status": "failed", "job_id": job_id, "error": "time limit exceeded"}
+
     except Exception as e:
         logger.exception("pam_al_create_predictions failed: job_id=%d error=%s", job_id, str(e))
         _ensure_job_failed(job_id, e)
         return {"status": "failed", "job_id": job_id, "error": str(e)}
+
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Periodic cleanup of stale RUNNING / PENDING jobs
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.pam_al_tasks.pam_al_cleanup_stale_jobs",
+)
+def pam_al_cleanup_stale_jobs():
+    """
+    Mark stale PAM AL jobs as FAILED so they never permanently block auto-retrain.
+
+    A job is considered stale when it has been RUNNING or PENDING for longer than
+    its type-specific timeout:
+      - inference jobs   : _INFERENCE_STALE_HOURS
+      - retrain/train    : _RETRAIN_STALE_HOURS
+    """
+    from app.models.pam_active_learning import ALRetrainJob, ALRetrainStatus
+    from app.services.pam_al._feedback_helpers import _RETRAIN_TRIGGERS
+
+    now = datetime.now(timezone.utc)
+    retrain_cutoff = now - timedelta(hours=_RETRAIN_STALE_HOURS)
+    inference_cutoff = now - timedelta(hours=_INFERENCE_STALE_HOURS)
+
+    db = SessionLocal()
+    try:
+        stale = (
+            db.query(ALRetrainJob)
+            .filter(
+                ALRetrainJob.status.in_([ALRetrainStatus.PENDING, ALRetrainStatus.RUNNING]),
+            )
+            .all()
+        )
+
+        marked = 0
+        for job in stale:
+            reference_time = job.started_at or job.created_at
+            if reference_time is None:
+                continue
+
+            is_retrain = job.trigger in _RETRAIN_TRIGGERS
+            cutoff = retrain_cutoff if is_retrain else inference_cutoff
+
+            if reference_time < cutoff:
+                job.status = ALRetrainStatus.FAILED
+                job.completed_at = now
+                job.error_message = (
+                    f"Marked FAILED by stale-job cleanup "
+                    f"(trigger={job.trigger}, started_at={reference_time.isoformat()})"
+                )
+                marked += 1
+                logger.warning(
+                    "pam_al_cleanup_stale_jobs: marked job %d (trigger=%s) as FAILED "
+                    "(stuck since %s)",
+                    job.id, job.trigger, reference_time.isoformat(),
+                )
+
+        if marked:
+            db.commit()
+
+        logger.info("pam_al_cleanup_stale_jobs: checked %d jobs, marked %d as FAILED", len(stale), marked)
+        return {"checked": len(stale), "marked_failed": marked}
+
+    except Exception:
+        db.rollback()
+        logger.exception("pam_al_cleanup_stale_jobs failed")
+        raise
 
     finally:
         db.close()

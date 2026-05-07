@@ -19,14 +19,22 @@ from app.models.pam_active_learning import (
 
 from app.services.pam_al._annotation_helpers import store_user_labels_for_snippet
 
+# Trigger values that represent actual model-retrain jobs.
+# "inference" jobs use the same ALRetrainJob table but are NOT retrains and
+# must never block or influence retrain-gating logic.
+_RETRAIN_TRIGGERS = frozenset({"manual", "auto_feedback"})
+
 
 def feedback_count_since_retrain(db:Session,
         checkpoint_id: int | None,
         dataset_id: int | None = None,
 ) -> int:
+    # Only consider real retrain jobs (not inference jobs) when determining the
+    # "last completed retrain" cutoff.
     query_last_retrain = db.query(ALRetrainJob.completed_at).filter(
         ALRetrainJob.model_checkpoint_id == checkpoint_id,
         ALRetrainJob.status == ALRetrainStatus.COMPLETED,
+        ALRetrainJob.trigger.in_(_RETRAIN_TRIGGERS),
     )
 
     if dataset_id is not None:
@@ -60,6 +68,7 @@ def get_last_completed_retrain_cutoff(db: Session, checkpoint_id: int) -> dateti
         .filter(
             ALRetrainJob.model_checkpoint_id == checkpoint_id,
             ALRetrainJob.status == ALRetrainStatus.COMPLETED,
+            ALRetrainJob.trigger.in_(_RETRAIN_TRIGGERS),
         )
         .order_by(ALRetrainJob.completed_at.desc())
         .first()
@@ -116,11 +125,13 @@ def sync_feedback_events_to_annotations(db: Session, checkpoint_id: int) -> int:
 
 
 def has_active_retrain_job(db: Session, checkpoint_id: int) -> bool:
+    """Return True if a retrain job (not an inference job) is PENDING/RUNNING."""
     return (
         db.query(ALRetrainJob)
         .filter(
             ALRetrainJob.model_checkpoint_id == checkpoint_id,
             ALRetrainJob.status.in_([ALRetrainStatus.PENDING, ALRetrainStatus.RUNNING]),
+            ALRetrainJob.trigger.in_(_RETRAIN_TRIGGERS),
         )
         .first()
         is not None
@@ -137,6 +148,7 @@ def has_pending_child_retrain(db: Session, parent_checkpoint_id: int) -> bool:
         .filter(
             ALModelCheckpoint.parent_checkpoint_id == parent_checkpoint_id,
             ALRetrainJob.status.in_([ALRetrainStatus.PENDING, ALRetrainStatus.RUNNING]),
+            ALRetrainJob.trigger.in_(_RETRAIN_TRIGGERS),
         )
         .first()
         is not None
@@ -144,13 +156,16 @@ def has_pending_child_retrain(db: Session, parent_checkpoint_id: int) -> bool:
 
 
 def has_failed_child_retrain(db: Session, parent_checkpoint_id: int) -> bool:
-    """Return True if the most recent child retrain ended in FAILED status."""
+    """Return True if the most recent child *retrain* job (not inference) ended FAILED."""
     from app.models.pam_active_learning import ALModelCheckpoint
 
     latest_child_job = (
         db.query(ALRetrainJob)
         .join(ALModelCheckpoint, ALRetrainJob.model_checkpoint_id == ALModelCheckpoint.id)
-        .filter(ALModelCheckpoint.parent_checkpoint_id == parent_checkpoint_id)
+        .filter(
+            ALModelCheckpoint.parent_checkpoint_id == parent_checkpoint_id,
+            ALRetrainJob.trigger.in_(_RETRAIN_TRIGGERS),
+        )
         .order_by(ALRetrainJob.created_at.desc())
         .first()
     )

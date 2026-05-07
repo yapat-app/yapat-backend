@@ -49,6 +49,16 @@ celery_app.conf.update(
     worker_hijack_root_logger=False,
     # Celery 6 deprecation: make startup broker retries explicit.
     broker_connection_retry_on_startup=True,
+    # Periodic tasks (requires celery-beat)
+    beat_schedule={
+        "pam-al-cleanup-stale-jobs": {
+            "task": "app.tasks.pam_al_tasks.pam_al_cleanup_stale_jobs",
+            # Run every 30 minutes so stuck inference/retrain jobs are never
+            # blocking auto-retrain for more than ~30 min beyond their timeout.
+            "schedule": 1800,
+            "options": {"queue": "pam_al"},
+        },
+    },
 )
 
 if __name__ == "__main__":
