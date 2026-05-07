@@ -109,7 +109,9 @@ def build_inference_rows(
         rows.append(
             ALInferenceRow(
                 snippet_id=snippet_id,
-                embedding=embeddings[i].detach().cpu().tolist(),
+                # Embedding vectors are stored in the dedicated embedding store.
+                # Avoid duplicating large vectors into the predictions table.
+                embedding=None,
                 predicted_labels=pred_labels,
                 predicted_probabilities=prob_dict,
                 uncertainty=uncertainty_full[i],
@@ -169,7 +171,9 @@ def save_prediction_rows(
                 pred = ALPrediction(model_checkpoint_id=model_checkpoint_id, snippet_id=row.snippet_id)
                 to_add.append(pred)
 
-            pred.embedding = row.embedding
+            # Keep embeddings out of the predictions table to minimize row size
+            # and write amplification. If needed later, store checkpoint-scoped
+            # vectors separately using pgvector.
             pred.predicted_labels = row.predicted_labels
             pred.predicted_probabilities = row.predicted_probabilities
             pred.uncertainty = row.uncertainty
