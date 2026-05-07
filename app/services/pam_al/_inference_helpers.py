@@ -5,6 +5,7 @@ Inference helpers: scoring, prediction CRUD, and suggestion ranking.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Iterable, List, Sequence
 
 import torch
@@ -243,18 +244,30 @@ def run_and_store_inference(
     # Acquisition scoring needs features/probabilities for the full snippet set.
     # Keep intermediate tensors on CPU to reduce VRAM, and process GPU batches
     # sequentially.
-    features_cpu: list[torch.Tensor] = []
-    probs_cpu: list[torch.Tensor] = []
-    preds_cpu: list[torch.Tensor] = []
+    t0 = time.perf_counter()
+    features: torch.Tensor | None = None
+    probs: torch.Tensor | None = None
+    preds: torch.Tensor | None = None
 
     with torch.inference_mode():
         for batch_idx, (start, end) in enumerate(_iter_batches(n, batch_size), start=1):
             x_batch = torch.as_tensor(X[start:end], dtype=torch.float32, device=device)
             feat_b = model.extract_features(x_batch).detach().cpu()
             prob_b, pred_b = model.predict(x_batch, threshold=threshold)
-            features_cpu.append(feat_b)
-            probs_cpu.append(prob_b.detach().cpu())
-            preds_cpu.append(pred_b.detach().cpu())
+            prob_b = prob_b.detach().cpu()
+            pred_b = pred_b.detach().cpu()
+
+            # Preallocate output tensors once we know the feature/prob dimensions.
+            if features is None:
+                features = torch.empty((n, feat_b.shape[1]), dtype=feat_b.dtype)
+            if probs is None:
+                probs = torch.empty((n, prob_b.shape[1]), dtype=prob_b.dtype)
+            if preds is None:
+                preds = torch.empty((n, pred_b.shape[1]), dtype=pred_b.dtype)
+
+            features[start:end] = feat_b
+            probs[start:end] = prob_b
+            preds[start:end] = pred_b
 
             if batch_idx == 1 or batch_idx == num_batches or (batch_idx % 10 == 0):
                 logger.info(
@@ -265,9 +278,17 @@ def run_and_store_inference(
                     end,
                 )
 
-    features = torch.cat(features_cpu, dim=0)
-    probs = torch.cat(probs_cpu, dim=0)
-    preds = torch.cat(preds_cpu, dim=0)
+
+    if features is None or probs is None or preds is None:
+        raise ValueError("Inference input is empty; no predictions generated.")
+
+    logger.info(
+        "pam-al inference: forward pass done in %.2fs (n=%s)",
+        time.perf_counter() - t0,
+        n,
+    )
+
+    t1 = time.perf_counter()
 
     rows = build_inference_rows(
         probs=probs,
@@ -282,7 +303,20 @@ def run_and_store_inference(
         wr=wr,
     )
 
+    logger.info(
+        "pam-al inference: scoring/row materialization done in %.2fs (rows=%s)",
+        time.perf_counter() - t1,
+        len(rows),
+    )
+
+    t2 = time.perf_counter()
+
     save_prediction_rows(db=db, model_checkpoint_id=model_ckpt.id, rows=rows)
+
+    logger.info(
+        "pam-al inference: DB upsert done in %.2fs",
+        time.perf_counter() - t2,
+    )
 
     logger.info(
         "pam-al inference: completed checkpoint_id=%s (rows=%s, batch_size=%s, num_batches=%s)",
