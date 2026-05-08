@@ -16,7 +16,8 @@ from app.schemas.visualisation import (
     FPVVisibilityField,
     FPVVisibilityRangeResponse,
     FPVColorField,
-    FPVColorMetadata
+    FPVColorMetadata,
+    FPVMethod,
 )
 from utils.dr_methods import run_dr_isomap, run_dr_pca, run_dr_tsne, run_dr_umap
 
@@ -282,18 +283,15 @@ class VISService:
             )
 
         points = []
+        selected_methods = self._selected_methods(body.method)
         projections_2d = {
-            "pca": FPVProjection2D(x=[], y=[]),
-            "umap": FPVProjection2D(x=[], y=[]),
-            "tsne": FPVProjection2D(x=[], y=[]),
-            "isomap": FPVProjection2D(x=[], y=[]),
+            method: FPVProjection2D(x=[], y=[])
+            for method in selected_methods
         }
 
         projections_3d = {
-            "pca": FPVProjection3D(x=[], y=[], z=[]),
-            "umap": FPVProjection3D(x=[], y=[], z=[]),
-            "tsne": FPVProjection3D(x=[], y=[], z=[]),
-            "isomap": FPVProjection3D(x=[], y=[], z=[]),
+            method: FPVProjection3D(x=[], y=[], z=[])
+            for method in selected_methods
         }
 
         has_any_3d = False
@@ -310,65 +308,33 @@ class VISService:
                 )
             )
 
-            projections_2d["pca"].x.append(vis_row.pca_2d_x)
-            projections_2d["pca"].y.append(vis_row.pca_2d_y)
+            for method in selected_methods:
+                if method == "pca":
+                    projections_2d[method].x.append(vis_row.pca_2d_x)
+                    projections_2d[method].y.append(vis_row.pca_2d_y)
+                    x3, y3, z3 = vis_row.pca_3d_x, vis_row.pca_3d_y, vis_row.pca_3d_z
+                elif method == "umap":
+                    projections_2d[method].x.append(vis_row.umap_2d_x)
+                    projections_2d[method].y.append(vis_row.umap_2d_y)
+                    x3, y3, z3 = vis_row.umap_3d_x, vis_row.umap_3d_y, vis_row.umap_3d_z
+                elif method == "tsne":
+                    projections_2d[method].x.append(vis_row.tsne_2d_x)
+                    projections_2d[method].y.append(vis_row.tsne_2d_y)
+                    x3, y3, z3 = vis_row.tsne_3d_x, vis_row.tsne_3d_y, vis_row.tsne_3d_z
+                else:
+                    projections_2d[method].x.append(vis_row.isomap_2d_x)
+                    projections_2d[method].y.append(vis_row.isomap_2d_y)
+                    x3, y3, z3 = vis_row.isomap_3d_x, vis_row.isomap_3d_y, vis_row.isomap_3d_z
 
-            projections_2d["umap"].x.append(vis_row.umap_2d_x)
-            projections_2d["umap"].y.append(vis_row.umap_2d_y)
-
-            projections_2d["tsne"].x.append(vis_row.tsne_2d_x)
-            projections_2d["tsne"].y.append(vis_row.tsne_2d_y)
-
-            projections_2d["isomap"].x.append(vis_row.isomap_2d_x)
-            projections_2d["isomap"].y.append(vis_row.isomap_2d_y)
-
-            if (
-                vis_row.pca_3d_x is not None and vis_row.pca_3d_y is not None and vis_row.pca_3d_z is not None
-            ):
-                has_any_3d = True
-                projections_3d["pca"].x.append(vis_row.pca_3d_x)
-                projections_3d["pca"].y.append(vis_row.pca_3d_y)
-                projections_3d["pca"].z.append(vis_row.pca_3d_z)
-            else:
-                projections_3d["pca"].x.append(None)
-                projections_3d["pca"].y.append(None)
-                projections_3d["pca"].z.append(None)
-
-            if (
-                vis_row.umap_3d_x is not None and vis_row.umap_3d_y is not None and vis_row.umap_3d_z is not None
-            ):
-                has_any_3d = True
-                projections_3d["umap"].x.append(vis_row.umap_3d_x)
-                projections_3d["umap"].y.append(vis_row.umap_3d_y)
-                projections_3d["umap"].z.append(vis_row.umap_3d_z)
-            else:
-                projections_3d["umap"].x.append(None)
-                projections_3d["umap"].y.append(None)
-                projections_3d["umap"].z.append(None)
-
-            if (
-                vis_row.tsne_3d_x is not None and vis_row.tsne_3d_y is not None and vis_row.tsne_3d_z is not None
-            ):
-                has_any_3d = True
-                projections_3d["tsne"].x.append(vis_row.tsne_3d_x)
-                projections_3d["tsne"].y.append(vis_row.tsne_3d_y)
-                projections_3d["tsne"].z.append(vis_row.tsne_3d_z)
-            else:
-                projections_3d["tsne"].x.append(None)
-                projections_3d["tsne"].y.append(None)
-                projections_3d["tsne"].z.append(None)
-
-            if (
-                vis_row.isomap_3d_x is not None and vis_row.isomap_3d_y is not None and vis_row.isomap_3d_z is not None
-            ):
-                has_any_3d = True
-                projections_3d["isomap"].x.append(vis_row.isomap_3d_x)
-                projections_3d["isomap"].y.append(vis_row.isomap_3d_y)
-                projections_3d["isomap"].z.append(vis_row.isomap_3d_z)
-            else:
-                projections_3d["isomap"].x.append(None)
-                projections_3d["isomap"].y.append(None)
-                projections_3d["isomap"].z.append(None)
+                if x3 is not None and y3 is not None and z3 is not None:
+                    has_any_3d = True
+                    projections_3d[method].x.append(x3)
+                    projections_3d[method].y.append(y3)
+                    projections_3d[method].z.append(z3)
+                else:
+                    projections_3d[method].x.append(None)
+                    projections_3d[method].y.append(None)
+                    projections_3d[method].z.append(None)
 
         return FPVResponse(
             dataset_id=body.dataset_id,
@@ -379,6 +345,12 @@ class VISService:
             projections_2d=projections_2d,
             projections_3d=projections_3d if has_any_3d else None,
         )
+
+    @staticmethod
+    def _selected_methods(method: FPVMethod | None) -> list[str]:
+        if method is None:
+            return ["pca", "umap", "tsne", "isomap"]
+        return [method.value]
 
     def _get_active_checkpoint(self, dataset_id: int, model_family_name: str) -> ALModelCheckpoint:
         family_state = (

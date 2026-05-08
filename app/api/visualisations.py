@@ -7,6 +7,7 @@ from app.schemas.visualisation import (
     FPVDatasetRequest,
     FPVResponse,
     FPVColorField,
+    FPVMethod,
     FPVVisibilityField,
     FPVVisibilityRangeResponse,
 )
@@ -68,6 +69,7 @@ def get_fpv_dataset(
     dataset_id: int,
     embedding_model_id: int,
     run_3d: bool = False,
+    method: FPVMethod | None = None,
     db: Session = Depends(get_db),
 ):
     service = VISService(db)
@@ -76,6 +78,7 @@ def get_fpv_dataset(
             dataset_id=dataset_id,
             embedding_model_id=embedding_model_id,
             run_3d=run_3d,
+            method=method,
         )
         return service.get_fpv_for_dataset_embeddings(body)
     except ValueError as e:

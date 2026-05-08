@@ -27,6 +27,13 @@ class FPVColorField(str, Enum):
     YAMNET_LABEL = "yamnet_label"
 
 
+class FPVMethod(str, Enum):
+    PCA = "pca"
+    UMAP = "umap"
+    TSNE = "tsne"
+    ISOMAP = "isomap"
+
+
 class FPVRequest(BaseModel):
     dataset_id: int
     model_family_name: str
@@ -49,6 +56,7 @@ class FPVDatasetRequest(BaseModel):
     dataset_id: int
     embedding_model_id: int
     run_3d: bool = False
+    method: Optional[FPVMethod] = None
 
 class FPVPointMetadata(BaseModel):
     snippet_id: int
