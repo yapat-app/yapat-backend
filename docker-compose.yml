@@ -35,7 +35,7 @@ services:
   # FastAPI application
   api:
     build: .
-    gpus: all
+    #gpus: all
     container_name: yapat-api
     command: ["bash", "/app/startup.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
@@ -118,10 +118,10 @@ services:
           memory: 16G
         reservations:
           memory: 8G
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+#          devices:
+#            - driver: nvidia
+#              count: 1
+#              capabilities: [gpu]
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
       - CELERY_BROKER_URL=redis://redis:6379/0
