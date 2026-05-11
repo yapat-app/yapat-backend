@@ -26,6 +26,7 @@ from app.api import (
     taxonomy,
     teams,
     visualisations,
+    wssed,
 )
 
 app = FastAPI(
@@ -62,6 +63,7 @@ app.include_router(custom_taxonomy.router, prefix=f"{settings.API_STR}/taxonomy"
 app.include_router(embeddings.router, prefix=f"{settings.API_STR}", tags=["embeddings"])
 app.include_router(pam_active_learning.router, prefix=f"{settings.API_STR}/pam-al", tags=["pam-active-learning"])
 app.include_router(visualisations.router, prefix=f"{settings.API_STR}/visualisations", tags=["visualisations"])
+app.include_router(wssed.router, prefix=f"{settings.API_STR}/wssed", tags=["wssed"])
 
 
 @app.get("/")

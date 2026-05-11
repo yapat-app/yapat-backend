@@ -17,6 +17,7 @@ celery_app = Celery(
         "app.tasks.embedding_tasks",
         "app.tasks.processing_tasks",
         "app.tasks.pam_al_tasks",
+        "app.tasks.wssed_tasks",
     ]
 )
 

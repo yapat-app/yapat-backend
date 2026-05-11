@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import logging
 
 from app.database import SessionLocal
+from app.models.wssed import TrainingStatus, WSSEDTrainingJob
 from app.services.wssed_service import WSSEDService
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,11 @@ def trigger_wssed_training(self, job_id: int):
             
         except Exception as e:
             logger.error(f"Failed to trigger WSSED training for job {job_id}: {e}", exc_info=True)
+            job = db.query(WSSEDTrainingJob).filter(WSSEDTrainingJob.id == job_id).first()
+            if job is not None:
+                job.status = TrainingStatus.FAILED
+                job.error_message = str(e)
+                db.commit()
             return {
                 "status": "error",
                 "job_id": job_id,
@@ -129,7 +135,7 @@ def poll_training_status(self, job_id: int):
                 "job_id": job_id,
                 "training_status": job.status.value,
                 "model_path": job.model_path,
-                "completed": job.status in ["COMPLETED", "FAILED"]
+                "completed": job.status in (TrainingStatus.COMPLETED, TrainingStatus.FAILED),
             }
             
         except Exception as e:
