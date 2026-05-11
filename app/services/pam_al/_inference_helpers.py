@@ -23,7 +23,7 @@ from active_learning.config import (
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
 )
-
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +75,14 @@ def build_inference_rows(
         0, device=embeddings.device
     )
 
+    start = time.perf_counter()
     diversity_scores_u = diversity(z_u, z_l)
+    mid = time.perf_counter()
     density_scores_u = density(z_u, k=density_k)
+    end = time.perf_counter()
+    print(f"Diversity took: {mid - start:.4f} sec", flush=True)
+    print(f"Density took:   {end - mid:.4f} sec", flush=True)
+    print(f"Total took:     {end - start:.4f} sec", flush=True)
     composite_scores_u = composite(
         uncertainty_scores=uncertainty_scores_u,
         diversity_scores=diversity_scores_u,
