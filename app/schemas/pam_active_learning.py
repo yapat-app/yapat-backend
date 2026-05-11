@@ -105,8 +105,8 @@ class ALRunInferenceRequest(BaseModel):
     snippet_set_id: int = Field(..., description="Snippet set to retrieve predictions for")
     device: Optional[str] = Field(default="cpu", description="cpu or cuda")
 
-    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    density_k: Optional[int] = Field(default=None, ge=1)
+    threshold: Optional[float] = Field(default=None)
+    density_k: Optional[int] = Field(default=None)
     composite_wu: Optional[float] = Field(default=None)
     composite_wd: Optional[float] = Field(default=None)
     composite_wr: Optional[float] = Field(default=None)
