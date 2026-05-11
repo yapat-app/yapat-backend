@@ -268,8 +268,14 @@ class WSSEDService:
             hyperparameters=hyperparameters,
         )
 
-        from app.tasks.wssed_tasks import trigger_wssed_training
-        trigger_wssed_training.delay(job.id)
+        try:
+            self.enqueue_wssed_training_dispatch(job.id)
+        except Exception as e:
+            self.fail_training_job(
+                job.id,
+                f"Failed to queue training task: {e}",
+            )
+            raise
 
         return job
 
@@ -325,6 +331,38 @@ class WSSEDService:
         self.db.commit()
         self.db.refresh(job)
         return job
+
+    def enqueue_wssed_training_dispatch(self, job_id: int) -> str:
+        """
+        Publish ``trigger_wssed_training`` to the broker on the ``default`` queue.
+
+        Returns the Celery async result task id. Raises if the message cannot be
+        published (broker down, wrong routing, etc.).
+        """
+        if self._get_training_job(job_id) is None:
+            raise ValueError(f"Training job {job_id} not found")
+
+        from app.tasks.wssed_tasks import trigger_wssed_training
+
+        async_result = trigger_wssed_training.apply_async(
+            args=[job_id],
+            queue="default",
+        )
+        logger.info(
+            "Queued trigger_wssed_training job_id=%s celery_task_id=%s queue=default",
+            job_id,
+            async_result.id,
+        )
+        return str(async_result.id)
+
+    def fail_training_job(self, job_id: int, message: str) -> None:
+        """Mark a job FAILED (e.g. Celery enqueue failed)."""
+        job = self._get_training_job(job_id)
+        if job is None:
+            return
+        job.status = TrainingStatus.FAILED
+        job.error_message = message
+        self.db.commit()
 
     def _get_training_job(self, job_id: int) -> Optional[WSSEDTrainingJob]:
         return (

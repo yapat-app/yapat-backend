@@ -5,6 +5,8 @@ Exposes training job management, active-learning suggestions, label
 submission, retrain, and prediction histogram.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
@@ -20,6 +22,8 @@ from app.schemas.wssed import (
     WSSEDTrainingStatusResponse,
 )
 from app.services.wssed_service import WSSEDService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -52,13 +56,77 @@ def create_training_job(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create training job: {e}")
 
-    from app.tasks.wssed_tasks import trigger_wssed_training
-    trigger_wssed_training.delay(job.id)
+    try:
+        celery_task_id = svc.enqueue_wssed_training_dispatch(job.id)
+    except Exception as e:
+        logger.exception("WSSED training Celery enqueue failed job_id=%s", job.id)
+        svc.fail_training_job(
+            job.id,
+            f"Failed to queue training task (is Redis/broker up and worker listening on "
+            f"queue 'default'?): {e}",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Training job {job.id} was created but could not be queued to Celery: {e}"
+            ),
+        ) from e
+
+    logger.info(
+        "WSSED training dispatched job_id=%s celery_task_id=%s", job.id, celery_task_id
+    )
 
     return WSSEDTrainingJobResponse(
         job_id=job.id,
         status=job.status.value,
         message=f"Training job {job.id} dispatched. Poll GET /training-jobs/{job.id}/status.",
+    )
+
+
+@router.post(
+    "/training-jobs/{job_id}/dispatch",
+    response_model=WSSEDTrainingJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def dispatch_training_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Re-queue a PENDING training job to Celery (recovery if the worker never
+    received ``trigger_wssed_training``).
+    """
+    svc = WSSEDService(db)
+    data = svc.get_training_job_status(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"Training job {job_id} not found")
+    if data["status"] != "PENDING":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job {job_id} is {data['status']}; only PENDING jobs can be re-dispatched.",
+        )
+
+    try:
+        celery_task_id = svc.enqueue_wssed_training_dispatch(job_id)
+    except Exception as e:
+        logger.exception("WSSED training Celery re-dispatch failed job_id=%s", job_id)
+        svc.fail_training_job(job_id, f"Failed to re-queue training task: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not queue training job {job_id} to Celery: {e}",
+        ) from e
+
+    logger.info(
+        "WSSED training re-dispatched job_id=%s celery_task_id=%s",
+        job_id,
+        celery_task_id,
+    )
+
+    return WSSEDTrainingJobResponse(
+        job_id=job_id,
+        status=data["status"],
+        message=f"Training job {job_id} queued to Celery (task id {celery_task_id}).",
     )
 
 
