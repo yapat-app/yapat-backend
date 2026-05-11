@@ -2,7 +2,12 @@
 Celery application instance and configuration
 """
 
+import logging
+import time
+
 from celery import Celery
+from celery.signals import task_postrun, task_prerun
+
 from app.config import settings
 from app.logging_config import configure_logging
 
@@ -60,6 +65,39 @@ celery_app.conf.update(
         },
     },
 )
+
+# ── Per-task duration logging (stdout via configure_logging) ───────────────
+
+_task_starts: dict[str, float] = {}
+_celery_task_logger = logging.getLogger("yapat.celery")
+
+
+@task_prerun.connect
+def _celery_task_prerun(task_id=None, **kwargs):
+    if task_id is not None:
+        _task_starts[task_id] = time.perf_counter()
+
+
+@task_postrun.connect
+def _celery_task_postrun(task_id=None, task=None, **kwargs):
+    if task_id is None:
+        return
+    start = _task_starts.pop(task_id, None)
+    if start is None:
+        _celery_task_logger.warning(
+            "task_postrun missing prerun timestamp task_id=%s task=%s",
+            task_id,
+            getattr(task, "name", "?"),
+        )
+        return
+    duration_ms = (time.perf_counter() - start) * 1000
+    _celery_task_logger.info(
+        "task=%s task_id=%s duration_ms=%.1f",
+        getattr(task, "name", "?"),
+        task_id,
+        duration_ms,
+    )
+
 
 if __name__ == "__main__":
     celery_app.start()
