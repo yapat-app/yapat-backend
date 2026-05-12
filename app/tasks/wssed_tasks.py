@@ -25,7 +25,7 @@ def session_scope():
         db.close()
 
 
-@shared_task(bind=True, name="app.tasks.wssed_tasks.trigger_wssed_training")
+@shared_task(bind=True, name="app.tasks.wssed_tasks.trigger_wssed_training", acks_late=False)
 def trigger_wssed_training(self, job_id: int):
     """
     Trigger WSSED training on GPU server.
@@ -145,6 +145,43 @@ def poll_training_status(self, job_id: int):
                 "job_id": job_id,
                 "error": str(e)
             }
+
+
+@shared_task(name="app.tasks.wssed_tasks.sync_wssed_training_jobs")
+def sync_wssed_training_jobs():
+    """
+    Periodic beat task: poll GPU server for every job that is still TRAINING
+    and persist the latest status to the DB.
+
+    Scheduled every WSSED_POLL_INTERVAL seconds (default 10 s) via celery beat.
+    Keeps the DB fresh so the status endpoint never needs to hit the GPU server
+    directly on every frontend poll.
+    """
+    from app.models.wssed import TrainingStatus
+
+    with session_scope() as db:
+        active_jobs = (
+            db.query(WSSEDTrainingJob)
+            .filter(WSSEDTrainingJob.status == TrainingStatus.TRAINING)
+            .all()
+        )
+
+        if not active_jobs:
+            return {"synced": 0}
+
+        service = WSSEDService(db)
+        synced, failed = 0, 0
+        for job in active_jobs:
+            try:
+                import asyncio
+                asyncio.run(service.update_training_status(job.id))
+                synced += 1
+            except Exception as e:
+                failed += 1
+                logger.warning("Failed to sync WSSED job %s: %s", job.id, e)
+
+        logger.info("WSSED sync: %s synced, %s failed", synced, failed)
+        return {"synced": synced, "failed": failed}
 
 
 @shared_task(bind=True, name="app.tasks.wssed_tasks.store_detection_results")

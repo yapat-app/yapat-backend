@@ -125,8 +125,11 @@ class WSSEDService:
             job.training_metrics = data["metrics"]
         if data.get("error"):
             job.error_message = data["error"]
+
+        now = datetime.now(timezone.utc)
+        job.updated_at = now
         if job.status in (TrainingStatus.COMPLETED, TrainingStatus.FAILED):
-            job.completed_at = datetime.now(timezone.utc)
+            job.completed_at = now
 
         self.db.commit()
         self.db.refresh(job)
@@ -383,7 +386,21 @@ class WSSEDService:
             "metrics": job.training_metrics,
             "error": job.error_message,
             "progress": None,
+            "_updated_at": job.updated_at,  # internal; used by API for probe throttle
         }
+
+    def is_status_stale(self, job_id: int, ttl_seconds: int) -> bool:
+        """
+        Return True if the DB status for this job has not been probed from the
+        GPU server within the last ``ttl_seconds`` seconds.
+        """
+        job = self._get_training_job(job_id)
+        if job is None:
+            return False
+        if job.updated_at is None:
+            return True
+        age = (datetime.now(timezone.utc) - job.updated_at).total_seconds()
+        return age > ttl_seconds
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #

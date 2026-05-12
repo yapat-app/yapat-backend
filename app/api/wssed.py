@@ -1,8 +1,10 @@
 """
-WSSED API endpoints
+REST API for WSSED (weakly supervised sound event detection).
 
-Exposes training job management, active-learning suggestions, label
-submission, retrain, and prediction histogram.
+Routes cover GPU-backed training job lifecycle, active-learning workflows
+(suggestions, labels, species-level retrain), and prediction histograms.
+Training is executed asynchronously: this layer persists job state and
+delegates remote work to Celery and the WSSED GPU service.
 """
 
 import logging
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ============ Training jobs ============
+# --- Training jobs -----------------------------------------------------------
 
 @router.post(
     "/training-jobs",
@@ -41,10 +43,11 @@ def create_training_job(
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Create and dispatch a full WSSED training job to the GPU server.
+    Create a training job record and enqueue remote training on the GPU server.
 
-    Returns the job_id immediately; poll GET /training-jobs/{job_id}/status
-    to track progress.
+    Returns HTTP 202 with ``job_id`` while work runs asynchronously. Poll
+    ``GET /training-jobs/{job_id}/status`` for state transitions. If the Celery
+    broker rejects the task, the job is marked FAILED and HTTP 503 is returned.
     """
     svc = WSSEDService(db)
     try:
@@ -94,8 +97,11 @@ def dispatch_training_job(
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Re-queue a PENDING training job to Celery (recovery if the worker never
-    received ``trigger_wssed_training``).
+    Re-enqueue a training job that is still ``PENDING`` in the database.
+
+    Use when ``POST /training-jobs`` succeeded but ``trigger_wssed_training``
+    was never consumed (for example, transient broker or worker issues).
+    Returns HTTP 409 if the job is not ``PENDING``.
     """
     svc = WSSEDService(db)
     data = svc.get_training_job_status(job_id)
@@ -134,36 +140,40 @@ def dispatch_training_job(
     "/training-jobs/{job_id}/status",
     response_model=WSSEDTrainingStatusResponse,
 )
-def get_training_job_status(
+async def get_training_job_status(
     job_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Return the current status of a WSSED training job.
+    Return training job status from the application database.
 
-    The status is read from the local DB (updated by the Celery
-    poll_training_status task).  A quick GPU-server probe is also attempted
-    when the job is still in TRAINING state so the response stays fresh.
+    For ``TRAINING`` jobs, a conditional refresh queries the GPU server only when
+    the last persisted probe is older than ``settings.WSSED_POLL_INTERVAL``
+    seconds, limiting load on the remote service during frequent client polling.
     """
+    from app.config import settings
+
     svc = WSSEDService(db)
     data = svc.get_training_job_status(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail=f"Training job {job_id} not found")
 
-    # If still running, try a live GPU probe (best-effort, non-blocking)
-    if data["status"] == "TRAINING":
+    if data["status"] == "TRAINING" and svc.is_status_stale(
+        job_id, settings.WSSED_POLL_INTERVAL
+    ):
         try:
-            import asyncio
-            job = asyncio.run(svc.update_training_status(job_id))
+            await svc.update_training_status(job_id)
             data = svc.get_training_job_status(job_id)
         except Exception:
-            pass  # keep DB value on probe failure
+            # Best-effort refresh; return last known DB state if the GPU is unreachable.
+            pass
 
+    data.pop("_updated_at", None)
     return WSSEDTrainingStatusResponse(**data)
 
 
-# ============ Active learning – suggestions ============
+# --- Active learning: suggestions --------------------------------------------
 
 @router.get("/suggestions", response_model=ActiveLearningResponse)
 def get_suggestions(
@@ -175,7 +185,7 @@ def get_suggestions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Return unlabeled snippet suggestions for active learning."""
+    """List unlabeled snippets above a confidence threshold for a species model."""
     svc = WSSEDService(db)
     try:
         result = svc.get_suggestions(
@@ -190,7 +200,7 @@ def get_suggestions(
     return result
 
 
-# ============ Active learning – label ============
+# --- Active learning: labels -------------------------------------------------
 
 @router.post("/label", status_code=status.HTTP_204_NO_CONTENT)
 def submit_label(
@@ -198,7 +208,7 @@ def submit_label(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Accept or reject a snippet for the given species model."""
+    """Record user feedback (accept or reject) for one snippet on a species model."""
     svc = WSSEDService(db)
     try:
         svc.submit_label(
@@ -214,7 +224,7 @@ def submit_label(
         raise HTTPException(status_code=500, detail=f"Failed to submit label: {e}")
 
 
-# ============ Active learning – retrain ============
+# --- Active learning: retrain ------------------------------------------------
 
 @router.post("/retrain", status_code=status.HTTP_202_ACCEPTED)
 def retrain(
@@ -222,7 +232,10 @@ def retrain(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Trigger a species-level retrain after labeling."""
+    """
+    Start a species-scoped retrain after labeling; enqueues the same Celery path
+    as full-dataset training with hyperparameters derived from the request body.
+    """
     svc = WSSEDService(db)
     try:
         job = svc.retrain(
@@ -239,7 +252,7 @@ def retrain(
     return {"job_id": job.id, "status": job.status.value}
 
 
-# ============ Histogram ============
+# --- Prediction histogram ----------------------------------------------------
 
 @router.get("/histogram", response_model=PredictionHistogram)
 def get_histogram(
@@ -248,7 +261,7 @@ def get_histogram(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Return a confidence-score histogram for a species model."""
+    """Return a histogram of model confidence scores over snippets in a snippet set."""
     svc = WSSEDService(db)
     try:
         result = svc.get_histogram(model_id=model_id, snippet_set_id=snippet_set_id)

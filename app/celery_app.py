@@ -59,6 +59,14 @@ celery_app.conf.update(
             "schedule": 1800,
             "options": {"queue": "pam_al"},
         },
+        "wssed-sync-training-jobs": {
+            "task": "app.tasks.wssed_tasks.sync_wssed_training_jobs",
+            # Poll GPU server for all TRAINING jobs every WSSED_POLL_INTERVAL (10 s).
+            # Keeps DB fresh so the status endpoint never has to probe the GPU
+            # server directly on each frontend poll.
+            "schedule": settings.WSSED_POLL_INTERVAL,
+            "options": {"queue": "default"},
+        },
     },
 )
 
