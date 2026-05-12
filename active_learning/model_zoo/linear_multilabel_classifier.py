@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import torch
 import torch.nn as nn
+logger = logging.getLogger(__name__)
+
 
 class MultiLabelLinearClassifier(nn.Module):
     """
@@ -149,6 +151,7 @@ class MultiLabelLinearClassifier(nn.Module):
         can belong to multiple classes.
         """
         class_support = y.sum(axis=0).astype(int)
+        print(f"Class support: {class_support}")
 
         keep_class_indices = [
             i for i, count in enumerate(class_support)
