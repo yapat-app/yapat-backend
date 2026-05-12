@@ -127,10 +127,45 @@ def register_checkpoint(
         status=ALModelStatus.AVAILABLE,
     )
     db.add(ckpt)
+    db.flush()
+    _ensure_family_state(
+        db=db,
+        dataset_id=dataset_id,
+        model_family_name=model_family_name,
+        checkpoint_id=ckpt.id,
+    )
     db.commit()
     db.refresh(ckpt)
     logger.info("Registered PAM checkpoint id=%d name=%s is_base=%s", ckpt.id, model_family_name, is_base)
     return ckpt
+
+def _ensure_family_state(
+    db: Session,
+    dataset_id: int,
+    model_family_name: str,
+    checkpoint_id: int,
+) -> None:
+    family = (
+        db.query(ALModelFamilyState)
+        .filter(
+            ALModelFamilyState.dataset_id == dataset_id,
+            ALModelFamilyState.model_family_name == model_family_name,
+        )
+        .one_or_none()
+    )
+
+    if family is None:
+        family = ALModelFamilyState(
+            dataset_id=dataset_id,
+            model_family_name=model_family_name,
+            active_model_checkpoint_id=checkpoint_id,
+        )
+        db.add(family)
+    else:
+        family.active_model_checkpoint_id = checkpoint_id
+
+    logger.info("Created new entry in ALModelFamilyState")
+
 
 
 def get_active_checkpoint_for_model_family(
