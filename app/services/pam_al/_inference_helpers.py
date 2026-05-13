@@ -10,11 +10,12 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 import torch
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.snippet import Snippet
-from app.models.pam_active_learning import ALPrediction
+from app.models.pam_active_learning import ALPrediction, ALSnippetAnnotation
 from app.schemas.pam_active_learning import ALInferenceRow
 
 from active_learning.samplers import uncertainty, density, diversity, composite
@@ -396,6 +397,87 @@ def get_predictions_for_checkpoint_and_snippet_set(
             Snippet.snippet_set_id == snippet_set_id,
         )
         .order_by(ALPrediction.composite_score.desc().nullslast(), ALPrediction.id.asc())
+        .all()
+    )
+
+
+def predictions_exist_for_checkpoint_and_snippet_set(
+    db: Session,
+    model_checkpoint_id: int,
+    snippet_set_id: int,
+) -> bool:
+    return (
+        db.query(ALPrediction.id)
+        .join(Snippet, Snippet.id == ALPrediction.snippet_id)
+        .filter(
+            ALPrediction.model_checkpoint_id == model_checkpoint_id,
+            Snippet.snippet_set_id == snippet_set_id,
+        )
+        .first()
+        is not None
+    )
+
+
+def count_predictions_for_checkpoint_and_snippet_set(
+    db: Session,
+    model_checkpoint_id: int,
+    snippet_set_id: int,
+) -> int:
+    count = (
+        db.query(func.count(ALPrediction.id))
+        .join(Snippet, Snippet.id == ALPrediction.snippet_id)
+        .filter(
+            ALPrediction.model_checkpoint_id == model_checkpoint_id,
+            Snippet.snippet_set_id == snippet_set_id,
+        )
+        .scalar()
+    )
+    return int(count or 0)
+
+
+def get_top_prediction_suggestions(
+    db: Session,
+    dataset_id: int,
+    model_checkpoint_id: int,
+    snippet_set_id: int,
+    strategy: str,
+    k: int,
+) -> list[ALPrediction]:
+    annotated_exists = (
+        db.query(ALSnippetAnnotation.id)
+        .filter(
+            ALSnippetAnnotation.dataset_id == dataset_id,
+            ALSnippetAnnotation.snippet_id == ALPrediction.snippet_id,
+        )
+        .exists()
+    )
+
+    query = (
+        db.query(ALPrediction)
+        .join(Snippet, Snippet.id == ALPrediction.snippet_id)
+        .filter(
+            ALPrediction.model_checkpoint_id == model_checkpoint_id,
+            Snippet.snippet_set_id == snippet_set_id,
+            ~annotated_exists,
+        )
+    )
+
+    if strategy == "random":
+        return query.order_by(func.random()).limit(k).all()
+
+    score_columns = {
+        "uncertainty": ALPrediction.uncertainty,
+        "diversity": ALPrediction.diversity,
+        "density": ALPrediction.density,
+        "composite": ALPrediction.composite_score,
+    }
+    if strategy not in score_columns:
+        raise ValueError(f"Unsupported suggestion strategy '{strategy}'.")
+
+    score_column = score_columns[strategy]
+    return (
+        query.order_by(score_column.desc().nullslast(), ALPrediction.id.asc())
+        .limit(k)
         .all()
     )
 

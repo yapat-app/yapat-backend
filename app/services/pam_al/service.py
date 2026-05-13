@@ -687,9 +687,13 @@ class PAMActiveLearningService:
             body.threshold, body.density_k, body.composite_wu, body.composite_wd, body.composite_wr,
         )
 
-        predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(self.db, model_ckpt.id, body.snippet_set_id)
+        predictions_exist = inf_h.predictions_exist_for_checkpoint_and_snippet_set(
+            self.db,
+            model_ckpt.id,
+            body.snippet_set_id,
+        )
 
-        if not predictions or body.force_refresh:
+        if not predictions_exist or body.force_refresh:
             X, snippet_rows = data_h.load_embeddings(self.db, body.snippet_set_id, embedding_model_id)
 
             # Resolve label order *before* loading the model so we can fall back to
@@ -761,9 +765,8 @@ class PAMActiveLearningService:
             )
             self.db.commit()
 
-            predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(self.db, model_ckpt.id, body.snippet_set_id)
-
         if not body.sample_suggestion:
+            predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(self.db, model_ckpt.id, body.snippet_set_id)
             return {
                 "mode": "predictions", "model_family_name": body.model_family_name,
                 "used_checkpoint_id": model_ckpt.id, "total_predictions": len(predictions),
@@ -772,16 +775,28 @@ class PAMActiveLearningService:
             }
 
         strategy = body.suggestion_strategy.value if hasattr(body.suggestion_strategy, "value") else body.suggestion_strategy
-        k = body.k or 20
+        strategy = strategy or SamplingMode.COMPOSITE.value
+        k = max(1, body.k or 20)
 
-        annotated_ids = ann_h.get_annotated_snippet_ids_for_snippet_set(self.db, model_ckpt.dataset_id, body.snippet_set_id)
-        ranked = inf_h.rank_prediction_suggestions(self.db, model_ckpt.dataset_id, body.snippet_set_id, predictions, strategy, annotated_ids)
+        total_predictions = inf_h.count_predictions_for_checkpoint_and_snippet_set(
+            self.db,
+            model_ckpt.id,
+            body.snippet_set_id,
+        )
+        ranked = inf_h.get_top_prediction_suggestions(
+            self.db,
+            model_ckpt.dataset_id,
+            model_ckpt.id,
+            body.snippet_set_id,
+            strategy,
+            k,
+        )
 
         return {
             "mode": "suggestions", "model_family_name": body.model_family_name,
-            "used_checkpoint_id": model_ckpt.id, "total_predictions": len(predictions),
-            "returned_count": min(k, len(ranked)), "suggestion_strategy": body.suggestion_strategy,
-            "k": k, "rows": ranked[:k],
+            "used_checkpoint_id": model_ckpt.id, "total_predictions": total_predictions,
+            "returned_count": len(ranked), "suggestion_strategy": body.suggestion_strategy,
+            "k": k, "rows": ranked,
         }
 
     # ==================================================================
