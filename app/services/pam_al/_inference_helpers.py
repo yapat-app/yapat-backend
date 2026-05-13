@@ -9,6 +9,7 @@ import time
 from typing import Iterable, List, Sequence
 
 import torch
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.snippet import Snippet
@@ -136,15 +137,15 @@ def save_prediction_rows(
     model_checkpoint_id: int,
     rows,
 ) -> None:
-    """Upsert prediction rows.
+    """
+    Persist model predictions using chunked bulk upserts.
 
-    Notes:
-    - Uses chunked reads/writes to keep ORM memory and query payload sizes
-      bounded for large snippet sets.
+    PostgreSQL uses the checkpoint/snippet unique constraint for conflict
+    resolution, avoiding ORM hydration of existing prediction rows.
     """
 
-    # Chunked upserts keep ORM memory and query payload sizes bounded.
-    chunk_size = 2000
+    # Keep each statement large enough for throughput while bounding payload size.
+    chunk_size = 5000
     rows = list(rows)
 
     total = len(rows)
@@ -157,47 +158,77 @@ def save_prediction_rows(
         chunk_size,
     )
 
+    bind = db.get_bind()
+    dialect_name = bind.dialect.name if bind is not None else ""
+
     for chunk_idx, start in enumerate(range(0, len(rows), chunk_size), start=1):
         chunk = rows[start : start + chunk_size]
-        snippet_ids = [r.snippet_id for r in chunk]
+        values = [
+            {
+                "model_checkpoint_id": model_checkpoint_id,
+                "snippet_id": row.snippet_id,
+                "predicted_labels": row.predicted_labels,
+                "predicted_probabilities": row.predicted_probabilities,
+                "uncertainty": row.uncertainty,
+                "diversity": row.diversity,
+                "density": row.density,
+                "composite_score": row.composite_score,
+            }
+            for row in chunk
+        ]
 
-        existing_rows = (
-            db.query(ALPrediction)
-            .filter(
-                ALPrediction.model_checkpoint_id == model_checkpoint_id,
-                ALPrediction.snippet_id.in_(snippet_ids),
+        if dialect_name == "postgresql":
+            stmt = pg_insert(ALPrediction).values(values)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_al_prediction",
+                set_={
+                    "predicted_labels": stmt.excluded.predicted_labels,
+                    "predicted_probabilities": stmt.excluded.predicted_probabilities,
+                    "uncertainty": stmt.excluded.uncertainty,
+                    "diversity": stmt.excluded.diversity,
+                    "density": stmt.excluded.density,
+                    "composite_score": stmt.excluded.composite_score,
+                },
             )
-            .all()
-        )
-        existing_by_sid = {p.snippet_id: p for p in existing_rows}
+            db.execute(stmt)
+        else:
+            # Preserve compatibility with non-Postgres engines used in local tests.
+            snippet_ids = [row.snippet_id for row in chunk]
+            existing_rows = (
+                db.query(ALPrediction)
+                .filter(
+                    ALPrediction.model_checkpoint_id == model_checkpoint_id,
+                    ALPrediction.snippet_id.in_(snippet_ids),
+                )
+                .all()
+            )
+            existing_by_sid = {p.snippet_id: p for p in existing_rows}
 
-        to_add: list[ALPrediction] = []
-        for row in chunk:
-            pred = existing_by_sid.get(row.snippet_id)
-            if pred is None:
-                pred = ALPrediction(model_checkpoint_id=model_checkpoint_id, snippet_id=row.snippet_id)
-                to_add.append(pred)
+            to_add: list[ALPrediction] = []
+            for row in chunk:
+                pred = existing_by_sid.get(row.snippet_id)
+                if pred is None:
+                    pred = ALPrediction(model_checkpoint_id=model_checkpoint_id, snippet_id=row.snippet_id)
+                    to_add.append(pred)
 
-            # Keep embeddings out of the predictions table to minimize row size
-            # and write amplification. If needed later, store checkpoint-scoped
-            # vectors separately using pgvector.
-            pred.predicted_labels = row.predicted_labels
-            pred.predicted_probabilities = row.predicted_probabilities
-            pred.uncertainty = row.uncertainty
-            pred.diversity = row.diversity
-            pred.density = row.density
-            pred.composite_score = row.composite_score
+                pred.predicted_labels = row.predicted_labels
+                pred.predicted_probabilities = row.predicted_probabilities
+                pred.uncertainty = row.uncertainty
+                pred.diversity = row.diversity
+                pred.density = row.density
+                pred.composite_score = row.composite_score
 
-        if to_add:
-            db.add_all(to_add)
+            if to_add:
+                db.add_all(to_add)
+
         db.flush()
 
         logger.info(
-            "pam-al inference: upsert chunk %s/%s (rows=%s, created=%s)",
+            "pam-al inference: upsert chunk %s/%s (rows=%s, dialect=%s)",
             chunk_idx,
             total_chunks,
             len(chunk),
-            len(to_add),
+            dialect_name,
         )
 
 
