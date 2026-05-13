@@ -36,6 +36,7 @@ class WSSEDTrainingJob(Base):
     hyperparameters = Column(JSON, nullable=False)
     status = Column(SQLEnum(TrainingStatus), nullable=False, default=TrainingStatus.PENDING, index=True)
     model_path = Column(String, nullable=True)
+    model_paths = Column(JSON, nullable=True)
     training_metrics = Column(JSON, nullable=True)
     progress = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)

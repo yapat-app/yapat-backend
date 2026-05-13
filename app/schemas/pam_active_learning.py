@@ -15,6 +15,7 @@ from enum import Enum
 class ALModelType(str, Enum):
     PAM_MLP_MULTILABEL = "pam_mlp_multilabel_classifier"
     PAM_LINEAR_MULTILABEL = "pam_linear_multilabel_classifier"
+    WSSED_BIRDNET_SEGMENT = "wssed_birdnet_segment_classifier"
 
 class ALModelStatusSchema(str, Enum):
     AVAILABLE = "AVAILABLE"

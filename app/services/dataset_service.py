@@ -284,6 +284,7 @@ class DatasetService:
             raise ValueError(f"Invalid dataset path: {dataset_path}")
         
         species_list = []
+        root_audio_files = []
         
         # Scan immediate subdirectories as species folders
         try:
@@ -297,7 +298,22 @@ class DatasetService:
         for entry in entries:
             entry_path = os.path.join(dataset_path, entry)
             
-            # Skip files in root directory, only process subdirectories
+            # Flat focal-recording datasets often store wavs directly at the root.
+            if os.path.isfile(entry_path):
+                _, ext = os.path.splitext(entry.lower())
+                if ext in AUDIO_EXTENSIONS:
+                    try:
+                        file_size = os.path.getsize(entry_path)
+                    except Exception:
+                        file_size = None
+
+                    root_audio_files.append({
+                        'filename': entry,
+                        'file_path': os.path.relpath(entry_path, DATA_ROOT),
+                        'size': file_size
+                    })
+                continue
+
             if not os.path.isdir(entry_path):
                 continue
             
@@ -348,5 +364,12 @@ class DatasetService:
                     'file_count': len(audio_files),
                     'files': audio_files
                 })
+
+        if root_audio_files:
+            species_list.insert(0, {
+                'name': 'Recordings',
+                'file_count': len(root_audio_files),
+                'files': root_audio_files,
+            })
         
         return {'species': species_list}

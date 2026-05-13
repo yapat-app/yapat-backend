@@ -27,6 +27,7 @@ from app.models.pam_active_learning import (
 from app.schemas.pam_active_learning import ALModelType
 from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
 from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
+from app.models.wssed_pytorch_models import SimpleLinearClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -197,12 +198,12 @@ def save_classifier_checkpoint(
     dropout: float | None,
     label_order: list[str],
 ) -> None:
-    if model.model is None:
+    if hasattr(model, "model") and model.model is None:
         raise ValueError("Cannot save checkpoint: classifier architecture has not been created.")
 
     checkpoint = {
         "model_type": getattr(model, "model_type", None),
-        "n_dim": model.n_dim,
+        "n_dim": getattr(model, "n_dim", getattr(model, "input_dim", None)),
         "num_classes": model.num_classes,
         "state_dict": model.state_dict(),
         "label_order": label_order,
@@ -269,9 +270,13 @@ def make_model(model_type: ALModelType | str):
         return MultiLabelLinearClassifier()
     if model_type == ALModelType.PAM_MLP_MULTILABEL or model_type == ALModelType.PAM_MLP_MULTILABEL.value:
         return MultiLabelMLPClassifier()
+    if model_type == ALModelType.WSSED_BIRDNET_SEGMENT or model_type == ALModelType.WSSED_BIRDNET_SEGMENT.value:
+        return SimpleLinearClassifier()
     raise ValueError(f"Unsupported model_type '{model_type}'")
 
 def load_model_from_checkpoint(model_ckpt, device: str):
+    if model_ckpt.model_type == ALModelType.WSSED_BIRDNET_SEGMENT or model_ckpt.model_type == ALModelType.WSSED_BIRDNET_SEGMENT.value:
+        return SimpleLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
     if model_ckpt.model_type in {"pam_multilabel_classifier", "pam_multi_label_classifier"}:
         return MultiLabelLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
     if model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL or model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL.value:

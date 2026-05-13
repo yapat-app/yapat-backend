@@ -135,6 +135,7 @@ def poll_training_status(self, job_id: int):
                 "job_id": job_id,
                 "training_status": job.status.value,
                 "model_path": job.model_path,
+                "model_paths": job.model_paths,
                 "completed": job.status in (TrainingStatus.COMPLETED, TrainingStatus.FAILED),
             }
             

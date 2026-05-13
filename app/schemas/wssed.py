@@ -68,6 +68,7 @@ class WSSEDTrainingStatusResponse(BaseModel):
     job_id: int
     status: str  # PENDING | TRAINING | COMPLETED | FAILED
     model_path: Optional[str] = None
+    model_paths: Optional[Dict[str, Any]] = None
     metrics: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     progress: Optional[Dict[str, Any]] = None
