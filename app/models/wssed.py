@@ -37,6 +37,7 @@ class WSSEDTrainingJob(Base):
     status = Column(SQLEnum(TrainingStatus), nullable=False, default=TrainingStatus.PENDING, index=True)
     model_path = Column(String, nullable=True)
     training_metrics = Column(JSON, nullable=True)
+    progress = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=True)

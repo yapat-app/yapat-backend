@@ -123,6 +123,8 @@ class WSSEDService:
             job.model_path = data["model_path"]
         if data.get("metrics"):
             job.training_metrics = data["metrics"]
+        if data.get("progress") is not None:
+            job.progress = data["progress"]
         if data.get("error"):
             job.error_message = data["error"]
 
@@ -385,8 +387,22 @@ class WSSEDService:
             "model_path": job.model_path,
             "metrics": job.training_metrics,
             "error": job.error_message,
-            "progress": None,
+            "progress": job.progress or self._default_training_progress(job),
             "_updated_at": job.updated_at,  # internal; used by API for probe throttle
+        }
+
+    def _default_training_progress(self, job: WSSEDTrainingJob) -> Dict[str, Any]:
+        """Build useful progress metadata before the first GPU sync arrives."""
+        hyperparameters = job.hyperparameters or {}
+        return {
+            "phase": job.status.value.lower(),
+            "current_epoch": None,
+            "total_epochs": hyperparameters.get("epochs"),
+            "model_name": hyperparameters.get("model_name") or job.model_name,
+            "bag_seconds": hyperparameters.get("bag_seconds"),
+            "hop_seconds": hyperparameters.get("hop_seconds"),
+            "learning_rate": hyperparameters.get("learning_rate"),
+            "threshold": hyperparameters.get("threshold"),
         }
 
     def is_status_stale(self, job_id: int, ttl_seconds: int) -> bool:
