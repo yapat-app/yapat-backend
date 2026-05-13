@@ -8,6 +8,7 @@ import logging
 import time
 from typing import Iterable, List, Sequence
 
+import numpy as np
 import torch
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -24,7 +25,6 @@ from active_learning.config import (
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
 )
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,12 @@ def build_inference_rows(
     mid = time.perf_counter()
     density_scores_u = density(z_u, k=density_k)
     end = time.perf_counter()
-    print(f"Diversity took: {mid - start:.4f} sec", flush=True)
-    print(f"Density took:   {end - mid:.4f} sec", flush=True)
-    print(f"Total took:     {end - start:.4f} sec", flush=True)
+    logger.info(
+        "pam-al inference: acquisition scoring diversity=%.4fs density=%.4fs total=%.4fs",
+        mid - start,
+        end - mid,
+        end - start,
+    )
     composite_scores_u = composite(
         uncertainty_scores=uncertainty_scores_u,
         diversity_scores=diversity_scores_u,
@@ -98,21 +101,26 @@ def build_inference_rows(
     density_full = [None] * len(snippet_ids)
     composite_full = [None] * len(snippet_ids)
 
-    for pos, idx in enumerate(unlabeled_indices):
-        uncertainty_full[idx] = float(uncertainty_scores_u[pos].item())
-        diversity_full[idx] = float(diversity_scores_u[pos].item())
-        density_full[idx] = float(density_scores_u[pos].item())
-        composite_full[idx] = float(composite_scores_u[pos].item())
+    if unlabeled_indices:
+        uncertainty_values = uncertainty_scores_u.detach().cpu().numpy()
+        diversity_values = diversity_scores_u.detach().cpu().numpy()
+        density_values = density_scores_u.detach().cpu().numpy()
+        composite_values = composite_scores_u.detach().cpu().numpy()
+
+        for pos, idx in enumerate(unlabeled_indices):
+            uncertainty_full[idx] = float(uncertainty_values[pos])
+            diversity_full[idx] = float(diversity_values[pos])
+            density_full[idx] = float(density_values[pos])
+            composite_full[idx] = float(composite_values[pos])
 
     rows: list[ALInferenceRow] = []
+    probs_np = probs.detach().cpu().numpy()
+    preds_np = preds.detach().cpu().numpy()
 
     for i, snippet_id in enumerate(snippet_ids):
-        pred_indices = torch.where(preds[i] > 0)[0].tolist()
+        pred_indices = np.flatnonzero(preds_np[i] > 0)
         pred_labels = [label_order[j] for j in pred_indices]
-        prob_dict = {
-            label_order[j]: float(probs[i, j].item())
-            for j in range(len(label_order))
-        }
+        prob_dict = dict(zip(label_order, map(float, probs_np[i])))
 
         rows.append(
             ALInferenceRow(
