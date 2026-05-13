@@ -103,7 +103,7 @@ class ALRunInferenceRequest(BaseModel):
     model_family_name: Optional[str] = Field(default=None, description="Model family name shared across checkpoint versions")
     dataset_id : int
     snippet_set_id: int = Field(..., description="Snippet set to retrieve predictions for")
-    device: Optional[str] = Field(default="cpu", description="cpu or cuda")
+    device: Optional[str] = Field(default=None, description="cpu or cuda; defaults to PAM_DEFAULT_DEVICE")
 
     threshold: Optional[float] = Field(default=None)
     density_k: Optional[int] = Field(default=None)
@@ -254,7 +254,7 @@ class ALRetrainRequest(BaseModel):
     batch_size: Optional[int] = Field(default=None, ge=1)
     hidden_dim: Optional[int] = Field(default=None, ge=1)
     dropout: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    device: Optional[str] = Field(default=None, description="cpu or cuda")
+    device: Optional[str] = Field(default=None, description="cpu or cuda; defaults to PAM_DEFAULT_DEVICE")
 
     threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     density_k: Optional[int] = Field(default=None, ge=1)
@@ -327,7 +327,7 @@ class ALTrainFromScratchRequest(BaseModel):
     batch_size: Optional[int] = Field(default=16)
     hidden_dim: Optional[int] = Field(default=128, nullable=True)
     dropout: Optional[float] = Field(default=0.5, nullable=True)
-    device: Optional[str] = Field(default="cpu", description="cpu or cuda")
+    device: Optional[str] = Field(default=None, description="cpu or cuda; defaults to PAM_DEFAULT_DEVICE")
 
     run_inference: bool = Field(default=False)
 
