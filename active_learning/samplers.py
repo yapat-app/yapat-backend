@@ -6,8 +6,32 @@ import faiss
 
 from app.schemas.pam_active_learning import ALSingleSampleScore
 
+
+def normalize_diversity(d: torch.Tensor) -> torch.Tensor:
+    # diversity already in [0, 1], clamp makes sure no outliers.
+    return torch.clamp(d, 0.0, 1.0)
+
+def normalize_density(
+    r: torch.Tensor,
+    q_low: float = 0.05,
+    q_high: float = 0.95,
+) -> torch.Tensor:
+    # density values will have no bounds e.g. 1/0.03 = 33.33
+    # therefore we use quantile-based normalization to mitigate outliers, and clamp to [0, 1].
+    if r.numel() == 0:
+        return r
+
+    lo = torch.quantile(r, q_low)
+    hi = torch.quantile(r, q_high)
+
+    if torch.isclose(lo, hi):
+        return torch.zeros_like(r)
+
+    return torch.clamp((r - lo) / (hi - lo), 0.0, 1.0)
+
+
 def _to_np(x: torch.Tensor) -> np.ndarray:
-    x = F.normalize(x, p=2, dim=1)
+    x = F.normalize(x, p=2, dim=1) # normalizing the embeddings using l2- norm
     return x.detach().cpu().numpy().astype("float32")
 
 def _make_hnsw_index(
@@ -25,47 +49,65 @@ def _make_hnsw_index(
 
 def uncertainty(P: torch.Tensor) -> torch.Tensor:
     """
-    Multi-label uncertainty: mean binary entropy across classes.
-    P: [N, C] sigmoid probabilities
+    Multi-label uncertainty normalized to [0, 1].
+
+    Raw binary entropy has max log(2) at p=0.5.
+    Dividing by log(2) gives:
+        0 = confident
+        1 = maximally uncertain
     """
-    # H(p) = -[p log p + (1-p) log(1-p)]
-    return -(P * torch.log(P + 1e-12) + (1 - P) * torch.log(1 - P + 1e-12)).mean(dim=1)
+    entropy = -(
+        P * torch.log(P + 1e-12)
+        + (1 - P) * torch.log(1 - P + 1e-12)
+    ).mean(dim=1)
 
-def diversity(Z_u: torch.Tensor, Z_l: torch.Tensor) -> torch.Tensor: # INFO: 0.0331 seconds for 228 snippets
+    return torch.clamp(entropy / np.log(2), 0.0, 1.0)
 
+def diversity(Z_u: torch.Tensor, Z_l: torch.Tensor) -> torch.Tensor:
+    """
+    Diversity / novelty normalized to [0, 1].
+
+    Uses distance to nearest labeled embedding.
+    Since your observed L2-normalized distances are usually <= 1,
+    we clip values to [0, 1].
+    """
     if Z_u.numel() == 0:
         return torch.empty(0, device=Z_u.device)
 
     if Z_l.numel() == 0:
         return torch.zeros(Z_u.shape[0], device=Z_u.device)
+
     device = Z_u.device
 
     z_u_np = _to_np(Z_u)
     z_l_np = _to_np(Z_l)
 
-    # OLD METHOD: pairwise distance matrix (can be large)
-    # dist = torch.cdist(Z_u, Z_l)              # [N_u, N_l]
-    # return dist.min(dim=1).values             # [N_u]
-
-    # FAISS Implementation
     dim = z_l_np.shape[1]
     index = faiss.IndexFlatL2(dim)
     index.add(z_l_np)
+
     distances, _ = index.search(z_u_np, k=1)
     distances = np.sqrt(distances[:, 0])
-    return torch.tensor(distances, dtype=torch.float32, device=device)
 
-    # FAISS HNSW Implementation
-    # index = _make_hnsw_index(z_l_np, M=32, ef_search=64)
-    # distances, _ = index.search(z_u_np, k=1)
-    # distances = np.sqrt(distances[:, 0])
-    # return torch.tensor(distances, dtype=torch.float32, device=device)
+    scores = torch.tensor(distances, dtype=torch.float32, device=device)
 
+    return torch.clamp(scores, 0.0, 1.0)
 
-
-def density(Z_u: torch.Tensor, k: int = 15) -> torch.Tensor: # INFO: 0.0053 seconds for 228 snippets
+def density(
+    Z_u: torch.Tensor,
+    k: int = 15,
+    q_low: float = 0.05,
+    q_high: float = 0.95,
+) -> torch.Tensor:
     """
-        rho(i) = 1 / avg distance to k nearest unlabeled neighbors.
+    Density / representativeness normalized to [0, 1].
+
+    Raw density:
+        rho(i) = 1 / avg distance to k nearest unlabeled neighbors
+
+    Then percentile-normalized:
+        0 = sparse / outlier-like
+        1 = dense / representative
     """
     if Z_u.numel() == 0:
         return torch.empty(0, device=Z_u.device)
@@ -76,40 +118,32 @@ def density(Z_u: torch.Tensor, k: int = 15) -> torch.Tensor: # INFO: 0.0053 seco
 
     device = Z_u.device
 
-    # OLD METHOD: pairwise distance matrix (can be large)
-    # dist = torch.cdist(Z_u, Z_u)              # [N_u, N_u]
-    # knn = dist.topk(k=min(k+1, N_u), largest=False).values[:, 1:]
-    # avg = knn.mean(dim=1)
-    # return 1.0 / (avg + 1e-8)
-
-    # FAISS Implementation
     z_u_np = _to_np(Z_u)
     dim = z_u_np.shape[1]
+
     index = faiss.IndexFlatL2(dim)
     index.add(z_u_np)
+
     k_eff = min(k + 1, N_u)
     distances, _ = index.search(z_u_np, k=k_eff)
-    distances = distances[:, 1:]     # first neighbor is self, distance 0
+
+    distances = distances[:, 1:]
     distances = np.sqrt(distances)
+
     avg = distances.mean(axis=1)
-    scores = 1.0 / (avg + 1e-8)
-    return torch.tensor(scores, dtype=torch.float32, device=device)
+    raw_scores = 1.0 / (avg + 1e-8)
 
-    # FAISS HNSW Implementation
-    # z_u_np = _to_np(Z_u)
-    # index = _make_hnsw_index(z_u_np, M=32, ef_search=64)
-    # k_eff = min(k + 1, N_u)
-    # distances, _ = index.search(z_u_np, k=k_eff)
-    # distances = distances[:, 1:]     # first neighbor is usually self
-    # if distances.shape[1] == 0:
-    #     return torch.zeros(N_u, device=device)
-    # distances = np.sqrt(distances)
-    # avg = distances.mean(axis=1)
-    # scores = 1.0 / (avg + 1e-8)
-    # return torch.tensor(scores, dtype=torch.float32, device=device)
+    scores = torch.tensor(raw_scores, dtype=torch.float32, device=device)
 
+    # density values have no bounds, that's why percentile-based normalization is used to mitigate outliers.
+    lo = torch.quantile(scores, q_low)
+    hi = torch.quantile(scores, q_high)
 
+    if torch.isclose(lo, hi):
+        return torch.zeros_like(scores)
 
+    scores = (scores - lo) / (hi - lo)
+    return torch.clamp(scores, 0.0, 1.0)
 
 
 def random(n: int, device: str = "cpu") -> torch.Tensor:
@@ -124,77 +158,23 @@ def composite(
     wd: float = 0.25,
     wr: float = 0.25,
 ) -> torch.Tensor:
-    def normalize(x: torch.Tensor) -> torch.Tensor:
-        if x.numel() == 0:
-            return x
-        x_min = x.min()
-        x_max = x.max()
-        if torch.isclose(x_min, x_max):
-            return torch.zeros_like(x)
-        return (x - x_min) / (x_max - x_min)
-
-    u = normalize(uncertainty_scores)
-    d = normalize(diversity_scores)
-    r = normalize(density_scores)
-
-    return wu * u + wd * d + wr * r
-
-def calculate_single_sample_scores(
-    probs_row: torch.Tensor,
-    sample_embedding: torch.Tensor,
-    unlabeled_embeddings: torch.Tensor,
-    labeled_embeddings: torch.Tensor,
-    density_k: int,
-    wu: float,
-    wd: float,
-    wr: float,
-) -> ALSingleSampleScore:
     """
-    Compute all acquisition values for one sample.
+    Composite score from already-normalized component scores.
 
-    probs_row: [C]
-    sample_embedding: [D]
-    unlabeled_embeddings: [N_u, D]
-    labeled_embeddings: [N_l, D]
+    Assumes all inputs are already in [0, 1].
     """
-    u_score = uncertainty(probs_row.unsqueeze(0)).squeeze(0)
 
-    if labeled_embeddings.numel() == 0:
-        d_score = None
-    else:
-        d_score = torch.cdist(
-            sample_embedding.unsqueeze(0),
-            labeled_embeddings,
-        ).min(dim=1).values.squeeze(0)
+    total = wu + wd + wr
+    if total <= 0:
+        return torch.zeros_like(uncertainty_scores)
 
-    if unlabeled_embeddings.shape[0] <= 1:
-        rho_score = None
-    else:
-        dist = torch.cdist(
-            sample_embedding.unsqueeze(0),
-            unlabeled_embeddings,
-        ).squeeze(0)
+    wu = wu / total
+    wd = wd / total
+    wr = wr / total
 
-        # remove exact self distance if present
-        sorted_vals = torch.sort(dist).values
-        neigh = sorted_vals[1:min(density_k + 1, sorted_vals.shape[0])]
-        if neigh.numel() == 0:
-            rho_score = None
-        else:
-            rho_score = 1.0 / (neigh.mean() + 1e-8)
-
-    if d_score is None or rho_score is None:
-        c_score = None
-    else:
-        # single-sample composite without global normalization is not very meaningful;
-        # use raw weighted sum here, mainly for convenience
-        c_score = wu * u_score + wd * d_score + wr * rho_score
-
-    return ALSingleSampleScore(
-        uncertainty=float(u_score.item()),
-        diversity=None if d_score is None else float(d_score.item()),
-        density=None if rho_score is None else float(rho_score.item()),
-        composite=None if c_score is None else float(c_score.item()),
+    return (
+        wu * uncertainty_scores
+        + wd * diversity_scores
+        + wr * density_scores
     )
-
 
