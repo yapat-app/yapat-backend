@@ -853,7 +853,7 @@ class PAMActiveLearningService:
 
         epochs = body.epochs if body.epochs is not None else int(hyper.get("epochs", 20))
         lr = body.learning_rate if body.learning_rate is not None else float(hyper.get("learning_rate", 1e-3))
-        bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", 32))
+        bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", DEFAULT_BATCH_SIZE))
         is_mlp = parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
 
         hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
@@ -1075,7 +1075,7 @@ class PAMActiveLearningService:
             model.to(dev)
             train_metrics = model.fit(X=X_train, y=y_train, epochs=int(hyper.get("epochs", 20)),
                                       learning_rate=float(hyper.get("learning_rate", 1e-3)),
-                                      batch_size=int(hyper.get("batch_size", 32)), device=dev)
+                                      batch_size=int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)), device=dev)
             logger.info(
                 "Finished cold-start model fit checkpoint_id=%d train_samples=%d num_classes=%d",
                 checkpoint_id,
@@ -1150,7 +1150,7 @@ class PAMActiveLearningService:
 
         epochs = body.epochs if body.epochs is not None else int(hyper.get("epochs", 20))
         lr = body.learning_rate if body.learning_rate is not None else float(hyper.get("learning_rate", 1e-3))
-        bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", 32))
+        bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", DEFAULT_BATCH_SIZE))
         is_mlp = parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
         hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
         do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
@@ -1377,7 +1377,7 @@ class PAMActiveLearningService:
             model.to(dev)
             train_metrics = model.fit(X=X_train, y=y_train,
                 epochs=int(hyper.get("epochs", 20)), learning_rate=float(hyper.get("learning_rate", 1e-3)),
-                batch_size=int(hyper.get("batch_size", 32)), device=dev)
+                batch_size=int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)), device=dev)
             logger.info("Finished retrain model fit checkpoint_id=%d", checkpoint_id)
 
             cp = ckpt_h.make_checkpoint_path(dataset_id, new_ckpt.model_family_name, new_ckpt.version, new_ckpt.id)

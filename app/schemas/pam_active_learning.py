@@ -324,7 +324,7 @@ class ALTrainFromScratchRequest(BaseModel):
     model_type: ALModelType = Field(default=ALModelType.PAM_LINEAR_MULTILABEL, description="Classifier type identifier")
     epochs: Optional[int] = Field(default=20, ge=1, le=500)
     learning_rate: Optional[float] = Field(default=1e-3)
-    batch_size: Optional[int] = Field(default=16)
+    batch_size: Optional[int] = Field(default=512)
     hidden_dim: Optional[int] = Field(default=128, nullable=True)
     dropout: Optional[float] = Field(default=0.5, nullable=True)
     device: Optional[str] = Field(default=None, description="cpu or cuda; defaults to PAM_DEFAULT_DEVICE")
