@@ -295,11 +295,17 @@ def run_and_store_inference(
     probs: torch.Tensor | None = None
     preds: torch.Tensor | None = None
 
+    predict_fn = getattr(model, "predict_with_features", None)
+
     with torch.inference_mode():
         for batch_idx, (start, end) in enumerate(_iter_batches(n, batch_size), start=1):
             x_batch = torch.as_tensor(X[start:end], dtype=torch.float32, device=device)
-            feat_b = model.extract_features(x_batch).detach().cpu()
-            prob_b, pred_b = model.predict(x_batch, threshold=threshold)
+            if predict_fn is not None:
+                feat_b, prob_b, pred_b = predict_fn(x_batch, threshold=threshold)
+            else:
+                feat_b = model.extract_features(x_batch)
+                prob_b, pred_b = model.predict(x_batch, threshold=threshold)
+            feat_b = feat_b.detach().cpu()
             prob_b = prob_b.detach().cpu()
             pred_b = pred_b.detach().cpu()
 
