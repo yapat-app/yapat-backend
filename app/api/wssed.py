@@ -23,6 +23,7 @@ from app.schemas.wssed import (
     WSSEDTrainingJobResponse,
     WSSEDTrainingStatusResponse,
     WSSEDDatasetArtifactsResponse,
+    WSSEDRegisterALResponse,
 )
 from app.services.wssed_service import WSSEDService
 
@@ -235,6 +236,30 @@ async def get_training_job_status(
 
     data.pop("_updated_at", None)
     return WSSEDTrainingStatusResponse(**data)
+
+
+@router.post(
+    "/training-jobs/{job_id}/register-al",
+    response_model=WSSEDRegisterALResponse,
+)
+async def register_training_job_for_al(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Sync a completed WSSED job from the GPU server, copy weights into
+    PAM_CHECKPOINTS_DIR, and register an Active Learning model family.
+    """
+    svc = WSSEDService(db)
+    try:
+        result = await svc.register_training_job_for_al(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to register WSSED job %s for AL", job_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return WSSEDRegisterALResponse(**result)
 
 
 # --- Active learning: suggestions --------------------------------------------

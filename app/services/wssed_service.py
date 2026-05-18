@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import csv
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -476,14 +477,55 @@ class WSSEDService:
     # Active learning checkpoint registration                              #
     # ------------------------------------------------------------------ #
 
+    async def register_training_job_for_al(self, job_id: int) -> Dict[str, Any]:
+        """Sync job status from GPU, copy checkpoint locally, register for PAM-AL."""
+        job = await self.update_training_status(job_id)
+        if job.status != TrainingStatus.COMPLETED:
+            raise ValueError(
+                f"Training job {job_id} is {job.status.value}; only COMPLETED jobs can be registered"
+            )
+
+        checkpoint = self._ensure_training_job_registered_for_al(job)
+        if checkpoint is None:
+            raise ValueError(
+                f"Training job {job_id} has no usable checkpoint path on the backend filesystem"
+            )
+
+        inference_job_id = None
+        try:
+            self._ensure_training_job_inference_enqueued(job, checkpoint)
+            inference_job_id = (job.training_metrics or {}).get("al_inference_job_id")
+        except Exception as exc:
+            logger.warning(
+                "Registered AL checkpoint for WSSED job %s but inference enqueue failed: %s",
+                job_id,
+                exc,
+            )
+
+        hyperparameters = checkpoint.hyperparameters or {}
+        return {
+            "job_id": job_id,
+            "al_checkpoint_id": checkpoint.id,
+            "model_family_name": checkpoint.model_family_name,
+            "checkpoint_path": checkpoint.checkpoint_path,
+            "snippet_set_id": hyperparameters.get("resolved_snippet_set_id"),
+            "inference_job_id": inference_job_id,
+            "message": "Checkpoint registered for Active Learning",
+        }
+
     def _ensure_training_job_registered_for_al(
         self,
         job: WSSEDTrainingJob,
     ) -> Optional[ALModelCheckpoint]:
         """Register the completed WSSED segment checkpoint as an AL model family."""
-        checkpoint_path = self._select_preferred_checkpoint_path(job)
-        if not checkpoint_path:
+        raw_checkpoint_path = self._select_preferred_checkpoint_path(job)
+        if not raw_checkpoint_path:
             logger.warning("WSSED job %s completed without a checkpoint path", job.id)
+            return None
+
+        checkpoint_path = self._materialize_checkpoint_for_al(job, raw_checkpoint_path)
+        if not checkpoint_path:
+            logger.warning("WSSED job %s checkpoint not readable: %s", job.id, raw_checkpoint_path)
             return None
 
         input_dim, num_classes = self._infer_linear_checkpoint_shape(checkpoint_path)
@@ -700,6 +742,9 @@ class WSSEDService:
 
         dataset = self.db.query(Dataset).filter(Dataset.id == job.dataset_id).first()
         if dataset is not None:
+            labels = self._labels_from_class_folders(dataset)
+            if len(labels) == num_classes:
+                return labels
             labels = self._labels_from_dataset_metadata(dataset)
             if len(labels) == num_classes:
                 return labels
@@ -719,6 +764,54 @@ class WSSEDService:
         if isinstance(value, list):
             return [str(v) for v in value if str(v).strip()]
         return []
+
+    def _materialize_checkpoint_for_al(
+        self,
+        job: WSSEDTrainingJob,
+        source_path: str,
+    ) -> Optional[str]:
+        """Copy GPU checkpoint into PAM_CHECKPOINTS_DIR when the source file is reachable."""
+        candidates: List[Path] = [Path(source_path)]
+
+        if source_path.startswith("/app/focal-data/"):
+            relative = Path(source_path).relative_to("/app/focal-data")
+            if settings.WSSED_FOCAL_DATA_ROOT:
+                candidates.append(Path(settings.WSSED_FOCAL_DATA_ROOT) / relative)
+            candidates.append(Path("focal-data") / relative)
+
+        source_file: Optional[Path] = None
+        for candidate in candidates:
+            if candidate.is_file():
+                source_file = candidate
+                break
+
+        if source_file is None:
+            return None
+
+        dest_dir = (
+            Path(settings.PAM_CHECKPOINTS_DIR)
+            / "wssed_active_learning"
+            / str(job.dataset_id)
+            / f"job_{job.id}"
+        )
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_file = dest_dir / "best_micro_model_segment.pt"
+
+        if not dest_file.exists() or dest_file.stat().st_mtime < source_file.stat().st_mtime:
+            shutil.copy2(source_file, dest_file)
+
+        return str(dest_file.resolve())
+
+    def _labels_from_class_folders(self, dataset: Dataset) -> List[str]:
+        """Species/class names from first-level subfolders (e.g. FNJV/578_/BOARAN)."""
+        root = self._resolve_dataset_path(dataset.source_uri)
+        if not root.is_dir():
+            return []
+        return sorted(
+            entry.name
+            for entry in root.iterdir()
+            if entry.is_dir() and not entry.name.startswith(".")
+        )
 
     def _labels_from_dataset_metadata(self, dataset: Dataset) -> List[str]:
         dataset_path = self._resolve_dataset_path(dataset.source_uri)

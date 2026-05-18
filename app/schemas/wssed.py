@@ -74,6 +74,16 @@ class WSSEDTrainingStatusResponse(BaseModel):
     progress: Optional[Dict[str, Any]] = None
 
 
+class WSSEDRegisterALResponse(BaseModel):
+    job_id: int
+    al_checkpoint_id: int
+    model_family_name: str
+    checkpoint_path: str
+    snippet_set_id: Optional[int] = None
+    inference_job_id: Optional[int] = None
+    message: str
+
+
 class WSSEDDatasetArtifactsResponse(BaseModel):
     dataset_path: str
     embeddings_path: str

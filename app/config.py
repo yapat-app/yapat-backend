@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     WSSED_GPU_SERVER_URL: str = "http://localhost:8003"  # URL of GPU server running WSSED
     WSSED_TIMEOUT: int = 300  # seconds (5 minutes for long operations)
     WSSED_POLL_INTERVAL: int = 10  # seconds between status polls
+    # Host path to WSSED focal-data outputs (for copying checkpoints into PAM_CHECKPOINTS_DIR)
+    WSSED_FOCAL_DATA_ROOT: Optional[str] = None
     
     # Active Learning - Species Models
     ACTIVE_LEARNING_MODELS_DIR: Optional[str] = None  # Directory containing pre-trained species models
