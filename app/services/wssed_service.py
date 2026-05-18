@@ -487,8 +487,14 @@ class WSSEDService:
 
         checkpoint = self._ensure_training_job_registered_for_al(job)
         if checkpoint is None:
+            raw = self._select_preferred_checkpoint_path(job)
+            tried = self._checkpoint_source_candidates(job, raw) if raw else []
+            tried_str = ", ".join(str(p) for p in tried) or "(none)"
             raise ValueError(
-                f"Training job {job_id} has no usable checkpoint path on the backend filesystem"
+                f"Training job {job_id} has no usable checkpoint on the API filesystem. "
+                f"Tried: {tried_str}. "
+                f"Mount WSSED focal-data into the API container and set WSSED_FOCAL_DATA_ROOT "
+                f"to that mount path (not the host path)."
             )
 
         inference_job_id = None
@@ -700,8 +706,10 @@ class WSSEDService:
     def _select_preferred_checkpoint_path(self, job: WSSEDTrainingJob) -> Optional[str]:
         paths = job.model_paths or {}
         return (
-            paths.get("best_micro_model_segment")
+            paths.get("preferred")
+            or paths.get("best_micro_model_segment")
             or paths.get("best_micro_model")
+            or job.model_path
         )
 
     def _selected_checkpoint_key(self, job: WSSEDTrainingJob) -> Optional[str]:
@@ -765,22 +773,52 @@ class WSSEDService:
             return [str(v) for v in value if str(v).strip()]
         return []
 
+    def _checkpoint_source_candidates(
+        self,
+        job: WSSEDTrainingJob,
+        source_path: Optional[str],
+    ) -> List[Path]:
+        """Paths that may contain the WSSED checkpoint (must exist inside the API container)."""
+        candidates: List[Path] = []
+        seen: set[str] = set()
+
+        def add(path: Optional[str]) -> None:
+            if not path:
+                return
+            key = str(path)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(Path(path))
+
+        add(source_path)
+        paths = job.model_paths or {}
+        for key in ("preferred", "best_micro_model_segment", "best_micro_model"):
+            add(paths.get(key))
+        add(job.model_path)
+
+        progress = job.progress or {}
+        output_dir = progress.get("output_dir")
+        if output_dir:
+            add(str(Path(str(output_dir)) / "best_micro_model_segment.pt"))
+
+        focal_root = settings.WSSED_FOCAL_DATA_ROOT
+        for path in list(candidates):
+            text = str(path)
+            if text.startswith("/app/focal-data/") and focal_root:
+                relative = Path(text).relative_to("/app/focal-data")
+                add(str(Path(focal_root) / relative))
+
+        return candidates
+
     def _materialize_checkpoint_for_al(
         self,
         job: WSSEDTrainingJob,
         source_path: str,
     ) -> Optional[str]:
         """Copy GPU checkpoint into PAM_CHECKPOINTS_DIR when the source file is reachable."""
-        candidates: List[Path] = [Path(source_path)]
-
-        if source_path.startswith("/app/focal-data/"):
-            relative = Path(source_path).relative_to("/app/focal-data")
-            if settings.WSSED_FOCAL_DATA_ROOT:
-                candidates.append(Path(settings.WSSED_FOCAL_DATA_ROOT) / relative)
-            candidates.append(Path("focal-data") / relative)
-
         source_file: Optional[Path] = None
-        for candidate in candidates:
+        for candidate in self._checkpoint_source_candidates(job, source_path):
             if candidate.is_file():
                 source_file = candidate
                 break
