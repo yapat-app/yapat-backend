@@ -22,6 +22,7 @@ from app.schemas.wssed import (
     WSSEDTrainingJobCreate,
     WSSEDTrainingJobResponse,
     WSSEDTrainingStatusResponse,
+    WSSEDDatasetArtifactsResponse,
 )
 from app.services.wssed_service import WSSEDService
 
@@ -134,6 +135,30 @@ def dispatch_training_job(
         status=data["status"],
         message=f"Training job {job_id} queued to Celery (task id {celery_task_id}).",
     )
+
+
+@router.get(
+    "/datasets/{dataset_id}/artifacts",
+    response_model=WSSEDDatasetArtifactsResponse,
+)
+async def get_dataset_artifacts(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Report existing BirdNET embeddings and checkpoints on the GPU server."""
+    svc = WSSEDService(db)
+    try:
+        data = await svc.get_dataset_artifacts(dataset_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Failed to fetch WSSED artifacts for dataset %s", dataset_id)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach WSSED GPU server: {e}",
+        ) from e
+    return WSSEDDatasetArtifactsResponse(**data)
 
 
 @router.get(

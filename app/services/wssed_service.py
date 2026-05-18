@@ -415,6 +415,20 @@ class WSSEDService:
             .first()
         )
 
+    async def get_dataset_artifacts(self, dataset_id: int) -> Dict[str, Any]:
+        """Query the GPU server for existing BirdNET embeddings and checkpoints."""
+        dataset = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if dataset is None:
+            raise ValueError(f"Dataset {dataset_id} not found")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(
+                f"{self.gpu_url}/wssed/artifacts",
+                params={"dataset_path": dataset.source_uri},
+            )
+            response.raise_for_status()
+            return response.json()
+
     def get_training_job_status(self, job_id: int) -> Optional[Dict[str, Any]]:
         """Return the current status dict for a training job (DB only)."""
         job = self._get_training_job(job_id)

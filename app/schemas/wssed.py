@@ -72,3 +72,15 @@ class WSSEDTrainingStatusResponse(BaseModel):
     metrics: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     progress: Optional[Dict[str, Any]] = None
+
+
+class WSSEDDatasetArtifactsResponse(BaseModel):
+    dataset_path: str
+    embeddings_path: str
+    embeddings_complete: bool
+    embeddings_status: str
+    checkpoint_exists: bool
+    checkpoint_path: Optional[str] = None
+    output_dir: str
+    audio_count: int = 0
+    npz_count: int = 0
