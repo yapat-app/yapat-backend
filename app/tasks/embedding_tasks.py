@@ -326,10 +326,13 @@ def finalize_embedding_job(self, results, embedding_job_id):
                 embedding_job_id,
                 EmbeddingJobStatus.COMPLETED
             )
-            # Trigger dataset-level FPV generation asynchronously. This makes projections
-            # available instantly on the Active Learning page and decouples them from inference.
             job = db.query(EmbeddingJob).filter_by(id=embedding_job_id).first()
             if job is not None:
+                from app.services.pam_al._embedding_cache import invalidate_embedding_cache
+
+                invalidate_embedding_cache(job.snippet_set_id, job.embedding_model_id)
+                # Trigger dataset-level FPV generation asynchronously. This makes projections
+                # available instantly on the Active Learning page and decouples them from inference.
                 generate_fpv_for_dataset.delay(
                     dataset_id=job.dataset_id,
                     embedding_model_id=job.embedding_model_id,

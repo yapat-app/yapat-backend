@@ -14,20 +14,17 @@ from sqlalchemy.orm import Session
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.models.embedding import EmbeddingVector
+from app.services.pam_al._embedding_cache import load_embeddings_cached
 
 logger = logging.getLogger(__name__)
 
 
-def load_embeddings(
+def _load_embeddings_from_db(
     db: Session,
     snippet_set_id: int,
     embedding_model_id: int,
 ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
-    """
-    Load embeddings for a snippet set.
-
-    Returns (X [N, D], snippet_rows).
-    """
+    """Uncached DB load (fallback when cache is disabled)."""
     rows = (
         db.query(
             Snippet.id,
@@ -72,6 +69,23 @@ def load_embeddings(
     ]
 
     return X, snippet_rows
+
+
+def load_embeddings(
+    db: Session,
+    snippet_set_id: int,
+    embedding_model_id: int,
+    *,
+    use_cache: bool = True,
+) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+    """
+    Load embeddings for a snippet set.
+
+    Returns (X [N, D], snippet_rows). Uses on-disk cache by default.
+    """
+    if use_cache:
+        return load_embeddings_cached(db, snippet_set_id, embedding_model_id)
+    return _load_embeddings_from_db(db, snippet_set_id, embedding_model_id)
 
 
 def align_embeddings_and_labels(
