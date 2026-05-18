@@ -406,6 +406,15 @@ class WSSEDService:
             .first()
         )
 
+    def get_latest_training_job(self, dataset_id: int) -> Optional[WSSEDTrainingJob]:
+        """Most recent WSSED training job for a dataset (by id)."""
+        return (
+            self.db.query(WSSEDTrainingJob)
+            .filter(WSSEDTrainingJob.dataset_id == dataset_id)
+            .order_by(WSSEDTrainingJob.id.desc())
+            .first()
+        )
+
     def get_training_job_status(self, job_id: int) -> Optional[Dict[str, Any]]:
         """Return the current status dict for a training job (DB only)."""
         job = self._get_training_job(job_id)

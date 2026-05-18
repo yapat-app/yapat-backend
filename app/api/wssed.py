@@ -137,6 +137,45 @@ def dispatch_training_job(
 
 
 @router.get(
+    "/training-jobs/latest",
+    response_model=WSSEDTrainingStatusResponse,
+)
+async def get_latest_training_job_status(
+    dataset_id: int = Query(..., description="YAPAT dataset id"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Return the most recent training job for a dataset.
+
+    Used by the WSSED UI to restore state after a page refresh.
+    """
+    from app.config import settings
+
+    svc = WSSEDService(db)
+    job = svc.get_latest_training_job(dataset_id)
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No training jobs found for dataset {dataset_id}",
+        )
+
+    if job.status.value == "TRAINING" and svc.is_status_stale(
+        job.id, settings.WSSED_POLL_INTERVAL
+    ):
+        try:
+            await svc.update_training_status(job.id)
+        except Exception:
+            pass
+
+    data = svc.get_training_job_status(job.id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Training job not found")
+    data.pop("_updated_at", None)
+    return WSSEDTrainingStatusResponse(**data)
+
+
+@router.get(
     "/training-jobs/{job_id}/status",
     response_model=WSSEDTrainingStatusResponse,
 )
