@@ -720,10 +720,9 @@ class WSSEDService:
         return None
 
     def _infer_linear_checkpoint_shape(self, checkpoint_path: str) -> tuple[int, int]:
-        import torch
+        from app.models.wssed_pytorch_models import _load_state_dict
 
-        payload = torch.load(checkpoint_path, map_location="cpu")
-        state_dict = payload.get("state_dict") if isinstance(payload, dict) else payload
+        state_dict = _load_state_dict(checkpoint_path, "cpu")
         if not isinstance(state_dict, dict):
             raise ValueError(f"Invalid WSSED checkpoint: {checkpoint_path}")
 
