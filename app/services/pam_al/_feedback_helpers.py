@@ -17,7 +17,7 @@ from app.models.pam_active_learning import (
     ALRetrainStatus,
 )
 
-from app.services.pam_al._annotation_helpers import store_user_labels_for_snippet
+from app.services.pam_al._annotation_helpers import replace_user_labels_for_snippet
 
 # Trigger values that represent actual model-retrain jobs.
 # "inference" jobs use the same ALRetrainJob table but are NOT retrains and
@@ -111,7 +111,7 @@ def sync_feedback_events_to_annotations(db: Session, checkpoint_id: int) -> int:
         if not labels_to_store:
             continue
 
-        store_user_labels_for_snippet(
+        replace_user_labels_for_snippet(
             db=db,
             dataset_id=event.dataset_id,
             snippet_id=event.snippet_id,

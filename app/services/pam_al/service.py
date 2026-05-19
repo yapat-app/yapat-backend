@@ -348,7 +348,9 @@ class PAMActiveLearningService:
         self.db.flush()
 
         if action_value in {"ACCEPT", "MODIFY"} and final_labels:
-            ann_h.store_user_labels_for_snippet(self.db, body.dataset_id, body.snippet_id, final_labels, model_ckpt.id, body.user_id)
+            ann_h.replace_user_labels_for_snippet(
+                self.db, body.dataset_id, body.snippet_id, final_labels, model_ckpt.id, body.user_id,
+            )
             if getattr(body, "persist_annotations", True):
                 self._try_store_final_annotations(
                     dataset_id=body.dataset_id,
@@ -1517,7 +1519,7 @@ class PAMActiveLearningService:
         self.db.add(feedback)
         self.db.flush()
 
-        ann_h.store_user_labels_for_snippet(
+        ann_h.replace_user_labels_for_snippet(
             db=self.db,
             dataset_id=body.dataset_id,
             snippet_id=body.snippet_id,

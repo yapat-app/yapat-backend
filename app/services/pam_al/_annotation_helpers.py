@@ -64,12 +64,39 @@ def store_snippet_annotations(
                 )
 
 
+def replace_user_labels_for_snippet(
+    db: Session,
+    dataset_id: int,
+    snippet_id: int,
+    labels: list[str],
+    model_checkpoint_id: int | None,
+    user_id: int | None = None,
+) -> None:
+    """Replace the user's labels for a snippet (removes stale labels first)."""
+    delete_user_labels_for_snippet(
+        db,
+        dataset_id=dataset_id,
+        snippet_id=snippet_id,
+        model_checkpoint_id=None,
+        user_id=user_id,
+    )
+    if labels:
+        store_user_labels_for_snippet(
+            db,
+            dataset_id=dataset_id,
+            snippet_id=snippet_id,
+            labels=labels,
+            model_checkpoint_id=model_checkpoint_id,
+            user_id=user_id,
+        )
+
+
 def store_user_labels_for_snippet(
     db: Session,
     dataset_id: int,
     snippet_id: int,
     labels: list[str],
-    model_checkpoint_id: int,
+    model_checkpoint_id: int | None,
     user_id: int | None = None,
 ) -> None:
     for label in labels:
