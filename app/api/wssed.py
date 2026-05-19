@@ -24,12 +24,43 @@ from app.schemas.wssed import (
     WSSEDTrainingStatusResponse,
     WSSEDDatasetArtifactsResponse,
     WSSEDRegisterALResponse,
+    WSSEDAccessResponse,
 )
 from app.services.wssed_service import WSSEDService
+from app.services.dataset_service import DatasetService
+from app.core.wssed_access import require_wssed_access, require_wssed_dataset, user_has_wssed_access
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _require_training_job_dataset(db: Session, user: User, job_id: int) -> int:
+    svc = WSSEDService(db)
+    data = svc.get_training_job_status(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"Training job {job_id} not found")
+    require_wssed_dataset(db, user, data["dataset_id"])
+    return data["dataset_id"]
+
+
+@router.get("/access", response_model=WSSEDAccessResponse)
+def get_wssed_access(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Whether the current user can use the WSSED flow (focal recordings datasets)."""
+    from app.models.dataset import DatasetType
+
+    ds_svc = DatasetService(db)
+    datasets = ds_svc.list_datasets(current_user, skip=0, limit=10_000)
+    focal_count = sum(
+        1 for ds in datasets if ds.dataset_type == DatasetType.FOCAL_RECORDINGS
+    )
+    return WSSEDAccessResponse(
+        enabled=user_has_wssed_access(db, current_user),
+        focal_dataset_count=focal_count,
+    )
 
 
 # --- Training jobs -----------------------------------------------------------
@@ -51,6 +82,7 @@ def create_training_job(
     ``GET /training-jobs/{job_id}/status`` for state transitions. If the Celery
     broker rejects the task, the job is marked FAILED and HTTP 503 is returned.
     """
+    require_wssed_dataset(db, current_user, body.dataset_id)
     svc = WSSEDService(db)
     try:
         job = svc.create_training_job(
@@ -105,6 +137,7 @@ def dispatch_training_job(
     was never consumed (for example, transient broker or worker issues).
     Returns HTTP 409 if the job is not ``PENDING``.
     """
+    _require_training_job_dataset(db, current_user, job_id)
     svc = WSSEDService(db)
     data = svc.get_training_job_status(job_id)
     if data is None:
@@ -148,6 +181,7 @@ async def get_dataset_artifacts(
     current_user: User = Depends(get_current_active_user),
 ):
     """Report existing BirdNET embeddings and checkpoints on the GPU server."""
+    require_wssed_dataset(db, current_user, dataset_id)
     svc = WSSEDService(db)
     try:
         data = await svc.get_dataset_artifacts(dataset_id)
@@ -176,6 +210,7 @@ async def get_latest_training_job_status(
 
     Used by the WSSED UI to restore state after a page refresh.
     """
+    require_wssed_dataset(db, current_user, dataset_id)
     from app.config import settings
 
     svc = WSSEDService(db)
@@ -217,6 +252,7 @@ async def get_training_job_status(
     the last persisted probe is older than ``settings.WSSED_POLL_INTERVAL``
     seconds, limiting load on the remote service during frequent client polling.
     """
+    _require_training_job_dataset(db, current_user, job_id)
     from app.config import settings
 
     svc = WSSEDService(db)
@@ -251,6 +287,7 @@ async def register_training_job_for_al(
     Sync a completed WSSED job from the GPU server, copy weights into
     PAM_CHECKPOINTS_DIR, and register an Active Learning model family.
     """
+    _require_training_job_dataset(db, current_user, job_id)
     svc = WSSEDService(db)
     try:
         result = await svc.register_training_job_for_al(job_id)
@@ -275,6 +312,7 @@ def get_suggestions(
     current_user: User = Depends(get_current_active_user),
 ):
     """List unlabeled snippets above a confidence threshold for a species model."""
+    require_wssed_dataset(db, current_user, dataset_id)
     svc = WSSEDService(db)
     try:
         result = svc.get_suggestions(
@@ -298,6 +336,7 @@ def submit_label(
     current_user: User = Depends(get_current_active_user),
 ):
     """Record user feedback (accept or reject) for one snippet on a species model."""
+    require_wssed_dataset(db, current_user, body.dataset_id)
     svc = WSSEDService(db)
     try:
         svc.submit_label(
@@ -325,6 +364,7 @@ def retrain(
     Start a species-scoped retrain after labeling; enqueues the same Celery path
     as full-dataset training with hyperparameters derived from the request body.
     """
+    require_wssed_dataset(db, current_user, body.dataset_id)
     svc = WSSEDService(db)
     try:
         job = svc.retrain(
@@ -351,6 +391,7 @@ def get_histogram(
     current_user: User = Depends(get_current_active_user),
 ):
     """Return a histogram of model confidence scores over snippets in a snippet set."""
+    require_wssed_access(db, current_user)
     svc = WSSEDService(db)
     try:
         result = svc.get_histogram(model_id=model_id, snippet_set_id=snippet_set_id)

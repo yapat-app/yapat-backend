@@ -133,6 +133,79 @@ class DatasetService:
             .all()
         )
 
+    def user_can_access_dataset(self, user: User, dataset_id: int) -> bool:
+        dataset = self.get_dataset(dataset_id)
+        if dataset is None:
+            return False
+        if user.role == UserRole.ADMIN:
+            return True
+
+        if dataset.team_id is not None:
+            membership = (
+                self.db.query(TeamMembershipModel.id)
+                .filter(
+                    TeamMembershipModel.team_id == dataset.team_id,
+                    TeamMembershipModel.user_id == user.id,
+                )
+                .first()
+            )
+            if membership is not None:
+                return True
+
+        direct_access = (
+            self.db.query(user_datasets.c.dataset_id)
+            .filter(
+                user_datasets.c.user_id == user.id,
+                user_datasets.c.dataset_id == dataset_id,
+            )
+            .first()
+        )
+        return direct_access is not None
+
+    def user_has_wssed_access(self, user: User) -> bool:
+        """True when the user can open WSSED (admins always; others need focal datasets)."""
+        if user.role == UserRole.ADMIN:
+            return True
+
+        from app.models.dataset import DatasetType
+
+        query = self.db.query(DatasetModel.id).filter(
+            DatasetModel.dataset_type == DatasetType.FOCAL_RECORDINGS
+        )
+        member_team_ids = [
+            row[0]
+            for row in self.db.query(TeamMembershipModel.team_id)
+            .filter(TeamMembershipModel.user_id == user.id)
+            .all()
+        ]
+        direct_access_ids = [
+            row[0]
+            for row in self.db.query(user_datasets.c.dataset_id)
+            .filter(user_datasets.c.user_id == user.id)
+            .all()
+        ]
+        filters = []
+        if member_team_ids:
+            filters.append(DatasetModel.team_id.in_(member_team_ids))
+        if direct_access_ids:
+            filters.append(DatasetModel.id.in_(direct_access_ids))
+        if not filters:
+            return False
+        query = query.filter(or_(*filters))
+        return query.first() is not None
+
+    def get_focal_dataset_for_user(
+        self, user: User, dataset_id: int
+    ) -> Optional[DatasetModel]:
+        from app.models.dataset import DatasetType
+
+        dataset = self.get_dataset(dataset_id)
+        if dataset is None or dataset.dataset_type != DatasetType.FOCAL_RECORDINGS:
+            return None
+        if not self.user_can_access_dataset(user, dataset_id):
+            return None
+        return dataset
+
     def get_dataset(self, dataset_id: int) -> Optional[DatasetModel]:
         return self.db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
 

@@ -94,3 +94,8 @@ class WSSEDDatasetArtifactsResponse(BaseModel):
     output_dir: str
     audio_count: int = 0
     npz_count: int = 0
+
+
+class WSSEDAccessResponse(BaseModel):
+    enabled: bool
+    focal_dataset_count: int = 0
