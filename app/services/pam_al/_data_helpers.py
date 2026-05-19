@@ -3,7 +3,7 @@ Data loading helpers: embeddings, ground-truth metadata CSV, and alignment.
 """
 
 from __future__ import annotations
-
+import logging
 import csv
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -14,18 +14,17 @@ from sqlalchemy.orm import Session
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.models.embedding import EmbeddingVector
+from app.services.pam_al._embedding_cache import load_embeddings_cached
+
+logger = logging.getLogger(__name__)
 
 
-def load_embeddings(
+def _load_embeddings_from_db(
     db: Session,
     snippet_set_id: int,
     embedding_model_id: int,
 ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
-    """
-    Load embeddings for a snippet set.
-
-    Returns (X [N, D], snippet_rows).
-    """
+    """Uncached DB load (fallback when cache is disabled)."""
     rows = (
         db.query(
             Snippet.id,
@@ -72,6 +71,23 @@ def load_embeddings(
     return X, snippet_rows
 
 
+def load_embeddings(
+    db: Session,
+    snippet_set_id: int,
+    embedding_model_id: int,
+    *,
+    use_cache: bool = True,
+) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+    """
+    Load embeddings for a snippet set.
+
+    Returns (X [N, D], snippet_rows). Uses on-disk cache by default.
+    """
+    if use_cache:
+        return load_embeddings_cached(db, snippet_set_id, embedding_model_id)
+    return _load_embeddings_from_db(db, snippet_set_id, embedding_model_id)
+
+
 def align_embeddings_and_labels(
     X: np.ndarray,
     snippet_rows: List[Dict[str, Any]],
@@ -81,50 +97,107 @@ def align_embeddings_and_labels(
     """
     Align snippet embeddings with ground truth.
 
-    Matching: file_name first, then file_path fallback.
-    Interval overlap for segment-level labels.
+    For chunk-level copied files, matching is filename-based.
+    If a GT event matches the snippet filename, its labels are applied directly,
+    regardless of original min_t/max_t values.
+
+    This is appropriate when files are already named like:
+        originalfname_min_t_max_t.wav
+
+    and each snippet row has:
+        start_time=0.0, end_time=3.0
     """
+
     keep_indices: List[int] = []
     y_rows: List[np.ndarray] = []
     used_snippet_ids: List[int] = []
 
-    for i, snippet in enumerate(snippet_rows):
-        snippet_start = float(snippet["start_time"])
-        snippet_end = float(snippet["end_time"])
+    matched_by_file_name = 0
+    matched_by_file_path = 0
+    no_gt_key_match = 0
+    positive_aligned = 0
 
-        events = gt_index.get(snippet["file_name"])
-        if events is None:
-            events = gt_index.get(snippet["file_path"], [])
+    logger.info("========== CHUNK-LEVEL ALIGNMENT START ==========")
+    logger.info("X shape: %s", getattr(X, "shape", None))
+    logger.info("Number of snippet rows: %d", len(snippet_rows))
+    logger.info("GT index size: %d", len(gt_index))
+    logger.info("Species list: %s", species_list)
+
+    for i, snippet in enumerate(snippet_rows):
+        snippet_id = snippet.get("snippet_id")
+        snippet_file_name = snippet.get("file_name")
+        snippet_file_path = snippet.get("file_path")
+
+        events = gt_index.get(snippet_file_name)
+        matched_key = snippet_file_name
+
+        if events is not None:
+            matched_by_file_name += 1
+        else:
+            events = gt_index.get(snippet_file_path)
+            matched_key = snippet_file_path
+
+            if events is not None:
+                matched_by_file_path += 1
+
+        if not events:
+            no_gt_key_match += 1
+
+            if i < 30:
+                logger.warning(
+                    "[NO GT KEY MATCH] i=%d snippet_id=%s file_name=%s file_path=%s",
+                    i,
+                    snippet_id,
+                    snippet_file_name,
+                    snippet_file_path,
+                )
+
+            continue
 
         y = np.zeros(len(species_list), dtype=np.float32)
 
-        for event in events:
+        for event_idx, event in enumerate(events):
             event_labels = event["labels"]
-            event_start = event["start_time"]
-            event_end = event["end_time"]
+            y = np.maximum(y, event_labels)
 
-            if event_start is None or event_end is None:
-                y = np.maximum(y, event_labels)
-                continue
-
-            overlaps = (event_start < snippet_end) and (event_end > snippet_start)
-            if overlaps:
-                y = np.maximum(y, event_labels)
+            if i < 30:
+                logger.info(
+                    "[CHUNK LABEL MATCH] i=%d event=%d key=%s snippet_id=%s "
+                    "file_name=%s labels=%s",
+                    i,
+                    event_idx,
+                    matched_key,
+                    snippet_id,
+                    snippet_file_name,
+                    event_labels.astype(int).tolist(),
+                )
 
         if y.sum() > 0:
             keep_indices.append(i)
             y_rows.append(y)
-            used_snippet_ids.append(snippet["snippet_id"])
+            used_snippet_ids.append(snippet_id)
+            positive_aligned += 1
+
+    logger.info("========== CHUNK-LEVEL ALIGNMENT SUMMARY ==========")
+    logger.info("Matched by file_name: %d", matched_by_file_name)
+    logger.info("Matched by file_path: %d", matched_by_file_path)
+    logger.info("No GT key match: %d", no_gt_key_match)
+    logger.info("Positive aligned samples: %d", positive_aligned)
 
     if not keep_indices:
         raise ValueError(
-            "No overlap found between snippet embeddings and ground-truth metadata."
+            "No matching labels found between snippet embeddings and ground-truth metadata."
         )
 
     X_aligned = X[keep_indices]
     y_aligned = np.stack(y_rows, axis=0).astype(np.float32)
-    return X_aligned, y_aligned, used_snippet_ids
 
+    logger.info("Final X_aligned shape: %s", X_aligned.shape)
+    logger.info("Final y_aligned shape: %s", y_aligned.shape)
+    logger.info("Final class support: %s", y_aligned.sum(axis=0).astype(int).tolist())
+    logger.info("========== CHUNK-LEVEL ALIGNMENT END ==========")
+
+    return X_aligned, y_aligned, used_snippet_ids
 
 # TODO: This function is suitable for AnuraSet and will need adaptation in future
 def load_ground_truth_metadata(

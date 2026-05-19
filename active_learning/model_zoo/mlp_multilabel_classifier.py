@@ -69,27 +69,48 @@ class MultiLabelMLPClassifier(nn.Module):
             raise ValueError("Classifier has not been created yet. Call create_classifier() first.")
         return self.model(x)
 
+    def _probs_and_preds_from_logits(
+        self,
+        logits: torch.Tensor,
+        threshold: Union[float, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        probs = torch.sigmoid(logits)
+
+        if isinstance(threshold, (float, int)):
+            preds = (probs >= threshold).int()
+        elif isinstance(threshold, torch.Tensor):
+            threshold = threshold.to(probs.device)
+            preds = (probs >= threshold).int()
+        else:
+            raise TypeError(
+                f"threshold must be float, int, or torch.Tensor, got {type(threshold).__name__}: {threshold}"
+            )
+
+        return probs, preds
+
+    def predict_with_features(
+        self,
+        x: torch.Tensor,
+        threshold: Union[float, torch.Tensor] = 0.3,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Single forward pass: hidden features, probabilities, and binary predictions.
+        """
+        self.eval()
+
+        with torch.no_grad():
+            features = self.model[1](self.model[0](x))
+            logits = self.model[3](self.model[2](features))
+            probs, preds = self._probs_and_preds_from_logits(logits, threshold)
+
+        return features, probs, preds
+
     def predict(
             self,
             x: torch.Tensor,
             threshold: Union[float, torch.Tensor] = 0.3,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        self.eval()
-
-        with torch.no_grad():
-            logits = self.forward(x)
-            probs = torch.sigmoid(logits)
-
-            if isinstance(threshold, (float, int)):
-                preds = (probs >= threshold).int()
-            elif isinstance(threshold, torch.Tensor):
-                threshold = threshold.to(probs.device)
-                preds = (probs >= threshold).int()
-            else:
-                raise TypeError(
-                    f"threshold must be float, int, or torch.Tensor, got {type(threshold).__name__}: {threshold}"
-                )
-
+        _, probs, preds = self.predict_with_features(x, threshold=threshold)
         return probs, preds
 
     def fit(
@@ -308,10 +329,4 @@ class MultiLabelMLPClassifier(nn.Module):
         if self.model is None:
             raise ValueError("Classifier has not been created yet. Call create_classifier() first.")
 
-        # model[0] = Linear(n_dim, hidden_dim)
-        # model[1] = ReLU()
-        # model[2] = Dropout(dropout)
-        # model[3] = Linear(hidden_dim, num_classes)
-        x = self.model[0](x)
-        x = self.model[1](x)
-        return x
+        return self.model[1](self.model[0](x))

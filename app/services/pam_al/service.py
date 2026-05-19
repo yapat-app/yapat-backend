@@ -55,7 +55,6 @@ from active_learning.config import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_HIDDEN_DIM,
     DEFAULT_DROPOUT,
-    DEFAULT_DEVICE
 )
 from app.services.pam_al import _checkpoint_helpers as ckpt_h
 from app.services.pam_al import _data_helpers as data_h
@@ -67,6 +66,17 @@ from app.services.pam_al import _feedback_helpers as fb_h
 logger = logging.getLogger(__name__)
 
 DATA_ROOT = settings.DATA_ROOT or "/data"
+
+
+def _resolve_device(*candidates: Any) -> str:
+    """Resolve PAM AL device from request overrides or PAM_DEFAULT_DEVICE."""
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        value = str(candidate).strip()
+        if value:
+            return value
+    return str(settings.PAM_DEFAULT_DEVICE or "cpu")
 
 
 class PAMActiveLearningService:
@@ -133,6 +143,7 @@ class PAMActiveLearningService:
 
     def train_from_scratch(self, body: ALTrainFromScratchRequest) -> ALModelCheckpoint:
         ds = ckpt_h.get_pam_dataset(self.db, body.dataset_id)
+        device = _resolve_device(body.device)
 
         snippet_set_id = body.snippet_set_id or ds.default_snippet_set_id
         if snippet_set_id is None:
@@ -183,7 +194,7 @@ class PAMActiveLearningService:
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs, "learning_rate": body.learning_rate,
                 "batch_size": body.batch_size, "hidden_dim": hidden_dim,
-                "dropout": dropout, "device": body.device,
+                "dropout": dropout, "device": device,
             },
             is_base=1, parent_checkpoint_id=None, status=ALModelStatus.LOADING,
         )
@@ -244,9 +255,9 @@ class PAMActiveLearningService:
 
             n_dim, num_classes = X_train.shape[1], y_train.shape[1]
             model.create_classifier(n_dim=n_dim, num_classes=num_classes, hidden_dim=hidden_dim, dropout=dropout)
-            model.to(body.device)
+            model.to(device)
 
-            train_metrics = model.fit(X=X_train, y=y_train, epochs=body.epochs, learning_rate=body.learning_rate, batch_size=body.batch_size, device=body.device)
+            train_metrics = model.fit(X=X_train, y=y_train, epochs=body.epochs, learning_rate=body.learning_rate, batch_size=body.batch_size, device=device)
 
             checkpoint_path = ckpt_h.make_checkpoint_path(ds.id, body.model_family_name, body.version, model_ckpt.id)
             resolved_lcp = ckpt_h.make_label_config_path(ds.id, body.model_family_name, body.version, model_ckpt.id)
@@ -641,6 +652,7 @@ class PAMActiveLearningService:
             return self._build_random_snippet_suggestions(body)
 
         hyper = model_ckpt.hyperparameters or {}
+        device = _resolve_device(body.device)
         embedding_model_id = hyper.get("embedding_model_id")
         if embedding_model_id is None:
             # Backward-compat / manual checkpoint registration:
@@ -675,9 +687,13 @@ class PAMActiveLearningService:
             body.threshold, body.density_k, body.composite_wu, body.composite_wd, body.composite_wr,
         )
 
-        predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(self.db, model_ckpt.id, body.snippet_set_id)
+        predictions_exist = inf_h.predictions_exist_for_checkpoint_and_snippet_set(
+            self.db,
+            model_ckpt.id,
+            body.snippet_set_id,
+        )
 
-        if not predictions or body.force_refresh:
+        if not predictions_exist or body.force_refresh:
             X, snippet_rows = data_h.load_embeddings(self.db, body.snippet_set_id, embedding_model_id)
 
             # Resolve label order *before* loading the model so we can fall back to
@@ -697,7 +713,7 @@ class PAMActiveLearningService:
             # Load the model; if legacy checkpoint is missing metadata like n_dim,
             # rebuild the architecture from embeddings + label_order and load weights.
             try:
-                model = ckpt_h.load_model_from_checkpoint(model_ckpt, device=body.device)
+                model = ckpt_h.load_model_from_checkpoint(model_ckpt, device=device)
             except KeyError as e:
                 if str(e).strip("'\"") != "n_dim":
                     raise
@@ -708,7 +724,7 @@ class PAMActiveLearningService:
                     )
                 import torch
 
-                payload = torch.load(model_ckpt.checkpoint_path, map_location=body.device)
+                payload = torch.load(model_ckpt.checkpoint_path, map_location=device)
                 state_dict = payload.get("state_dict") if isinstance(payload, dict) else None
                 if not isinstance(state_dict, dict):
                     raise ValueError(
@@ -727,7 +743,7 @@ class PAMActiveLearningService:
                     else None,
                 )
                 model.load_state_dict(state_dict)
-                model.to(body.device)
+                model.to(device)
                 model.eval()
                 model.label_order = label_order
 
@@ -749,9 +765,8 @@ class PAMActiveLearningService:
             )
             self.db.commit()
 
-            predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(self.db, model_ckpt.id, body.snippet_set_id)
-
         if not body.sample_suggestion:
+            predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(self.db, model_ckpt.id, body.snippet_set_id)
             return {
                 "mode": "predictions", "model_family_name": body.model_family_name,
                 "used_checkpoint_id": model_ckpt.id, "total_predictions": len(predictions),
@@ -760,16 +775,28 @@ class PAMActiveLearningService:
             }
 
         strategy = body.suggestion_strategy.value if hasattr(body.suggestion_strategy, "value") else body.suggestion_strategy
-        k = body.k or 20
+        strategy = strategy or SamplingMode.COMPOSITE.value
+        k = max(1, body.k or 20)
 
-        annotated_ids = ann_h.get_annotated_snippet_ids_for_snippet_set(self.db, model_ckpt.dataset_id, body.snippet_set_id)
-        ranked = inf_h.rank_prediction_suggestions(self.db, model_ckpt.dataset_id, body.snippet_set_id, predictions, strategy, annotated_ids)
+        total_predictions = inf_h.count_predictions_for_checkpoint_and_snippet_set(
+            self.db,
+            model_ckpt.id,
+            body.snippet_set_id,
+        )
+        ranked = inf_h.get_top_prediction_suggestions(
+            self.db,
+            model_ckpt.dataset_id,
+            model_ckpt.id,
+            body.snippet_set_id,
+            strategy,
+            k,
+        )
 
         return {
             "mode": "suggestions", "model_family_name": body.model_family_name,
-            "used_checkpoint_id": model_ckpt.id, "total_predictions": len(predictions),
-            "returned_count": min(k, len(ranked)), "suggestion_strategy": body.suggestion_strategy,
-            "k": k, "rows": ranked[:k],
+            "used_checkpoint_id": model_ckpt.id, "total_predictions": total_predictions,
+            "returned_count": len(ranked), "suggestion_strategy": body.suggestion_strategy,
+            "k": k, "rows": ranked,
         }
 
     # ==================================================================
@@ -841,12 +868,12 @@ class PAMActiveLearningService:
 
         epochs = body.epochs if body.epochs is not None else int(hyper.get("epochs", 20))
         lr = body.learning_rate if body.learning_rate is not None else float(hyper.get("learning_rate", 1e-3))
-        bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", 32))
+        bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", DEFAULT_BATCH_SIZE))
         is_mlp = parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
 
         hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
         do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
-        dev = body.device if body.device is not None else str(hyper.get("device", "cpu"))
+        dev = _resolve_device(body.device)
 
         new_version = f"{parent_ckpt.version}_manual_{int(datetime.now(timezone.utc).timestamp())}"
 
@@ -962,6 +989,7 @@ class PAMActiveLearningService:
             raise ValueError("No snippet_set_id provided and dataset has no default_snippet_set_id.")
 
         is_mlp = body.model_type == ALModelType.PAM_MLP_MULTILABEL
+        device = _resolve_device(body.device)
 
         hidden_dim = body.hidden_dim if is_mlp else None
         dropout = body.dropout if is_mlp else None
@@ -980,7 +1008,7 @@ class PAMActiveLearningService:
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs, "learning_rate": body.learning_rate,
                 "batch_size": body.batch_size, "hidden_dim": hidden_dim,
-                "dropout": dropout, "device": body.device,
+                "dropout": dropout, "device": device,
                 "run_inference": body.run_inference, "threshold": body.threshold,
                 "density_k": body.density_k, "composite_wu": body.composite_wu,
                 "composite_wd": body.composite_wd, "composite_wr": body.composite_wr,
@@ -1056,13 +1084,13 @@ class PAMActiveLearningService:
 
             hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
             do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
-            dev = hyper.get("device", "cpu")
+            dev = _resolve_device(hyper.get("device"))
 
             model.create_classifier(n_dim=n_dim, num_classes=num_classes, hidden_dim=hd, dropout=do)
             model.to(dev)
             train_metrics = model.fit(X=X_train, y=y_train, epochs=int(hyper.get("epochs", 20)),
                                       learning_rate=float(hyper.get("learning_rate", 1e-3)),
-                                      batch_size=int(hyper.get("batch_size", 32)), device=dev)
+                                      batch_size=int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)), device=dev)
             logger.info(
                 "Finished cold-start model fit checkpoint_id=%d train_samples=%d num_classes=%d",
                 checkpoint_id,
@@ -1137,11 +1165,11 @@ class PAMActiveLearningService:
 
         epochs = body.epochs if body.epochs is not None else int(hyper.get("epochs", 20))
         lr = body.learning_rate if body.learning_rate is not None else float(hyper.get("learning_rate", 1e-3))
-        bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", 32))
+        bs = body.batch_size if body.batch_size is not None else int(hyper.get("batch_size", DEFAULT_BATCH_SIZE))
         is_mlp = parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or parent_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
         hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
         do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
-        dev = body.device if body.device is not None else str(hyper.get("device", "cpu"))
+        dev = _resolve_device(body.device)
 
         new_version = f"{parent_ckpt.version}_manual_{int(datetime.now(timezone.utc).timestamp())}"
         new_ckpt = ALModelCheckpoint(
@@ -1212,6 +1240,7 @@ class PAMActiveLearningService:
                 "resolved_snippet_set_id": snippet_set_id,
                 "embedding_model_id": embedding_model_id,
                 "label_order": label_order,
+                "device": _resolve_device(),
                 # Always run inference after auto-retrain so predictions exist for
                 # the new checkpoint immediately.  The parent may have been created
                 # with run_inference=False (e.g. cold-start default), but retrain
@@ -1351,7 +1380,7 @@ class PAMActiveLearningService:
 
             hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
             do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
-            dev = hyper.get("device", "cpu")
+            dev = _resolve_device(hyper.get("device"))
 
             model = ckpt_h.make_model(new_ckpt.model_type)
             model.create_classifier(
@@ -1363,7 +1392,7 @@ class PAMActiveLearningService:
             model.to(dev)
             train_metrics = model.fit(X=X_train, y=y_train,
                 epochs=int(hyper.get("epochs", 20)), learning_rate=float(hyper.get("learning_rate", 1e-3)),
-                batch_size=int(hyper.get("batch_size", 32)), device=dev)
+                batch_size=int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)), device=dev)
             logger.info("Finished retrain model fit checkpoint_id=%d", checkpoint_id)
 
             cp = ckpt_h.make_checkpoint_path(dataset_id, new_ckpt.model_family_name, new_ckpt.version, new_ckpt.id)
@@ -1526,7 +1555,7 @@ class PAMActiveLearningService:
                 batch_size=DEFAULT_BATCH_SIZE,
                 hidden_dim=DEFAULT_HIDDEN_DIM,
                 dropout=DEFAULT_DROPOUT,
-                device=DEFAULT_DEVICE,
+                device=_resolve_device(),
                 run_inference=True,
                 threshold=DEFAULT_INFERENCE_THRESHOLD,
                 density_k=DEFAULT_DENSITY_K,

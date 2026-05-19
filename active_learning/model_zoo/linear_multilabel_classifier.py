@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import torch
 import torch.nn as nn
+logger = logging.getLogger(__name__)
+
 
 class MultiLabelLinearClassifier(nn.Module):
     """
@@ -38,27 +40,50 @@ class MultiLabelLinearClassifier(nn.Module):
             raise ValueError("Classifier has not been created yet. Call create_classifier() first.")
         return self.model(x)
 
+    def _probs_and_preds_from_logits(
+        self,
+        logits: torch.Tensor,
+        threshold: Union[float, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        probs = torch.sigmoid(logits)
+
+        if isinstance(threshold, (float, int)):
+            preds = (probs >= threshold).int()
+        elif isinstance(threshold, torch.Tensor):
+            threshold = threshold.to(probs.device)
+            preds = (probs >= threshold).int()
+        else:
+            raise TypeError(
+                f"threshold must be float, int, or torch.Tensor, got {type(threshold).__name__}: {threshold}"
+            )
+
+        return probs, preds
+
+    def predict_with_features(
+        self,
+        x: torch.Tensor,
+        threshold: Union[float, torch.Tensor] = 0.3,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Single forward pass: acquisition features, probabilities, and predictions.
+
+        For the linear model, features are the input embeddings (no hidden layer).
+        """
+        self.eval()
+
+        with torch.no_grad():
+            features = x
+            logits = self.forward(x)
+            probs, preds = self._probs_and_preds_from_logits(logits, threshold)
+
+        return features, probs, preds
+
     def predict(
         self,
         x: torch.Tensor,
         threshold: Union[float, torch.Tensor] = 0.3,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        self.eval()
-
-        with torch.no_grad():
-            logits = self.forward(x)
-            probs = torch.sigmoid(logits)
-
-            if isinstance(threshold, (float, int)):
-                preds = (probs >= threshold).int()
-            elif isinstance(threshold, torch.Tensor):
-                threshold = threshold.to(probs.device)
-                preds = (probs >= threshold).int()
-            else:
-                raise TypeError(
-                    f"threshold must be float, int, or torch.Tensor, got {type(threshold).__name__}: {threshold}"
-                )
-
+        _, probs, preds = self.predict_with_features(x, threshold=threshold)
         return probs, preds
 
     def fit(
@@ -149,6 +174,7 @@ class MultiLabelLinearClassifier(nn.Module):
         can belong to multiple classes.
         """
         class_support = y.sum(axis=0).astype(int)
+        print(f"Class support: {class_support}")
 
         keep_class_indices = [
             i for i, count in enumerate(class_support)

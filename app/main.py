@@ -2,7 +2,10 @@
 FastAPI app entry point
 """
 
-from fastapi import FastAPI
+import logging
+import time
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
@@ -47,6 +50,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+_request_logger = logging.getLogger("yapat.request")
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - start) * 1000
+    _request_logger.info(
+        "%s %s status=%d duration_ms=%.1f",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
 
 # Include routers
 app.include_router(auth.router, prefix=f"{settings.API_STR}/auth", tags=["auth"])

@@ -8,11 +8,14 @@ import logging
 import time
 from typing import Iterable, List, Sequence
 
+import numpy as np
 import torch
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.snippet import Snippet
-from app.models.pam_active_learning import ALPrediction
+from app.models.pam_active_learning import ALPrediction, ALSnippetAnnotation
 from app.schemas.pam_active_learning import ALInferenceRow
 
 from active_learning.samplers import uncertainty, density, diversity, composite
@@ -23,7 +26,6 @@ from active_learning.config import (
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +77,17 @@ def build_inference_rows(
         0, device=embeddings.device
     )
 
+    start = time.perf_counter()
     diversity_scores_u = diversity(z_u, z_l)
+    mid = time.perf_counter()
     density_scores_u = density(z_u, k=density_k)
+    end = time.perf_counter()
+    logger.info(
+        "pam-al inference: acquisition scoring diversity=%.4fs density=%.4fs total=%.4fs",
+        mid - start,
+        end - mid,
+        end - start,
+    )
     composite_scores_u = composite(
         uncertainty_scores=uncertainty_scores_u,
         diversity_scores=diversity_scores_u,
@@ -91,21 +102,26 @@ def build_inference_rows(
     density_full = [None] * len(snippet_ids)
     composite_full = [None] * len(snippet_ids)
 
-    for pos, idx in enumerate(unlabeled_indices):
-        uncertainty_full[idx] = float(uncertainty_scores_u[pos].item())
-        diversity_full[idx] = float(diversity_scores_u[pos].item())
-        density_full[idx] = float(density_scores_u[pos].item())
-        composite_full[idx] = float(composite_scores_u[pos].item())
+    if unlabeled_indices:
+        uncertainty_values = uncertainty_scores_u.detach().cpu().numpy()
+        diversity_values = diversity_scores_u.detach().cpu().numpy()
+        density_values = density_scores_u.detach().cpu().numpy()
+        composite_values = composite_scores_u.detach().cpu().numpy()
+
+        for pos, idx in enumerate(unlabeled_indices):
+            uncertainty_full[idx] = float(uncertainty_values[pos])
+            diversity_full[idx] = float(diversity_values[pos])
+            density_full[idx] = float(density_values[pos])
+            composite_full[idx] = float(composite_values[pos])
 
     rows: list[ALInferenceRow] = []
+    probs_np = probs.detach().cpu().numpy()
+    preds_np = preds.detach().cpu().numpy()
 
     for i, snippet_id in enumerate(snippet_ids):
-        pred_indices = torch.where(preds[i] > 0)[0].tolist()
+        pred_indices = np.flatnonzero(preds_np[i] > 0)
         pred_labels = [label_order[j] for j in pred_indices]
-        prob_dict = {
-            label_order[j]: float(probs[i, j].item())
-            for j in range(len(label_order))
-        }
+        prob_dict = dict(zip(label_order, map(float, probs_np[i])))
 
         rows.append(
             ALInferenceRow(
@@ -130,15 +146,15 @@ def save_prediction_rows(
     model_checkpoint_id: int,
     rows,
 ) -> None:
-    """Upsert prediction rows.
+    """
+    Persist model predictions using chunked bulk upserts.
 
-    Notes:
-    - Uses chunked reads/writes to keep ORM memory and query payload sizes
-      bounded for large snippet sets.
+    PostgreSQL uses the checkpoint/snippet unique constraint for conflict
+    resolution, avoiding ORM hydration of existing prediction rows.
     """
 
-    # Chunked upserts keep ORM memory and query payload sizes bounded.
-    chunk_size = 2000
+    # Keep each statement large enough for throughput while bounding payload size.
+    chunk_size = 5000
     rows = list(rows)
 
     total = len(rows)
@@ -151,47 +167,77 @@ def save_prediction_rows(
         chunk_size,
     )
 
+    bind = db.get_bind()
+    dialect_name = bind.dialect.name if bind is not None else ""
+
     for chunk_idx, start in enumerate(range(0, len(rows), chunk_size), start=1):
         chunk = rows[start : start + chunk_size]
-        snippet_ids = [r.snippet_id for r in chunk]
+        values = [
+            {
+                "model_checkpoint_id": model_checkpoint_id,
+                "snippet_id": row.snippet_id,
+                "predicted_labels": row.predicted_labels,
+                "predicted_probabilities": row.predicted_probabilities,
+                "uncertainty": row.uncertainty,
+                "diversity": row.diversity,
+                "density": row.density,
+                "composite_score": row.composite_score,
+            }
+            for row in chunk
+        ]
 
-        existing_rows = (
-            db.query(ALPrediction)
-            .filter(
-                ALPrediction.model_checkpoint_id == model_checkpoint_id,
-                ALPrediction.snippet_id.in_(snippet_ids),
+        if dialect_name == "postgresql":
+            stmt = pg_insert(ALPrediction).values(values)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_al_prediction",
+                set_={
+                    "predicted_labels": stmt.excluded.predicted_labels,
+                    "predicted_probabilities": stmt.excluded.predicted_probabilities,
+                    "uncertainty": stmt.excluded.uncertainty,
+                    "diversity": stmt.excluded.diversity,
+                    "density": stmt.excluded.density,
+                    "composite_score": stmt.excluded.composite_score,
+                },
             )
-            .all()
-        )
-        existing_by_sid = {p.snippet_id: p for p in existing_rows}
+            db.execute(stmt)
+        else:
+            # Preserve compatibility with non-Postgres engines used in local tests.
+            snippet_ids = [row.snippet_id for row in chunk]
+            existing_rows = (
+                db.query(ALPrediction)
+                .filter(
+                    ALPrediction.model_checkpoint_id == model_checkpoint_id,
+                    ALPrediction.snippet_id.in_(snippet_ids),
+                )
+                .all()
+            )
+            existing_by_sid = {p.snippet_id: p for p in existing_rows}
 
-        to_add: list[ALPrediction] = []
-        for row in chunk:
-            pred = existing_by_sid.get(row.snippet_id)
-            if pred is None:
-                pred = ALPrediction(model_checkpoint_id=model_checkpoint_id, snippet_id=row.snippet_id)
-                to_add.append(pred)
+            to_add: list[ALPrediction] = []
+            for row in chunk:
+                pred = existing_by_sid.get(row.snippet_id)
+                if pred is None:
+                    pred = ALPrediction(model_checkpoint_id=model_checkpoint_id, snippet_id=row.snippet_id)
+                    to_add.append(pred)
 
-            # Keep embeddings out of the predictions table to minimize row size
-            # and write amplification. If needed later, store checkpoint-scoped
-            # vectors separately using pgvector.
-            pred.predicted_labels = row.predicted_labels
-            pred.predicted_probabilities = row.predicted_probabilities
-            pred.uncertainty = row.uncertainty
-            pred.diversity = row.diversity
-            pred.density = row.density
-            pred.composite_score = row.composite_score
+                pred.predicted_labels = row.predicted_labels
+                pred.predicted_probabilities = row.predicted_probabilities
+                pred.uncertainty = row.uncertainty
+                pred.diversity = row.diversity
+                pred.density = row.density
+                pred.composite_score = row.composite_score
 
-        if to_add:
-            db.add_all(to_add)
+            if to_add:
+                db.add_all(to_add)
+
         db.flush()
 
         logger.info(
-            "pam-al inference: upsert chunk %s/%s (rows=%s, created=%s)",
+            "pam-al inference: upsert chunk %s/%s (rows=%s, dialect=%s)",
             chunk_idx,
             total_chunks,
             len(chunk),
-            len(to_add),
+            dialect_name,
         )
 
 
@@ -249,11 +295,17 @@ def run_and_store_inference(
     probs: torch.Tensor | None = None
     preds: torch.Tensor | None = None
 
+    predict_fn = getattr(model, "predict_with_features", None)
+
     with torch.inference_mode():
         for batch_idx, (start, end) in enumerate(_iter_batches(n, batch_size), start=1):
             x_batch = torch.as_tensor(X[start:end], dtype=torch.float32, device=device)
-            feat_b = model.extract_features(x_batch).detach().cpu()
-            prob_b, pred_b = model.predict(x_batch, threshold=threshold)
+            if predict_fn is not None:
+                feat_b, prob_b, pred_b = predict_fn(x_batch, threshold=threshold)
+            else:
+                feat_b = model.extract_features(x_batch)
+                prob_b, pred_b = model.predict(x_batch, threshold=threshold)
+            feat_b = feat_b.detach().cpu()
             prob_b = prob_b.detach().cpu()
             pred_b = pred_b.detach().cpu()
 
@@ -351,6 +403,87 @@ def get_predictions_for_checkpoint_and_snippet_set(
             Snippet.snippet_set_id == snippet_set_id,
         )
         .order_by(ALPrediction.composite_score.desc().nullslast(), ALPrediction.id.asc())
+        .all()
+    )
+
+
+def predictions_exist_for_checkpoint_and_snippet_set(
+    db: Session,
+    model_checkpoint_id: int,
+    snippet_set_id: int,
+) -> bool:
+    return (
+        db.query(ALPrediction.id)
+        .join(Snippet, Snippet.id == ALPrediction.snippet_id)
+        .filter(
+            ALPrediction.model_checkpoint_id == model_checkpoint_id,
+            Snippet.snippet_set_id == snippet_set_id,
+        )
+        .first()
+        is not None
+    )
+
+
+def count_predictions_for_checkpoint_and_snippet_set(
+    db: Session,
+    model_checkpoint_id: int,
+    snippet_set_id: int,
+) -> int:
+    count = (
+        db.query(func.count(ALPrediction.id))
+        .join(Snippet, Snippet.id == ALPrediction.snippet_id)
+        .filter(
+            ALPrediction.model_checkpoint_id == model_checkpoint_id,
+            Snippet.snippet_set_id == snippet_set_id,
+        )
+        .scalar()
+    )
+    return int(count or 0)
+
+
+def get_top_prediction_suggestions(
+    db: Session,
+    dataset_id: int,
+    model_checkpoint_id: int,
+    snippet_set_id: int,
+    strategy: str,
+    k: int,
+) -> list[ALPrediction]:
+    annotated_exists = (
+        db.query(ALSnippetAnnotation.id)
+        .filter(
+            ALSnippetAnnotation.dataset_id == dataset_id,
+            ALSnippetAnnotation.snippet_id == ALPrediction.snippet_id,
+        )
+        .exists()
+    )
+
+    query = (
+        db.query(ALPrediction)
+        .join(Snippet, Snippet.id == ALPrediction.snippet_id)
+        .filter(
+            ALPrediction.model_checkpoint_id == model_checkpoint_id,
+            Snippet.snippet_set_id == snippet_set_id,
+            ~annotated_exists,
+        )
+    )
+
+    if strategy == "random":
+        return query.order_by(func.random()).limit(k).all()
+
+    score_columns = {
+        "uncertainty": ALPrediction.uncertainty,
+        "diversity": ALPrediction.diversity,
+        "density": ALPrediction.density,
+        "composite": ALPrediction.composite_score,
+    }
+    if strategy not in score_columns:
+        raise ValueError(f"Unsupported suggestion strategy '{strategy}'.")
+
+    score_column = score_columns[strategy]
+    return (
+        query.order_by(score_column.desc().nullslast(), ALPrediction.id.asc())
+        .limit(k)
         .all()
     )
 

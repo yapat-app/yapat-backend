@@ -104,10 +104,10 @@ class ALRunInferenceRequest(BaseModel):
     model_family_name: Optional[str] = Field(default=None, description="Model family name shared across checkpoint versions")
     dataset_id : int
     snippet_set_id: int = Field(..., description="Snippet set to retrieve predictions for")
-    device: Optional[str] = Field(default="cpu", description="cpu or cuda")
+    device: Optional[str] = Field(default=None, description="cpu or cuda; defaults to PAM_DEFAULT_DEVICE")
 
-    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    density_k: Optional[int] = Field(default=None, ge=1)
+    threshold: Optional[float] = Field(default=None)
+    density_k: Optional[int] = Field(default=None)
     composite_wu: Optional[float] = Field(default=None)
     composite_wd: Optional[float] = Field(default=None)
     composite_wr: Optional[float] = Field(default=None)
@@ -255,7 +255,7 @@ class ALRetrainRequest(BaseModel):
     batch_size: Optional[int] = Field(default=None, ge=1)
     hidden_dim: Optional[int] = Field(default=None, ge=1)
     dropout: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    device: Optional[str] = Field(default=None, description="cpu or cuda")
+    device: Optional[str] = Field(default=None, description="cpu or cuda; defaults to PAM_DEFAULT_DEVICE")
 
     threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     density_k: Optional[int] = Field(default=None, ge=1)
@@ -325,10 +325,10 @@ class ALTrainFromScratchRequest(BaseModel):
     model_type: ALModelType = Field(default=ALModelType.PAM_LINEAR_MULTILABEL, description="Classifier type identifier")
     epochs: Optional[int] = Field(default=20, ge=1, le=500)
     learning_rate: Optional[float] = Field(default=1e-3)
-    batch_size: Optional[int] = Field(default=16)
+    batch_size: Optional[int] = Field(default=512)
     hidden_dim: Optional[int] = Field(default=128, nullable=True)
     dropout: Optional[float] = Field(default=0.5, nullable=True)
-    device: Optional[str] = Field(default="cpu", description="cpu or cuda")
+    device: Optional[str] = Field(default=None, description="cpu or cuda; defaults to PAM_DEFAULT_DEVICE")
 
     run_inference: bool = Field(default=False)
 

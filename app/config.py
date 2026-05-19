@@ -77,7 +77,7 @@ class Settings(BaseSettings):
 
     # PAM Active Learning
     PAM_AUTO_RETRAIN_THRESHOLD: int = 5  # Auto-retrain after N feedback events
-    PAM_DEFAULT_DEVICE: str = "cpu"      # Default device for PAM inference/training
+    PAM_DEFAULT_DEVICE: str = "cpu"      # Override with PAM_DEFAULT_DEVICE=cuda on GPU deployments
     PAM_BASE_MODEL_PATH: str = "models_AL/pam/base/base_pam_model.pt"  # Physical base model file
     PAM_CHECKPOINTS_DIR: str = "models_AL/pam/checkpoints"              # Versioned checkpoint storage
 
