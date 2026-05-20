@@ -220,11 +220,48 @@ class DatasetService:
         Raises:
             ValueError("invalid_source_uri") if the path does not exist or is not a directory.
         """
+        if not source_uri or not str(source_uri).strip():
+            raise ValueError("invalid_source_uri")
+
         DATA_ROOT = settings.DATA_ROOT or "/data"
-        dataset_path = os.path.join(DATA_ROOT, source_uri)
-        
+        dataset_path = os.path.normpath(os.path.join(DATA_ROOT, source_uri))
+
+        # Reject path traversal outside DATA_ROOT
+        data_root_norm = os.path.normpath(DATA_ROOT)
+        if not dataset_path.startswith(data_root_norm + os.sep) and dataset_path != data_root_norm:
+            raise ValueError("invalid_source_uri")
+
         if not os.path.isdir(dataset_path):
             raise ValueError("invalid_source_uri")
+
+    def list_available_source_paths(self) -> dict:
+        """
+        List immediate child directories under DATA_ROOT that can be used as source_uri.
+
+        Returns:
+            dict with keys ``data_root`` (absolute) and ``paths`` (list of {path, name}).
+        """
+        data_root = settings.DATA_ROOT or "/data"
+        data_root_norm = os.path.normpath(data_root)
+
+        if not os.path.isdir(data_root_norm):
+            return {"data_root": data_root_norm, "paths": []}
+
+        entries: List[dict] = []
+        try:
+            names = sorted(os.listdir(data_root_norm), key=str.lower)
+        except OSError:
+            return {"data_root": data_root_norm, "paths": []}
+
+        for name in names:
+            if name.startswith("."):
+                continue
+            full_path = os.path.join(data_root_norm, name)
+            if not os.path.isdir(full_path):
+                continue
+            entries.append({"path": name, "name": name})
+
+        return {"data_root": data_root_norm, "paths": entries}
 
     # ---------------------------------------------------------
     # Recording discovery

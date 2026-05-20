@@ -76,3 +76,15 @@ class DatasetExplorerResponse(BaseModel):
     dataset_name: str
     source_uri: str
     species: List[SpeciesFolder]
+
+
+class AvailableDatasetPath(BaseModel):
+    """A directory under DATA_ROOT that can be registered as a dataset source_uri."""
+    path: str
+    name: str
+
+
+class AvailableDatasetPathsResponse(BaseModel):
+    """Directories available on the mounted data volume (relative to DATA_ROOT)."""
+    data_root: str
+    paths: List[AvailableDatasetPath]

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
 
-from app.api.deps import get_db, get_current_active_user
+from app.api.deps import get_db, get_current_active_user, get_current_admin_user
 from app.models.user import User, UserRole
 from app.models.annotation import Annotation as AnnotationModel
 from app.models.snippet import Snippet
@@ -22,6 +22,8 @@ from app.schemas.dataset import (
     DatasetCreate,
     DatasetCreationResponse,
     DatasetExplorerResponse,
+    AvailableDatasetPath,
+    AvailableDatasetPathsResponse,
     SpeciesFolder,
     AudioFile
 )
@@ -86,6 +88,23 @@ def create_dataset(
         process_task_id=task_id,
         snippet_config_id=None,
         embedding_job_id=None,
+    )
+
+
+@router.get("/available-paths", response_model=AvailableDatasetPathsResponse)
+def list_available_dataset_paths(
+        db: Session = Depends(get_db),
+        _admin: User = Depends(get_current_admin_user),
+):
+    """
+    List directories on the mounted data volume (DATA_ROOT) that can be registered
+    as dataset source_uri values. Admin only.
+    """
+    svc = DatasetService(db)
+    result = svc.list_available_source_paths()
+    return AvailableDatasetPathsResponse(
+        data_root=result["data_root"],
+        paths=[AvailableDatasetPath(**p) for p in result["paths"]],
     )
 
 
