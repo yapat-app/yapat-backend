@@ -93,17 +93,23 @@ def create_dataset(
 
 @router.get("/available-paths", response_model=AvailableDatasetPathsResponse)
 def list_available_dataset_paths(
+        prefix: Optional[str] = Query(
+            None,
+            description="Browse path relative to DATA_ROOT (e.g. ChorusRF). Empty = root.",
+        ),
         db: Session = Depends(get_db),
         _admin: User = Depends(get_current_admin_user),
 ):
     """
-    List directories on the mounted data volume (DATA_ROOT) that can be registered
-    as dataset source_uri values. Admin only.
+    List child directories on the mounted data volume (DATA_ROOT) for dataset registration.
+    Pass ``prefix`` to browse nested folders (e.g. ChorusRF → PrioritySpecies). Admin only.
     """
     svc = DatasetService(db)
-    result = svc.list_available_source_paths()
+    result = svc.list_available_source_paths(prefix=prefix)
     return AvailableDatasetPathsResponse(
         data_root=result["data_root"],
+        current_path=result["current_path"],
+        parent_path=result["parent_path"],
         paths=[AvailableDatasetPath(**p) for p in result["paths"]],
     )
 

@@ -234,34 +234,107 @@ class DatasetService:
         if not os.path.isdir(dataset_path):
             raise ValueError("invalid_source_uri")
 
-    def list_available_source_paths(self) -> dict:
+    def _resolve_path_under_data_root(self, relative: Optional[str]) -> tuple[str, str, Optional[str]]:
         """
-        List immediate child directories under DATA_ROOT that can be used as source_uri.
+        Resolve a relative path under DATA_ROOT.
 
         Returns:
-            dict with keys ``data_root`` (absolute) and ``paths`` (list of {path, name}).
+            (absolute_dir, current_path, parent_path)
+            where current_path/parent_path use forward slashes relative to DATA_ROOT.
         """
-        data_root = settings.DATA_ROOT or "/data"
-        data_root_norm = os.path.normpath(data_root)
+        data_root_norm = os.path.normpath(settings.DATA_ROOT or "/data")
+        rel = (relative or "").strip().strip("/").replace("\\", "/")
+        parts = [p for p in rel.split("/") if p and p not in (".", "..")]
+
+        if parts:
+            absolute = os.path.normpath(os.path.join(data_root_norm, *parts))
+            if not absolute.startswith(data_root_norm + os.sep):
+                raise ValueError("invalid_path")
+        else:
+            absolute = data_root_norm
+
+        current_path = "/".join(parts)
+        parent_path = "/".join(parts[:-1]) if len(parts) > 1 else ("" if len(parts) == 1 else None)
+        if len(parts) == 1:
+            parent_path = ""
+
+        return absolute, current_path, parent_path
+
+    @staticmethod
+    def _directory_has_child_dirs(dir_path: str) -> bool:
+        try:
+            for name in os.listdir(dir_path):
+                if name.startswith("."):
+                    continue
+                if os.path.isdir(os.path.join(dir_path, name)):
+                    return True
+        except OSError:
+            return False
+        return False
+
+    def list_available_source_paths(self, prefix: Optional[str] = None) -> dict:
+        """
+        List immediate child directories under DATA_ROOT or under ``prefix``.
+
+        Args:
+            prefix: Optional path relative to DATA_ROOT.
+
+        Returns:
+            dict with keys ``data_root``, ``current_path``, ``parent_path``, ``paths``.
+        """
+        data_root_norm = os.path.normpath(settings.DATA_ROOT or "/data")
 
         if not os.path.isdir(data_root_norm):
-            return {"data_root": data_root_norm, "paths": []}
+            return {
+                "data_root": data_root_norm,
+                "current_path": "",
+                "parent_path": None,
+                "paths": [],
+            }
+
+        try:
+            browse_dir, current_path, parent_path = self._resolve_path_under_data_root(prefix)
+        except ValueError:
+            return {
+                "data_root": data_root_norm,
+                "current_path": "",
+                "parent_path": None,
+                "paths": [],
+            }
+
+        if not os.path.isdir(browse_dir):
+            return {
+                "data_root": data_root_norm,
+                "current_path": current_path,
+                "parent_path": parent_path if current_path else None,
+                "paths": [],
+            }
 
         entries: List[dict] = []
         try:
-            names = sorted(os.listdir(data_root_norm), key=str.lower)
+            names = sorted(os.listdir(browse_dir), key=str.lower)
         except OSError:
-            return {"data_root": data_root_norm, "paths": []}
+            names = []
 
         for name in names:
             if name.startswith("."):
                 continue
-            full_path = os.path.join(data_root_norm, name)
+            full_path = os.path.join(browse_dir, name)
             if not os.path.isdir(full_path):
                 continue
-            entries.append({"path": name, "name": name})
+            child_path = f"{current_path}/{name}" if current_path else name
+            entries.append({
+                "path": child_path,
+                "name": name,
+                "has_children": self._directory_has_child_dirs(full_path),
+            })
 
-        return {"data_root": data_root_norm, "paths": entries}
+        return {
+            "data_root": data_root_norm,
+            "current_path": current_path,
+            "parent_path": parent_path if current_path else None,
+            "paths": entries,
+        }
 
     # ---------------------------------------------------------
     # Recording discovery

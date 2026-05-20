@@ -80,11 +80,14 @@ class DatasetExplorerResponse(BaseModel):
 
 class AvailableDatasetPath(BaseModel):
     """A directory under DATA_ROOT that can be registered as a dataset source_uri."""
-    path: str
-    name: str
+    path: str  # full path relative to DATA_ROOT
+    name: str  # segment name in the current listing
+    has_children: bool = False
 
 
 class AvailableDatasetPathsResponse(BaseModel):
     """Directories available on the mounted data volume (relative to DATA_ROOT)."""
     data_root: str
+    current_path: str = ""
+    parent_path: Optional[str] = None
     paths: List[AvailableDatasetPath]
