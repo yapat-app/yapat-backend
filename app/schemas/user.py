@@ -13,6 +13,24 @@ class UserBase(BaseModel):
     full_name: Optional[str] = None
     role: UserRole = UserRole.USER
 
+    @field_validator("role", mode="before")
+    @classmethod
+    def normalize_role(cls, v):
+        """Accept DB enum names (TEAM_OWNER) and API values (team_owner)."""
+        if v is None:
+            return v
+        if isinstance(v, UserRole):
+            return v
+        key = str(v).lower()
+        aliases = {
+            "admin": UserRole.ADMIN,
+            "team_owner": UserRole.TEAM_OWNER,
+            "user": UserRole.USER,
+        }
+        if key in aliases:
+            return aliases[key]
+        return v
+
 
 class UserCreate(UserBase):
     password: str
