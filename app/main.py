@@ -48,6 +48,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Sample-Rate", "X-Channels"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 

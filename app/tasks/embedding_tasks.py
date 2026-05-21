@@ -19,7 +19,6 @@ from app.models.dataset import Dataset
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.services.embedding_service import EmbeddingService, VectorStore
-from app.services.visualisation_service import VISService
 from app.schemas.visualisation import FPVDatasetRequest
 
 
@@ -358,6 +357,8 @@ def generate_fpv_for_dataset(self, dataset_id: int, embedding_model_id: int):
     """
     db = SessionLocal()
     try:
+        from app.services.visualisation_service import VISService
+
         service = VISService(db)
         body = FPVDatasetRequest(
             dataset_id=dataset_id,

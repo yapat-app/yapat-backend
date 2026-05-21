@@ -22,7 +22,6 @@ from app.models.user import User
 from app.models.user_feed import UserFeed
 from app.schemas.snippet import Snippet, UserFeedSnapshot
 from app.services.snippet_service import SnippetService
-from app.services.birdnet_model import BirdNetEmbedder
 
 router = APIRouter()
 
@@ -368,6 +367,8 @@ async def search_by_audio_upload(
         
         # Generate embedding for the uploaded audio snippet
         try:
+            from app.services.birdnet_model import BirdNetEmbedder
+
             # Use BirdNET embedder to generate embedding
             # Note: This assumes BirdNET model. For other models, add model selection logic.
             query_vector = BirdNetEmbedder.embed(
