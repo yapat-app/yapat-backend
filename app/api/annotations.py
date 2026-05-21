@@ -19,6 +19,8 @@ from app.models.user import User
 from app.core import taxonomy
 from sqlalchemy import func
 
+_MAX_ANNOTATION_SNIPPET_IDS_FILTER = 400
+
 router = APIRouter()
 
 
@@ -235,22 +237,39 @@ def create_annotations_batch(
 @router.get("/", response_model=List[Annotation])
 def read_annotations(
     snippet_id: Optional[int] = Query(None, description="Filter by snippet ID"),
+    snippet_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated snippet IDs (max 400). Batched load for annotate hub.",
+    ),
     taxon_id: Optional[str] = Query(None, description="Filter by taxon ID"),
     user_id: Optional[int] = Query(None, description="Filter by user ID"),
     dataset_id: Optional[int] = Query(None, description="Filter by dataset ID"),
     skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=2000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
     Get list of annotations with optional filtering.
     
-    Supports filtering by snippet_id, taxon_id, user_id, and dataset_id.
+    Supports filtering by snippet_id, snippet_ids (batch), taxon_id, user_id, and dataset_id.
     """
+    parsed_id_list: List[int] = []
+    if snippet_ids:
+        for part in snippet_ids.split(","):
+            p = part.strip()
+            if p.isdigit():
+                parsed_id_list.append(int(p))
+        parsed_id_list = parsed_id_list[:_MAX_ANNOTATION_SNIPPET_IDS_FILTER]
+
+    max_limit = 2000 if parsed_id_list else 500
+    eff_limit = min(limit, max_limit)
+
     query = db.query(AnnotationModel)
     
-    if snippet_id:
+    if parsed_id_list:
+        query = query.filter(AnnotationModel.snippet_id.in_(parsed_id_list))
+    elif snippet_id:
         query = query.filter(AnnotationModel.snippet_id == snippet_id)
     if taxon_id:
         query = query.filter(AnnotationModel.taxon_id == taxon_id)
@@ -260,7 +279,7 @@ def read_annotations(
         # Join through Snippet -> Recording -> Dataset to filter by dataset_id
         query = query.join(Snippet).join(Recording).filter(Recording.dataset_id == dataset_id)
     
-    annotations = query.offset(skip).limit(limit).all()
+    annotations = query.offset(skip).limit(eff_limit).all()
     return annotations
 
 

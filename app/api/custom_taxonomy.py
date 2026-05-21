@@ -5,6 +5,7 @@ Provides chatbot interface for taxonomy generation and management endpoints.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from typing import List, Optional
@@ -309,6 +310,13 @@ def freeze_label_space(
     require_conversation_access(current_user, conversation, db)
 
     try:
+        # Ensure we never hit a DB IntegrityError on NOT NULL team_id
+        if conversation.team_id is None:
+            raise CustomTaxonomyServiceError(
+                "This conversation has no team_id, so a team-scoped taxonomy cannot be created. "
+                "Start the conversation with a team_id (or ensure the user is a member of a team) and try again."
+            )
+
         from app.services.custom_taxonomy_service_freeze import freeze_label_space as freeze_func
         
         result = freeze_func(
@@ -328,6 +336,13 @@ def freeze_label_space(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
+        )
+    except IntegrityError:
+        # Defensive: this has shown up in prod as a 500 when team_id is NULL.
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create taxonomy due to invalid/missing team_id for this conversation."
         )
 
 

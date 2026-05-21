@@ -4,8 +4,8 @@ Team endpoints
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
 from typing import List
+from sqlalchemy import func
 
 from app.api.deps import get_db, get_current_active_user
 from app.schemas.team import (
@@ -20,7 +20,6 @@ from app.models.team import (
 from app.models.user import User, User as UserModel, UserRole
 from app.models.dataset import Dataset as DatasetModel, user_datasets
 from app.models.recording import Recording
-from app.models.embedding import SnippetSet, SnippetSetStatus
 from app.core.permissions import require_team_owner, require_team_member
 from datetime import datetime, timezone, timedelta
 
@@ -109,10 +108,8 @@ def create_team(
     db.add(team)
     db.commit()
     db.refresh(team)
-
-    # Admins create teams on behalf of others — they are not added as members,
-    # and the team stays is_ready=False until an owner registers via invitation.
-    # Non-admin creators become the team owner immediately.
+    
+    # Add creator as team owner (but not for admins creating teams for others)
     if current_user.role != UserRole.ADMIN:
         membership = TeamMembershipModel(
             team_id=team.id,
@@ -120,7 +117,6 @@ def create_team(
             role=TeamRole.OWNER
         )
         db.add(membership)
-        team.is_ready = True
     
     # If dataset_ids were provided, assign them to the new team
     if datasets:
@@ -196,10 +192,10 @@ def get_available_datasets(
             dataset_dict[ds.id] = ds
 
         datasets = list(dataset_dict.values())
-
-    # Attach recording_count to every dataset (same logic as GET /api/datasets)
-    if datasets:
-        dataset_ids = [ds.id for ds in datasets]
+    
+    # Add recording count for each dataset (used by frontend "Audio files" metric)
+    dataset_ids = [ds.id for ds in datasets]
+    if dataset_ids:
         recording_counts = (
             db.query(Recording.dataset_id, func.count(Recording.id).label("count"))
             .filter(Recording.dataset_id.in_(dataset_ids))
@@ -210,40 +206,22 @@ def get_available_datasets(
     else:
         count_map = {}
 
-    # Compute feed readiness (same logic as GET /api/datasets)
-    snippet_set_ids = [ds.default_snippet_set_id for ds in datasets if ds.default_snippet_set_id]
-    if snippet_set_ids:
-        ready_snippet_sets = (
-            db.query(SnippetSet.id)
-            .filter(
-                SnippetSet.id.in_(snippet_set_ids),
-                SnippetSet.status == SnippetSetStatus.READY,
-            )
-            .all()
-        )
-        ready_set_ids = {ss_id for (ss_id,) in ready_snippet_sets}
-    else:
-        ready_set_ids = set()
-
-    result = []
-    for ds in datasets:
-        is_ready = (
-            ds.default_snippet_set_id is not None
-            and ds.default_snippet_set_id in ready_set_ids
-        )
-        ds_dict = {
-            "id": ds.id,
-            "name": ds.name,
-            "description": ds.description,
-            "source_uri": ds.source_uri,
-            "team_id": ds.team_id,
-            "default_snippet_set_id": ds.default_snippet_set_id,
-            "created_at": ds.created_at,
-            "updated_at": ds.updated_at,
-            "recording_count": count_map.get(ds.id, 0),
-            "is_ready_for_feed": is_ready,
+    result: List[DatasetSchema] = []
+    for dataset in datasets:
+        dataset_dict = {
+            "id": dataset.id,
+            "name": dataset.name,
+            "description": dataset.description,
+            "source_uri": dataset.source_uri,
+            "team_id": dataset.team_id,
+            "dataset_type": dataset.dataset_type,
+            "default_snippet_set_id": getattr(dataset, "default_snippet_set_id", None),
+            "created_at": dataset.created_at,
+            "updated_at": dataset.updated_at,
+            "recording_count": count_map.get(dataset.id, 0),
+            "is_ready_for_feed": False,
         }
-        result.append(DatasetSchema(**ds_dict))
+        result.append(DatasetSchema(**dataset_dict))
 
     return result
 

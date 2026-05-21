@@ -2,8 +2,16 @@
 Celery application instance and configuration
 """
 
+import logging
+import time
+
 from celery import Celery
+from celery.signals import task_postrun, task_prerun
+
 from app.config import settings
+from app.logging_config import configure_logging
+
+configure_logging()
 
 # Create Celery instance
 celery_app = Celery(
@@ -13,6 +21,8 @@ celery_app = Celery(
     include=[
         "app.tasks.embedding_tasks",
         "app.tasks.processing_tasks",
+        "app.tasks.pam_al_tasks",
+        "app.tasks.wssed_tasks",
     ]
 )
 
@@ -29,6 +39,7 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.embedding_tasks.*": {"queue": "embeddings"},
         "app.tasks.processing_tasks.*": {"queue": "processing"},
+        "app.tasks.pam_al_tasks.*": {"queue": "pam_al"},
     },
     task_default_queue="default",
     task_default_exchange="default",
@@ -41,7 +52,61 @@ celery_app.conf.update(
     # Worker settings
     worker_prefetch_multiplier=4,
     worker_max_tasks_per_child=1000,
+    worker_hijack_root_logger=False,
+    # Celery 6 deprecation: make startup broker retries explicit.
+    broker_connection_retry_on_startup=True,
+    # Periodic tasks (requires celery-beat)
+    beat_schedule={
+        "pam-al-cleanup-stale-jobs": {
+            "task": "app.tasks.pam_al_tasks.pam_al_cleanup_stale_jobs",
+            # Run every 30 minutes so stuck inference/retrain jobs are never
+            # blocking auto-retrain for more than ~30 min beyond their timeout.
+            "schedule": 1800,
+            "options": {"queue": "pam_al"},
+        },
+        "wssed-sync-training-jobs": {
+            "task": "app.tasks.wssed_tasks.sync_wssed_training_jobs",
+            # Poll GPU server for all TRAINING jobs every WSSED_POLL_INTERVAL (10 s).
+            # Keeps DB fresh so the status endpoint never has to probe the GPU
+            # server directly on each frontend poll.
+            "schedule": settings.WSSED_POLL_INTERVAL,
+            "options": {"queue": "default"},
+        },
+    },
 )
+
+# ── Per-task duration logging (stdout via configure_logging) ───────────────
+
+_task_starts: dict[str, float] = {}
+_celery_task_logger = logging.getLogger("yapat.celery")
+
+
+@task_prerun.connect
+def _celery_task_prerun(task_id=None, **kwargs):
+    if task_id is not None:
+        _task_starts[task_id] = time.perf_counter()
+
+
+@task_postrun.connect
+def _celery_task_postrun(task_id=None, task=None, **kwargs):
+    if task_id is None:
+        return
+    start = _task_starts.pop(task_id, None)
+    if start is None:
+        _celery_task_logger.warning(
+            "task_postrun missing prerun timestamp task_id=%s task=%s",
+            task_id,
+            getattr(task, "name", "?"),
+        )
+        return
+    duration_ms = (time.perf_counter() - start) * 1000
+    _celery_task_logger.info(
+        "task=%s task_id=%s duration_ms=%.1f",
+        getattr(task, "name", "?"),
+        task_id,
+        duration_ms,
+    )
+
 
 if __name__ == "__main__":
     celery_app.start()

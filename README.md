@@ -18,7 +18,8 @@ This single command will start:
 - **PostgreSQL** database (port 5432)
 - **Redis** for Celery (port 6379)
 - **FastAPI** application (port 8000)
-- **Celery worker** for async tasks
+- **Celery worker** — general queues (embeddings, processing, exports, default)
+- **Celery worker (PAM AL)** — dedicated worker for PAM Active Learning training tasks
 - **Celery beat** scheduler for periodic tasks
 - **Flower** monitoring dashboard (port 5555)
 
@@ -121,6 +122,21 @@ If you prefer to run services manually:
    
    If not provided, defaults from `app/config.py` will be used.
 
+   **Species model weights (WSSED / Active Learning):**  
+   To use pre-trained species models, set `ACTIVE_LEARNING_MODELS_DIR` to the base directory that contains your `.pt` weights. Create one subdirectory per species (use lowercase, underscores for spaces), and place the checkpoint file inside it. The backend looks for filenames like `best_macro_model_segment.pt` or `best_micro_model.pt` (see `app/services/species_model_store.py`). Example:
+
+   ```text
+   models_AL/                    # ACTIVE_LEARNING_MODELS_DIR (e.g. ./models_AL or /path/to/models_AL)
+   └── my_species_name/
+       └── best_macro_model_segment.pt
+   ```
+
+   Add to `.env` (optional):
+
+   ```env
+   ACTIVE_LEARNING_MODELS_DIR=models_AL
+   ```
+
 5. **Run database migrations**
    ```bash
    alembic upgrade head
@@ -131,26 +147,54 @@ If you prefer to run services manually:
    uvicorn app.main:app --reload
    ```
 
-7. **Start Celery worker** (in a separate terminal):
+7. **Start the general Celery worker** (in a separate terminal):
    ```bash
    ./start_celery_worker.sh
    ```
 
-8. **(Optional) Start Flower for monitoring:**
+8. **Start the PAM Active Learning Celery worker** (in another separate terminal):
+   ```bash
+   celery -A app.celery_app worker \
+       --loglevel=info \
+       --concurrency=1 \
+       --queues=pam_al \
+       -n pam_al@%h
+   ```
+   > Concurrency is set to 1 because training loads large embedding matrices and
+   > PyTorch models into memory. Set `PAM_DEFAULT_DEVICE=cuda` in your `.env`
+   > to run on GPU.
+
+9. **(Optional) Start Flower for monitoring:**
    ```bash
    ./start_flower.sh
    ```
 
 ## Celery Tasks
 
-YAPAT uses Celery for asynchronous task processing:
-- **Embedding generation**: Generate audio embeddings for snippets
-- **Recording processing**: Process audio files and create snippets
-- **Data export**: Export annotations and generate reports
+YAPAT uses Celery for asynchronous task processing across multiple queues:
 
+| Queue | Worker flag | Purpose |
+|-------|-------------|---------|
+| `embeddings` | `--queues=embeddings` | BirdNET audio embedding generation |
+| `processing` | `--queues=processing` | Dataset scanning, snippet creation |
+| `exports` | `--queues=exports` | Annotation export / report generation |
+| `default` | `--queues=default` | General fallback tasks |
+| `pam_al` | `--queues=pam_al` | **PAM Active Learning** — train-from-scratch, manual retrain, auto-retrain from feedback |
+
+### PAM Active Learning tasks
+
+Heavy training operations are dispatched as background Celery tasks on the `pam_al` queue.
+The API returns an `ALJobDispatch` response immediately with a `job_id`.
+Poll `GET /api/pam-al/retrain/jobs/{job_id}` to track progress.
+
+| Celery task | Triggered by |
+|-------------|--------------|
+| `pam_al_train_from_scratch` | `POST /api/pam-al/train-from-scratch` |
+| `pam_al_manual_retrain` | `POST /api/pam-al/retrain/manual` |
+| `pam_al_auto_retrain` | `POST /api/pam-al/feedback` (auto, when threshold is reached) |
 
 **API Endpoints:**
-All task endpoints are under `/api/tasks` - see interactive docs at http://localhost:8000/docs
+All task endpoints are under `/api/tasks` — see interactive docs at http://localhost:8000/docs
 
 
 ## Database Management

@@ -32,10 +32,14 @@ class User(Base):
     # Relationships
     team_memberships = relationship("TeamMembership", back_populates="user", cascade="all, delete-orphan")
     annotations = relationship(
-        "Annotation", 
-        back_populates="user", 
-        primaryjoin="User.id == Annotation.user_id",
-        cascade="all, delete-orphan"
+        "Annotation",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+    al_annotations = relationship(
+        "ALSnippetAnnotation",
+        back_populates="user",
     )
 
     @property

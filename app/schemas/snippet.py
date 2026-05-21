@@ -3,7 +3,7 @@ Snippet schemas (updated for SnippetSet architecture)
 """
 
 from datetime import datetime
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -33,8 +33,11 @@ class Snippet(SnippetBase):
 
 
 class UserFeedSnapshot(BaseModel):
+    """Snapshot from user_feeds; request_params holds dataset_id and other args for cross-device restore."""
+
     id: int
     method: str
     created_at: datetime
     response: List[Snippet]
+    request_params: Optional[Dict[str, Any]] = None
 

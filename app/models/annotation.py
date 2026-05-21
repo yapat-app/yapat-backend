@@ -47,7 +47,6 @@ class Annotation(Base):
     extra_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    created_by = relationship("User", back_populates="annotations")
     snippet = relationship("Snippet", back_populates="annotations")
     user = relationship("User", back_populates="annotations", foreign_keys=[user_id])
 

@@ -200,39 +200,77 @@ def get_feed(
             detail=f"Internal server error during feed generation: {str(e)}"
         )
 
+def _snapshot_to_response_model(snap: UserFeed) -> UserFeedSnapshot:
+    snippets = [Snippet.model_validate(item) for item in (snap.response or [])]
+    return UserFeedSnapshot(
+        id=snap.id,
+        method=snap.method,
+        created_at=snap.created_at,
+        response=snippets,
+        request_params=snap.request_params,
+    )
+
+
+def _dataset_id_from_request_params(rp: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not rp or not isinstance(rp, dict):
+        return None
+    v = rp.get("dataset_id")
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+_CLASSIC_FEED_METHODS = ("random", "similarity")
+
+
 @router.get("/history", response_model=List[UserFeedSnapshot])
 def get_feed_history(
+    method: Optional[str] = Query(
+        default=None,
+        description="If set, only snapshots with this method (e.g. random, similarity).",
+    ),
+    dataset_id: Optional[int] = Query(
+        default=None,
+        description="If set, only snapshots for this dataset_id (from stored request_params).",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Return the last 5 feed responses stored for the current user.
-    
-    Returns feeds across all methods (random, similarity) ordered by creation time.
-    Each feed snapshot includes the method used: 'random' or 'similarity'.
+    Return stored classic feed snapshots for the user.
+
+    Retention on write is last 5 rows per user **and** method. This endpoint returns up to
+    5 **per** random and 5 **per** similarity (newest first when merged), not a single
+    global cap of 5 across methods.
+
+    Optional filters narrow results for clients that only need one mode and/or dataset.
     """
-    snapshots = (
-        db.query(UserFeed)
-        .filter(UserFeed.user_id == current_user.id)
-        .order_by(UserFeed.created_at.desc(), UserFeed.id.desc())
-        .limit(5)
-        .all()
-    )
+    if method:
+        methods = (method,)
+    else:
+        methods = _CLASSIC_FEED_METHODS
 
-    result: List[UserFeedSnapshot] = []
-    for snap in snapshots:
-        # snap.response is already a list of snippet dicts
-        snippets = [Snippet.model_validate(item) for item in (snap.response or [])]
-        result.append(
-            UserFeedSnapshot(
-                id=snap.id,
-                method=snap.method,
-                created_at=snap.created_at,
-                response=snippets,
-            )
+    rows: List[UserFeed] = []
+    for m in methods:
+        part = (
+            db.query(UserFeed)
+            .filter(UserFeed.user_id == current_user.id, UserFeed.method == m)
+            .order_by(UserFeed.created_at.desc(), UserFeed.id.desc())
+            .limit(5)
+            .all()
         )
+        rows.extend(part)
 
-    return result
+    rows.sort(key=lambda s: (s.created_at, s.id), reverse=True)
+
+    if dataset_id is not None:
+        want = int(dataset_id)
+        rows = [s for s in rows if _dataset_id_from_request_params(s.request_params) == want]
+
+    return [_snapshot_to_response_model(s) for s in rows]
 
 
 @router.post("/similarity-search", response_model=List[Snippet])

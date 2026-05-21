@@ -13,7 +13,8 @@ fi
 # Set Python path
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
-# Start Celery worker with multiple queues
+# Start Celery worker for all general queues (embeddings, processing, exports, default)
+# PAM Active Learning tasks run in a separate worker — see below.
 celery -A app.celery_app worker \
     --loglevel=info \
     --concurrency=4 \
@@ -22,6 +23,20 @@ celery -A app.celery_app worker \
     --task-events \
     --without-gossip \
     --without-mingle
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PAM Active Learning worker
+# ──────────────────────────────────────────────────────────────────────────────
+# Run this in a separate terminal.  Concurrency is intentionally 1 because
+# training loads large embedding matrices and PyTorch models into RAM/VRAM.
+# Use --queues=pam_al to keep heavy training tasks isolated from other workers.
+#
+# CPU:
+#   celery -A app.celery_app worker --loglevel=info --concurrency=1 --queues=pam_al -n pam_al@%h
+#
+# GPU (set PAM_DEFAULT_DEVICE=cuda in your .env first):
+#   celery -A app.celery_app worker --loglevel=info --concurrency=1 --queues=pam_al -n pam_al@%h
+# ──────────────────────────────────────────────────────────────────────────────
 
 # Alternative: Start multiple specialized workers
 # Uncomment to run specialized workers for different task types

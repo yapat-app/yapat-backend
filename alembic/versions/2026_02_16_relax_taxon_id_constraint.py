@@ -1,7 +1,7 @@
 """relax annotations taxon_id check constraint and add unique (snippet_id, taxon_id)
 
-Revision ID: 2026_02_16_taxon_constraint
-Revises: 2026_01_30_custom_tax
+Revision ID: 2026_02_16_relax_taxon_id_constraint
+Revises: 2026_02_16_taxon_constraint
 Create Date: 2026-02-16
 
 - Allow namespace:key where key is alphanumeric (e.g. local:vesperis_iridescentis).
@@ -10,8 +10,8 @@ Create Date: 2026-02-16
 from alembic import op
 
 
-revision = "2026_02_16_taxon_constraint"
-down_revision = "2026_01_30_custom_tax"
+revision = "2026_02_16_relax_taxon_id_constraint"
+down_revision = "2026_02_16_taxon_constraint"
 branch_labels = None
 depends_on = None
 

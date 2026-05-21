@@ -3,15 +3,22 @@ Dataset schemas
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
+from enum import Enum
 
 from pydantic import BaseModel
+
+
+class DatasetType(str, Enum):
+    PAM = "PAM"
+    FOCAL_RECORDINGS = "FOCAL_RECORDINGS"
 
 
 class DatasetBase(BaseModel):
     name: str
     description: Optional[str] = None
     source_uri: Optional[str] = None
+    dataset_type: DatasetType = DatasetType.PAM
 
 
 class DatasetCreate(DatasetBase):
@@ -22,11 +29,13 @@ class DatasetUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     source_uri: Optional[str] = None
+    dataset_type: Optional[DatasetType] = None
 
 
 class Dataset(DatasetBase):
     id: int
     team_id: Optional[int] = None
+    dataset_type: Optional[DatasetType] = DatasetType.PAM
     default_snippet_set_id: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -45,3 +54,40 @@ class DatasetCreationResponse(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+class AudioFile(BaseModel):
+    """Represents an audio file in the dataset explorer"""
+    filename: str
+    file_path: str  # Relative path from DATA_ROOT
+    size: Optional[int] = None  # File size in bytes
+
+
+class SpeciesFolder(BaseModel):
+    """Represents a species folder (subfolder) in a dataset"""
+    name: str
+    file_count: int
+    files: List[AudioFile]
+
+
+class DatasetExplorerResponse(BaseModel):
+    """Response for dataset explorer endpoint showing species and their files"""
+    dataset_id: int
+    dataset_name: str
+    source_uri: str
+    species: List[SpeciesFolder]
+
+
+class AvailableDatasetPath(BaseModel):
+    """A directory under DATA_ROOT that can be registered as a dataset source_uri."""
+    path: str  # full path relative to DATA_ROOT
+    name: str  # segment name in the current listing
+    has_children: bool = False
+
+
+class AvailableDatasetPathsResponse(BaseModel):
+    """Directories available on the mounted data volume (relative to DATA_ROOT)."""
+    data_root: str
+    current_path: str = ""
+    parent_path: Optional[str] = None
+    paths: List[AvailableDatasetPath]

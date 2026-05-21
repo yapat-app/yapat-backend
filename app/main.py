@@ -2,11 +2,35 @@
 FastAPI app entry point
 """
 
-from fastapi import FastAPI
+import logging
+import time
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app.config import settings
-from app.api import auth, teams, datasets, recordings, snippets, annotations, feed, invitations, tasks, taxonomy, embeddings, custom_taxonomy
+from app.logging_config import configure_logging
+
+configure_logging()
+
+from app.api import (
+    annotations,
+    auth,
+    custom_taxonomy,
+    datasets,
+    embeddings,
+    feed,
+    invitations,
+    pam_active_learning,
+    recordings,
+    snippets,
+    tasks,
+    taxonomy,
+    teams,
+    visualisations,
+    wssed,
+)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -25,6 +49,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+_request_logger = logging.getLogger("yapat.request")
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - start) * 1000
+    _request_logger.info(
+        "%s %s status=%d duration_ms=%.1f",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
 
 # Include routers
 app.include_router(auth.router, prefix=f"{settings.API_STR}/auth", tags=["auth"])
@@ -39,6 +80,9 @@ app.include_router(tasks.router, prefix=f"{settings.API_STR}/tasks", tags=["task
 app.include_router(taxonomy.router, prefix=f"{settings.API_STR}/taxonomy", tags=["taxonomy"])
 app.include_router(custom_taxonomy.router, prefix=f"{settings.API_STR}/taxonomy", tags=["custom-taxonomy"])
 app.include_router(embeddings.router, prefix=f"{settings.API_STR}", tags=["embeddings"])
+app.include_router(pam_active_learning.router, prefix=f"{settings.API_STR}/pam-al", tags=["pam-active-learning"])
+app.include_router(visualisations.router, prefix=f"{settings.API_STR}/visualisations", tags=["visualisations"])
+app.include_router(wssed.router, prefix=f"{settings.API_STR}/wssed", tags=["wssed"])
 
 
 @app.get("/")

@@ -21,7 +21,7 @@ services:
     image: redis:7-alpine
     container_name: yapat-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -35,8 +35,9 @@ services:
   # FastAPI application
   api:
     build: .
+    gpus: all
     container_name: yapat-api
-    command: /app/startup.sh uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: ["bash", "/app/startup.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
       db:
         condition: service_healthy
@@ -51,27 +52,39 @@ services:
       - ACCESS_TOKEN_EXPIRE_MINUTES=30
       - API_STR=/api
       - PROJECT_NAME=YAPAT Backend
-      - BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}
       - DATA_ROOT=/data
       - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
+      - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
+      - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
+      - PAM_CHECKPOINTS_DIR=/app/models_AL/pam/checkpoints
+      - PAM_DEFAULT_DEVICE=${PAM_DEFAULT_DEVICE:-cpu}
       - OE_YAPAT_TIMEOUT=120
     ports:
       - "8000:8000"
     volumes:
-      - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      # Mount host directory for species models (read-write so retraining can save checkpoints)
+      - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
+      - ${HOST_MODELS_AL:-./models_AL}:/app/assets/models/single_species_models:ro
     restart: unless-stopped
 
   # Celery worker for asynchronous task processing
   celery-worker:
     build: .
     container_name: yapat-celery-worker
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 --queues=default,embeddings,processing,exports
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=default,embeddings,processing,exports
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -79,9 +92,49 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
       - DATA_ROOT=/data
       - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
+      - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
+      - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
+      - PAM_CHECKPOINTS_DIR=/app/models_AL/pam/checkpoints
+      - PAM_DEFAULT_DEVICE=${PAM_DEFAULT_DEVICE:-cpu}
     volumes:
-      - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      # Read-write so Celery worker can save checkpoints when retraining
+      - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
+    restart: unless-stopped
+
+  # Dedicated Celery worker for PAM Active Learning (training is CPU/GPU-intensive)
+  celery-worker-pam-al:
+    build: .
+    container_name: yapat-celery-worker-pam-al
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=pam_al -n pam_al@%h
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+        reservations:
+          memory: 8G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - DATA_ROOT=/data
+      - PAM_CHECKPOINTS_DIR=/app/models_AL/pam/checkpoints
+      - PAM_DEFAULT_DEVICE=${PAM_DEFAULT_DEVICE:-cpu}
+      - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
+    volumes:
+      - ${HOST_DATA_ROOT}:/data:ro
+      # Read-write: worker saves new checkpoint files here after retraining
+      - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
 
   # Celery beat scheduler for periodic tasks
@@ -101,9 +154,11 @@ services:
       - SECRET_KEY=${SECRET_KEY:-secret-key-change-in-production}
       - DATA_ROOT=/data
       - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
+      - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
+      - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
     volumes:
-      - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
 
   # Flower monitoring dashboard for Celery
@@ -121,8 +176,6 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     ports:
       - "5555:5555"
-    volumes:
-      - .:/app
     restart: unless-stopped
 
 volumes:

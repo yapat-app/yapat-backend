@@ -21,8 +21,10 @@ class Settings(BaseSettings):
     # API
     API_STR: str = "/api"
     PROJECT_NAME: str = "YAPAT Backend"
+    LOG_LEVEL: str = "INFO"
     DATA_ROOT: Optional[str] = "/data"
     HOST_DATA_ROOT: str | None = None  # host path (optional)
+    HOST_MODELS_AL: str | None = None  # host path for models; used by docker-compose for mounts only
     
     # CORS - can be set as comma-separated string or list
     BACKEND_CORS_ORIGINS: Union[str, list] = [
@@ -61,6 +63,23 @@ class Settings(BaseSettings):
     OE_YAPAT_API_KEY: Optional[str] = None
     OE_YAPAT_TIMEOUT: int = 120  # seconds — needs to cover up to 6 LLM calls in oe_yapat http_api_server
     OE_YAPAT_RETRY_ATTEMPTS: int = 2  # 2 retries max; 3× is too long when timeout is 120s
+    
+    # WSSED GPU Server
+    WSSED_GPU_SERVER_URL: str = "http://localhost:8003"  # URL of GPU server running WSSED
+    WSSED_TIMEOUT: int = 300  # seconds (5 minutes for long operations)
+    WSSED_POLL_INTERVAL: int = 10  # seconds between status polls
+    # Host path to WSSED focal-data outputs (for copying checkpoints into PAM_CHECKPOINTS_DIR)
+    WSSED_FOCAL_DATA_ROOT: Optional[str] = None
+    
+    # Active Learning - Species Models
+    ACTIVE_LEARNING_MODELS_DIR: Optional[str] = None  # Directory containing pre-trained species models
+    AUTO_REGISTER_SPECIES_MODELS: bool = True  # Automatically register species models for FOCAL_RECORDINGS datasets
+
+    # PAM Active Learning
+    PAM_AUTO_RETRAIN_THRESHOLD: int = 5  # Auto-retrain after N feedback events
+    PAM_DEFAULT_DEVICE: str = "cpu"      # Override with PAM_DEFAULT_DEVICE=cuda on GPU deployments
+    PAM_BASE_MODEL_PATH: str = "models_AL/pam/base/base_pam_model.pt"  # Physical base model file
+    PAM_CHECKPOINTS_DIR: str = "models_AL/pam/checkpoints"              # Versioned checkpoint storage
 
     model_config = SettingsConfigDict(
         env_file=".env",

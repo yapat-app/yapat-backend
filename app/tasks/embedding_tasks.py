@@ -19,6 +19,8 @@ from app.models.dataset import Dataset
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.services.embedding_service import EmbeddingService, VectorStore
+from app.services.visualisation_service import VISService
+from app.schemas.visualisation import FPVDatasetRequest
 
 
 # from sqlalchemy.orm import Session
@@ -324,6 +326,17 @@ def finalize_embedding_job(self, results, embedding_job_id):
                 embedding_job_id,
                 EmbeddingJobStatus.COMPLETED
             )
+            job = db.query(EmbeddingJob).filter_by(id=embedding_job_id).first()
+            if job is not None:
+                from app.services.pam_al._embedding_cache import invalidate_embedding_cache
+
+                invalidate_embedding_cache(job.snippet_set_id, job.embedding_model_id)
+                # Trigger dataset-level FPV generation asynchronously. This makes projections
+                # available instantly on the Active Learning page and decouples them from inference.
+                generate_fpv_for_dataset.delay(
+                    dataset_id=job.dataset_id,
+                    embedding_model_id=job.embedding_model_id,
+                )
 
     except Exception as e:
         service.update_job_status(
@@ -333,5 +346,27 @@ def finalize_embedding_job(self, results, embedding_job_id):
         )
         raise
 
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.tasks.embedding.generate_fpv_for_dataset")
+def generate_fpv_for_dataset(self, dataset_id: int, embedding_model_id: int):
+    """
+    Compute and cache dataset-level FPV projections from EmbeddingVector.
+    Stored in fpv_vis with model_checkpoint_id = NULL and embedding_model_id set.
+    """
+    db = SessionLocal()
+    try:
+        service = VISService(db)
+        body = FPVDatasetRequest(
+            dataset_id=dataset_id,
+            embedding_model_id=embedding_model_id,
+            run_3d=False,
+        )
+        service.generate_fpv_for_dataset_embeddings(body)
+        return {"status": "success", "dataset_id": dataset_id, "embedding_model_id": embedding_model_id}
+    except Exception as e:
+        return {"status": "error", "dataset_id": dataset_id, "embedding_model_id": embedding_model_id, "message": str(e)}
     finally:
         db.close()

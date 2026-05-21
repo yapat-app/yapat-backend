@@ -11,6 +11,7 @@ from app.models.dataset import Dataset
 from app.services.embedding_service import EmbeddingService
 from app.services.snippet_set_service import SnippetSetService
 from app.tasks.embedding_tasks import run_embedding
+from app.models.embedding import SnippetSet as SnippetSetModel, SnippetSetStatus
 from app.schemas.embedding import (
     EmbeddingModel,
     EmbeddingJobCreateRequest,
@@ -89,6 +90,12 @@ def create_embedding_job(
     )
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # NOTE:
+    # In the SnippetSet architecture, the embedding pipeline materializes snippets
+    # and marks the SnippetSet READY inside `run_embedding`. For new datasets,
+    # `default_snippet_set_id` may be null until the first embedding job runs.
+    # Therefore we must not block job creation based on default snippet set state.
 
     # --------------------------
     # Validate embedding model

@@ -31,4 +31,10 @@ env/
 celerybeat-schedule
 
 # Data files
-data
+data/
+
+# Active learning / trained model checkpoints
+models_AL/
+
+# All experiment files
+notebook*

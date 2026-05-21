@@ -1,0 +1,304 @@
+
+from sqlalchemy import (
+    Column, Integer, String, DateTime, ForeignKey, Float, Text, JSON,
+    Enum as SQLEnum, UniqueConstraint,
+)
+from sqlalchemy.orm import relationship
+from pgvector.sqlalchemy import Vector
+from sqlalchemy.sql import func
+import enum
+
+from app.database import Base
+from app.schemas.pam_active_learning import ALModelType
+
+
+# ── Enums ──────────────────────────────────────────────────────────────
+
+class ALModelStatus(str, enum.Enum):
+    AVAILABLE = "AVAILABLE"
+    LOADING = "LOADING"
+    ERROR = "ERROR"
+
+
+class ALFeedbackAction(str, enum.Enum):
+    ACCEPT = "ACCEPT"
+    REJECT = "REJECT"
+    MODIFY = "MODIFY"
+
+
+class ALRetrainStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+class ALAnnotationSource(str, enum.Enum):
+    GROUND_TRUTH = "ground_truth"
+    USER = "user"
+
+# ── Model Checkpoint ───────────────────────────────────────────────────
+
+class ALModelCheckpoint(Base):
+    """
+    Tracks model versions / checkpoints used for PAM active learning.
+
+    A checkpoint belongs to a dataset and holds a path to the weights on disk.
+    The first checkpoint (``is_base=True``) points to the shared base model;
+    subsequent retrained versions reference their parent via ``parent_checkpoint_id``.
+    """
+    __tablename__ = "al_model_checkpoints"
+
+    id = Column(Integer, primary_key=True, index=True)
+    dataset_id = Column(
+        Integer,
+        ForeignKey("datasets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    model_family_name = Column(String, nullable=False)
+    version = Column(String, nullable=False, default="v0")
+    checkpoint_path = Column(String, nullable=False)  # filesystem path to weights
+    label_config_path = Column(String, nullable=False)
+    model_type = Column(String, nullable=False, default=ALModelType.PAM_LINEAR_MULTILABEL)
+    hyperparameters = Column(JSON, nullable=True)
+    is_base = Column(Integer, nullable=False, default=0)  # 1 = base model entry
+    parent_checkpoint_id = Column(
+        Integer,
+        ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    status = Column(
+        SQLEnum(ALModelStatus, name="al_model_status_enum", create_type=True),
+        nullable=False,
+        default=ALModelStatus.AVAILABLE,
+    )
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    # Relationships
+    dataset = relationship("Dataset", back_populates="al_model_checkpoints")
+    predictions = relationship(
+        "ALPrediction", back_populates="model_checkpoint", cascade="all, delete-orphan"
+    )
+    retrain_jobs = relationship(
+        "ALRetrainJob", back_populates="model_checkpoint", cascade="all, delete-orphan"
+    )
+    al_annotations = relationship(
+        "ALSnippetAnnotation",
+        back_populates="model_checkpoint",
+    )
+    parent_checkpoint = relationship(
+        "ALModelCheckpoint",
+        remote_side="ALModelCheckpoint.id",
+        foreign_keys=[parent_checkpoint_id],
+        uselist=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "model_family_name", "version", name="uq_al_checkpoint"),
+    )
+
+class ALModelFamilyState(Base):
+    __tablename__ = "al_model_family_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    dataset_id = Column(
+        Integer,
+        ForeignKey("datasets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    model_family_name = Column(String, nullable=False, index=True)
+    active_model_checkpoint_id = Column(
+        Integer,
+        ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "model_family_name", name="uq_al_model_family_state"),
+    )
+
+# ── Prediction ─────────────────────────────────────────────────────────
+
+class ALPrediction(Base):
+    """
+    A single classifier prediction on a snippet.
+
+    Stores the predicted label string, numeric score, and a composite
+    ranking score produced by the combined scoring module.
+    """
+    __tablename__ = "al_predictions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_checkpoint_id = Column(
+        Integer,
+        ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    snippet_id = Column(
+        Integer,
+        ForeignKey("snippets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    predicted_labels = Column(JSON, nullable=False)
+    predicted_probabilities = Column(JSON, nullable=True)
+    # Active learning scores
+    uncertainty = Column(Float, nullable=True)
+    diversity = Column(Float, nullable=True)
+    density = Column(Float, nullable=True)
+    composite_score = Column(Float, nullable=True)
+
+    # Intermediate representation
+    # Keeping JSON as the dimensions could change based on the checkpoint hyperparams
+    embedding = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # Relationships
+    model_checkpoint = relationship("ALModelCheckpoint", back_populates="predictions")
+    snippet = relationship("Snippet", back_populates="al_predictions")
+    __table_args__ = (
+        UniqueConstraint("model_checkpoint_id", "snippet_id", name="uq_al_prediction"),
+    )
+
+class ALSnippetAnnotation(Base):
+    __tablename__ = "al_snippet_annotation"
+
+    id = Column(Integer, primary_key=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True)
+    snippet_id = Column(Integer, ForeignKey("snippets.id", ondelete="CASCADE"), nullable=False, index=True)
+    label = Column(String, nullable=False, index=True)
+    source = Column(
+        SQLEnum(ALAnnotationSource, name="al_annotation_source_enum", create_type=True),
+        nullable=False,
+    )
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    model_checkpoint_id = Column(Integer, ForeignKey("al_model_checkpoints.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    snippet = relationship("Snippet", back_populates="al_annotations")
+    model_checkpoint = relationship("ALModelCheckpoint", back_populates="al_annotations")
+    user = relationship("User", back_populates="al_annotations")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snippet_id",
+            "label",
+            "source",
+            "user_id",
+            "model_checkpoint_id",
+            name="uq_al_snippet_label_source_user_ckpt",
+        ),
+    )
+
+# ── Feedback Event ─────────────────────────────────────────────────────
+
+class ALFeedbackEvent(Base):
+    """
+    A single snippet-level human-in-the-loop feedback event.
+
+    action = ACCEPT | REJECT | MODIFY
+
+    final_labels stores the resolved labels after the user action:
+    - ACCEPT  -> accepted predicted labels (or explicitly provided labels)
+    - MODIFY  -> user-provided corrected labels
+    - REJECT  -> usually empty list
+    """
+    __tablename__ = "al_feedback_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    dataset_id = Column(
+        Integer,
+        ForeignKey("datasets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    model_checkpoint_id = Column(
+        Integer,
+        ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    snippet_id = Column(
+        Integer,
+        ForeignKey("snippets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    action = Column(
+        SQLEnum(ALFeedbackAction, name="al_feedback_action_enum", create_type=True),
+        nullable=False,
+    )
+
+    final_labels = Column(JSON, nullable=True)
+
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # Relationships
+    user = relationship("User")
+    snippet = relationship("Snippet")
+    model_checkpoint = relationship("ALModelCheckpoint")
+
+
+# ── Retrain Job ────────────────────────────────────────────────────────
+
+class ALRetrainJob(Base):
+    """
+    Metadata for a retraining run triggered either automatically or manually.
+    """
+    __tablename__ = "al_retrain_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_checkpoint_id = Column(
+        Integer,
+        ForeignKey("al_model_checkpoints.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    dataset_id = Column(
+        Integer,
+        ForeignKey("datasets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    trigger = Column(String, nullable=False, default="auto")  # "auto" | "manual"
+    feedback_count = Column(Integer, nullable=False, default=0)
+    status = Column(
+        SQLEnum(ALRetrainStatus, name="al_retrain_status_enum", create_type=True),
+        nullable=False,
+        default=ALRetrainStatus.PENDING,
+    )
+    result_metrics = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # Relationships
+    model_checkpoint = relationship("ALModelCheckpoint", back_populates="retrain_jobs")

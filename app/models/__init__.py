@@ -23,6 +23,24 @@ from app.models.taxonomy_conversation import (
     ConversationStatus,
     MessageRole,
 )
+from app.models.wssed import (
+    WSSEDTrainingJob,
+    WSSEDPrediction,
+    WSSEDStrongLabel,
+    WSSEDSpeciesModel,
+    WSSEDSnippetLabel,
+    TrainingStatus,
+    FeedbackType,
+)
+from app.models.pam_active_learning import (
+    ALModelCheckpoint,
+    ALPrediction,
+    ALFeedbackEvent,
+    ALRetrainJob,
+    ALModelStatus,
+    ALFeedbackAction,
+    ALRetrainStatus,
+)
 
 __all__ = [
     "User",
@@ -43,4 +61,19 @@ __all__ = [
     "TaxonomyMessage",
     "ConversationStatus",
     "MessageRole",
+    "WSSEDTrainingJob",
+    "WSSEDPrediction",
+    "WSSEDStrongLabel",
+    "WSSEDSpeciesModel",
+    "WSSEDSnippetLabel",
+    "TrainingStatus",
+    "FeedbackType",
+    # PAM Active Learning
+    "ALModelCheckpoint",
+    "ALPrediction",
+    "ALFeedbackEvent",
+    "ALRetrainJob",
+    "ALModelStatus",
+    "ALFeedbackAction",
+    "ALRetrainStatus",
 ]

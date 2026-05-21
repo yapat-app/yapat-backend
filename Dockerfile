@@ -2,6 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# for faster builds
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -13,13 +17,14 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --prefer-binary --progress-bar off -r requirements.txt \
+    && pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 # Copy application code
 COPY . .
 
-# Make startup script executable
-RUN chmod +x /app/startup.sh
+# Normalize line endings and make startup script executable
+RUN sed -i 's/\r$//' /app/startup.sh && chmod +x /app/startup.sh
 
 # Set Python path
 ENV PYTHONPATH=/app
