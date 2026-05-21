@@ -20,6 +20,7 @@ from app.models.embedding import SnippetSet, SnippetSetStatus
 from app.schemas.dataset import (
     Dataset,
     DatasetCreate,
+    DatasetUpdate,
     DatasetCreationResponse,
     DatasetExplorerResponse,
     AvailableDatasetPath,
@@ -29,6 +30,7 @@ from app.schemas.dataset import (
 )
 from app.schemas.annotation import AnnotationExport
 from app.services.dataset_service import DatasetService
+from app.utils.dataset_response import dataset_to_dict
 from app.tasks.processing_tasks import process_dataset
 
 router = APIRouter()
@@ -67,21 +69,9 @@ def create_dataset(
     except Exception:
         task_id = None
 
-    # Create dataset response with recording_count and feed readiness
-    dataset_dict = {
-        "id": dataset.id,
-        "name": dataset.name,
-        "description": dataset.description,
-        "source_uri": dataset.source_uri,
-        "team_id": dataset.team_id,
-        "dataset_type": dataset.dataset_type,
-        "default_snippet_set_id": dataset.default_snippet_set_id,
-        "created_at": dataset.created_at,
-        "updated_at": dataset.updated_at,
-        "recording_count": 0,  # New datasets start with 0 recordings
-        "is_ready_for_feed": False,  # New datasets don't have snippet sets yet
-    }
-    dataset_response = Dataset(**dataset_dict)
+    dataset_response = Dataset(
+        **dataset_to_dict(dataset, recording_count=0, is_ready_for_feed=False)
+    )
 
     return DatasetCreationResponse(
         dataset=dataset_response,
@@ -160,20 +150,15 @@ def read_datasets(
             and dataset.default_snippet_set_id in ready_set_ids
         )
         
-        dataset_dict = {
-            "id": dataset.id,
-            "name": dataset.name,
-            "description": dataset.description,
-            "source_uri": dataset.source_uri,
-            "team_id": dataset.team_id,
-            "dataset_type": dataset.dataset_type,
-            "default_snippet_set_id": dataset.default_snippet_set_id,
-            "created_at": dataset.created_at,
-            "updated_at": dataset.updated_at,
-            "recording_count": count_map.get(dataset.id, 0),
-            "is_ready_for_feed": is_ready,
-        }
-        result.append(Dataset(**dataset_dict))
+        result.append(
+            Dataset(
+                **dataset_to_dict(
+                    dataset,
+                    recording_count=count_map.get(dataset.id, 0),
+                    is_ready_for_feed=is_ready,
+                )
+            )
+        )
     
     return result
 
@@ -207,20 +192,64 @@ def read_dataset(
         if snippet_set and snippet_set.status == SnippetSetStatus.READY:
             is_ready_for_feed = True
     
-    dataset_dict = {
-        "id": dataset.id,
-        "name": dataset.name,
-        "description": dataset.description,
-        "source_uri": dataset.source_uri,
-        "team_id": dataset.team_id,
-        "dataset_type": dataset.dataset_type,
-        "default_snippet_set_id": dataset.default_snippet_set_id,
-        "created_at": dataset.created_at,
-        "updated_at": dataset.updated_at,
-        "recording_count": recording_count,
-        "is_ready_for_feed": is_ready_for_feed,
-    }
-    return Dataset(**dataset_dict)
+    return Dataset(
+        **dataset_to_dict(
+            dataset,
+            recording_count=recording_count,
+            is_ready_for_feed=is_ready_for_feed,
+        )
+    )
+
+
+@router.patch("/{dataset_id}", response_model=Dataset)
+def update_dataset(
+    dataset_id: int,
+    update_in: DatasetUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Update dataset metadata. Admin or team owner for the dataset's team."""
+    svc = DatasetService(db)
+    try:
+        dataset = svc.update_dataset(dataset_id, update_in, current_user)
+    except ValueError as e:
+        code = str(e)
+        if code == "not_found":
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        if code == "forbidden":
+            raise HTTPException(status_code=403, detail="Not allowed to update this dataset")
+        if code in (
+            "invalid_spectrogram_f_min",
+            "invalid_spectrogram_f_max",
+            "spectrogram_f_max_lte_min",
+            "invalid_source_uri",
+        ):
+            raise HTTPException(status_code=400, detail=code)
+        raise
+
+    recording_count = (
+        db.query(func.count(Recording.id))
+        .filter(Recording.dataset_id == dataset_id)
+        .scalar()
+    ) or 0
+
+    is_ready_for_feed = False
+    if dataset.default_snippet_set_id:
+        snippet_set = (
+            db.query(SnippetSet)
+            .filter(SnippetSet.id == dataset.default_snippet_set_id)
+            .first()
+        )
+        if snippet_set and snippet_set.status == SnippetSetStatus.READY:
+            is_ready_for_feed = True
+
+    return Dataset(
+        **dataset_to_dict(
+            dataset,
+            recording_count=recording_count,
+            is_ready_for_feed=is_ready_for_feed,
+        )
+    )
 
 
 @router.get("/{dataset_id}/explorer", response_model=DatasetExplorerResponse)

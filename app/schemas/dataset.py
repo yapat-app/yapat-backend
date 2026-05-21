@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, List
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class DatasetType(str, Enum):
@@ -23,6 +23,8 @@ class DatasetBase(BaseModel):
 
 class DatasetCreate(DatasetBase):
     team_id: Optional[int] = None  # Optional for admins, required for regular users
+    spectrogram_f_min_hz: Optional[float] = None
+    spectrogram_f_max_hz: Optional[float] = None
 
 
 class DatasetUpdate(BaseModel):
@@ -30,6 +32,17 @@ class DatasetUpdate(BaseModel):
     description: Optional[str] = None
     source_uri: Optional[str] = None
     dataset_type: Optional[DatasetType] = None
+    spectrogram_f_min_hz: Optional[float] = None
+    spectrogram_f_max_hz: Optional[float] = None
+
+    @field_validator("spectrogram_f_min_hz", "spectrogram_f_max_hz")
+    @classmethod
+    def validate_positive_hz(cls, v: Optional[float], info) -> Optional[float]:
+        if v is None:
+            return None
+        if v < 0:
+            raise ValueError(f"{info.field_name} must be non-negative")
+        return v
 
 
 class Dataset(DatasetBase):
@@ -37,6 +50,8 @@ class Dataset(DatasetBase):
     team_id: Optional[int] = None
     dataset_type: Optional[DatasetType] = DatasetType.PAM
     default_snippet_set_id: Optional[int] = None
+    spectrogram_f_min_hz: Optional[float] = None
+    spectrogram_f_max_hz: Optional[float] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     recording_count: Optional[int] = None  # Number of recordings in this dataset

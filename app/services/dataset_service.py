@@ -18,7 +18,8 @@ from app.models.team import Team as TeamModel
 from app.models.team import TeamMembership as TeamMembershipModel
 from app.models.team import TeamRole
 from app.models.user import User, UserRole
-from app.schemas.dataset import DatasetCreate
+from app.schemas.dataset import DatasetCreate, DatasetUpdate
+from app.core.permissions import check_team_owner_membership
 from app.config import settings
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
@@ -208,6 +209,60 @@ class DatasetService:
 
     def get_dataset(self, dataset_id: int) -> Optional[DatasetModel]:
         return self.db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
+
+    def user_can_manage_dataset(self, user: User, dataset: DatasetModel) -> bool:
+        """Platform admin or team owner for the dataset's team."""
+        if user.role == UserRole.ADMIN:
+            return True
+        if dataset.team_id is None:
+            return False
+        return check_team_owner_membership(user, dataset.team_id, self.db)
+
+    @staticmethod
+    def _validate_spectrogram_range(
+        f_min: Optional[float],
+        f_max: Optional[float],
+    ) -> None:
+        effective_min = 0.0 if f_min is None else float(f_min)
+        if f_min is not None and f_min < 0:
+            raise ValueError("invalid_spectrogram_f_min")
+        if f_max is not None:
+            f_max_f = float(f_max)
+            if f_max_f <= 0:
+                raise ValueError("invalid_spectrogram_f_max")
+            if f_max_f <= effective_min:
+                raise ValueError("spectrogram_f_max_lte_min")
+
+    def update_dataset(
+        self,
+        dataset_id: int,
+        update_in: DatasetUpdate,
+        current_user: User,
+    ) -> DatasetModel:
+        dataset = self.get_dataset(dataset_id)
+        if dataset is None:
+            raise ValueError("not_found")
+        if not self.user_can_manage_dataset(current_user, dataset):
+            raise ValueError("forbidden")
+
+        data = update_in.model_dump(exclude_unset=True)
+        if not data:
+            return dataset
+
+        if "source_uri" in data and data["source_uri"] is not None:
+            self.validate_source_uri(data["source_uri"])
+
+        next_f_min = data.get("spectrogram_f_min_hz", dataset.spectrogram_f_min_hz)
+        next_f_max = data.get("spectrogram_f_max_hz", dataset.spectrogram_f_max_hz)
+        if "spectrogram_f_min_hz" in data or "spectrogram_f_max_hz" in data:
+            self._validate_spectrogram_range(next_f_min, next_f_max)
+
+        for key, value in data.items():
+            setattr(dataset, key, value)
+
+        self.db.commit()
+        self.db.refresh(dataset)
+        return dataset
 
     # ---------------------------------------------------------
     # Path validation

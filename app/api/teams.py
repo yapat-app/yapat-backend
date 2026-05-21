@@ -21,6 +21,7 @@ from app.models.user import User, User as UserModel, UserRole
 from app.models.dataset import Dataset as DatasetModel, user_datasets
 from app.models.recording import Recording
 from app.core.permissions import require_team_owner, require_team_member
+from app.utils.dataset_response import dataset_to_dict
 from datetime import datetime, timezone, timedelta
 
 router = APIRouter()
@@ -201,20 +202,15 @@ def get_available_datasets(
 
     result: List[DatasetSchema] = []
     for dataset in datasets:
-        dataset_dict = {
-            "id": dataset.id,
-            "name": dataset.name,
-            "description": dataset.description,
-            "source_uri": dataset.source_uri,
-            "team_id": dataset.team_id,
-            "dataset_type": dataset.dataset_type,
-            "default_snippet_set_id": getattr(dataset, "default_snippet_set_id", None),
-            "created_at": dataset.created_at,
-            "updated_at": dataset.updated_at,
-            "recording_count": count_map.get(dataset.id, 0),
-            "is_ready_for_feed": False,
-        }
-        result.append(DatasetSchema(**dataset_dict))
+        result.append(
+            DatasetSchema(
+                **dataset_to_dict(
+                    dataset,
+                    recording_count=count_map.get(dataset.id, 0),
+                    is_ready_for_feed=False,
+                )
+            )
+        )
 
     return result
 

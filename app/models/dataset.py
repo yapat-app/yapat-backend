@@ -2,7 +2,7 @@
 Dataset model
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Table, UniqueConstraint, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Table, UniqueConstraint, Enum as SQLEnum, Float
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -47,6 +47,9 @@ class Dataset(Base):
         nullable=True,
         index=True
     )  # Default SnippetSet for this dataset
+    # Mel-spectrogram display band for annotation (Hz). Null = use 0 and Nyquist per snippet.
+    spectrogram_f_min_hz = Column(Float, nullable=True)
+    spectrogram_f_max_hz = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
