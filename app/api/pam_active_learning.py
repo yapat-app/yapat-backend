@@ -9,6 +9,7 @@ REST API for the PAM-specific active learning flow:
   - Job polling
 """
 
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -35,6 +36,8 @@ from app.schemas.pam_active_learning import (
     ALSnippetLabel,
 )
 from app.services.pam_al.service import PAMActiveLearningService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -216,9 +219,21 @@ def get_or_create_predictions(
         if not body.force_refresh:
             try:
                 return service.get_or_create_predictions(body)
-            except Exception:
-                # If anything goes wrong on the fast path, fall back to async creation.
-                pass
+            except ValueError:
+                db.rollback()
+                raise
+            except Exception as fast_err:
+                # Sync path failed (OOM, timeout, DB error, etc.) — roll back so the
+                # async fallback below can use the same session.
+                db.rollback()
+                logger.warning(
+                    "Sync inference fast path failed for dataset_id=%s model_family=%s; "
+                    "falling back to async job: %s",
+                    body.dataset_id,
+                    body.model_family_name,
+                    fast_err,
+                    exc_info=True,
+                )
 
         # Async path: create a job record and let the pam_al worker handle inference.
         from datetime import datetime, timezone
