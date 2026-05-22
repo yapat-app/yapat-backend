@@ -1,5 +1,10 @@
+import logging
+
 import numpy as np
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
+
+from app.database import SessionLocal
 
 from app.models.pam_active_learning import ALPrediction, ALModelFamilyState, ALModelCheckpoint
 from app.schemas.pam_active_learning import ALModelType
@@ -20,6 +25,110 @@ from app.schemas.visualisation import (
     FPVMethod,
 )
 from utils.dr_methods import run_dr_isomap, run_dr_pca, run_dr_tsne, run_dr_umap
+
+logger = logging.getLogger(__name__)
+
+_FPV_COORD_COLUMNS = (
+    "pca_2d_x", "pca_2d_y", "pca_3d_x", "pca_3d_y", "pca_3d_z",
+    "umap_2d_x", "umap_2d_y", "umap_3d_x", "umap_3d_y", "umap_3d_z",
+    "tsne_2d_x", "tsne_2d_y", "tsne_3d_x", "tsne_3d_y", "tsne_3d_z",
+    "isomap_2d_x", "isomap_2d_y", "isomap_3d_x", "isomap_3d_y", "isomap_3d_z",
+)
+
+
+def _fpv_vis_row_values(
+    dataset_id: int,
+    embedding_model_id: int,
+    snippet_id: int,
+    index: int,
+    coords: dict,
+) -> dict:
+    row: dict = {
+        "dataset_id": dataset_id,
+        "model_checkpoint_id": None,
+        "embedding_model_id": embedding_model_id,
+        "snippet_id": snippet_id,
+    }
+    if "pca_2d" in coords:
+        row["pca_2d_x"] = float(coords["pca_2d"][index, 0])
+        row["pca_2d_y"] = float(coords["pca_2d"][index, 1])
+    if "pca_3d" in coords:
+        row["pca_3d_x"] = float(coords["pca_3d"][index, 0])
+        row["pca_3d_y"] = float(coords["pca_3d"][index, 1])
+        row["pca_3d_z"] = float(coords["pca_3d"][index, 2])
+    if "umap_2d" in coords:
+        row["umap_2d_x"] = float(coords["umap_2d"][index, 0])
+        row["umap_2d_y"] = float(coords["umap_2d"][index, 1])
+    if "umap_3d" in coords:
+        row["umap_3d_x"] = float(coords["umap_3d"][index, 0])
+        row["umap_3d_y"] = float(coords["umap_3d"][index, 1])
+        row["umap_3d_z"] = float(coords["umap_3d"][index, 2])
+    if "tsne_2d" in coords:
+        row["tsne_2d_x"] = float(coords["tsne_2d"][index, 0])
+        row["tsne_2d_y"] = float(coords["tsne_2d"][index, 1])
+    if "tsne_3d" in coords:
+        row["tsne_3d_x"] = float(coords["tsne_3d"][index, 0])
+        row["tsne_3d_y"] = float(coords["tsne_3d"][index, 1])
+        row["tsne_3d_z"] = float(coords["tsne_3d"][index, 2])
+    if "isomap_2d" in coords:
+        row["isomap_2d_x"] = float(coords["isomap_2d"][index, 0])
+        row["isomap_2d_y"] = float(coords["isomap_2d"][index, 1])
+    if "isomap_3d" in coords:
+        row["isomap_3d_x"] = float(coords["isomap_3d"][index, 0])
+        row["isomap_3d_y"] = float(coords["isomap_3d"][index, 1])
+        row["isomap_3d_z"] = float(coords["isomap_3d"][index, 2])
+    return row
+
+
+def persist_fpv_vis_dataset_rows(
+    dataset_id: int,
+    embedding_model_id: int,
+    snippet_ids: list[int],
+    coords: dict,
+    chunk_size: int = 5000,
+) -> None:
+    """Write dataset-level FPV rows using a fresh DB session and chunked upserts."""
+    total = len(snippet_ids)
+    total_chunks = (total + chunk_size - 1) // chunk_size
+    logger.info(
+        "fpv dataset: saving %s rows for dataset_id=%s embedding_model_id=%s in %s chunks",
+        total, dataset_id, embedding_model_id, total_chunks,
+    )
+
+    write_db = SessionLocal()
+    try:
+        bind = write_db.get_bind()
+        use_pg_upsert = bind.dialect.name == "postgresql"
+
+        if use_pg_upsert:
+            for chunk_idx, start in enumerate(range(0, total, chunk_size), start=1):
+                chunk_ids = snippet_ids[start : start + chunk_size]
+                values = [
+                    _fpv_vis_row_values(dataset_id, embedding_model_id, sid, start + i, coords)
+                    for i, sid in enumerate(chunk_ids)
+                ]
+                stmt = pg_insert(FPVVis).values(values)
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_fpv_vis_embedding_model_snippet_null_ckpt",
+                    set_={col: stmt.excluded[col] for col in _FPV_COORD_COLUMNS},
+                )
+                write_db.execute(stmt)
+                write_db.commit()
+                logger.info(
+                    "fpv dataset: upsert chunk %s/%s (rows=%s)",
+                    chunk_idx, total_chunks, len(chunk_ids),
+                )
+        else:
+            VISService(write_db)._upsert_fpv_vis_dataset_rows(
+                dataset_id, embedding_model_id, snippet_ids, coords,
+            )
+            write_db.commit()
+
+    except Exception:
+        write_db.rollback()
+        raise
+    finally:
+        write_db.close()
 
 
 class VISService:
@@ -254,17 +363,23 @@ class VISService:
         snippet_ids = [s.id for (_, s) in rows]
         X = np.array([ev.vector for (ev, _) in rows], dtype=np.float32)
 
+        # Close the read transaction before long-running DR (PCA/UMAP/t-SNE).
+        self.db.commit()
+
         coords = self._compute_visualizations(X=X, run_3d=body.run_3d)
 
-        self._upsert_fpv_vis_dataset_rows(
+        persist_fpv_vis_dataset_rows(
             dataset_id=body.dataset_id,
             embedding_model_id=body.embedding_model_id,
             snippet_ids=snippet_ids,
             coords=coords,
         )
 
-        self.db.commit()
-        return self.get_fpv_for_dataset_embeddings(body)
+        read_db = SessionLocal()
+        try:
+            return VISService(read_db).get_fpv_for_dataset_embeddings(body)
+        finally:
+            read_db.close()
 
     def get_fpv_for_dataset_embeddings(self, body: FPVDatasetRequest) -> FPVResponse:
         rows = (
