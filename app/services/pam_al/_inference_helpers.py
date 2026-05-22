@@ -10,7 +10,7 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 import torch
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -139,6 +139,20 @@ def build_inference_rows(
         )
 
     return rows
+
+
+def _refresh_db_connection_after_cpu_work(db: Session) -> None:
+    """
+    After long CPU-only work the pooled TCP connection may be closed by Postgres
+    or a firewall while not in a transaction. Invalidate so the next statement
+    checks out a fresh connection (pool_pre_ping).
+    """
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        db.rollback()
+        db.connection().invalidate()
+        db.execute(text("SELECT 1"))
 
 
 def save_prediction_rows(
@@ -370,6 +384,7 @@ def run_and_store_inference(
 
     t2 = time.perf_counter()
 
+    _refresh_db_connection_after_cpu_work(db)
     save_prediction_rows(db=db, model_checkpoint_id=model_ckpt.id, rows=rows)
 
     logger.info(
