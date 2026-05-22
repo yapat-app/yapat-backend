@@ -109,7 +109,8 @@ def persist_fpv_vis_dataset_rows(
                 ]
                 stmt = pg_insert(FPVVis).values(values)
                 stmt = stmt.on_conflict_do_update(
-                    constraint="uq_fpv_vis_embedding_model_snippet_null_ckpt",
+                    index_elements=["embedding_model_id", "snippet_id"],
+                    index_where=FPVVis.model_checkpoint_id.is_(None),
                     set_={col: stmt.excluded[col] for col in _FPV_COORD_COLUMNS},
                 )
                 write_db.execute(stmt)
