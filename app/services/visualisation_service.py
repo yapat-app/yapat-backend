@@ -496,29 +496,52 @@ class VISService:
 
     def _compute_visualizations(self, X: np.ndarray, run_3d: bool) -> dict:
         coords = {}
+        n = int(X.shape[0])
 
-        if X.shape[0] < 2:
+        if n < 2:
             raise ValueError("Need at least 2 samples to compute visualization coordinates.")
 
+        # t-SNE / Isomap are very slow for large n and often OOM on limited workers.
+        # UMAP uses PCA pre-reduction (1024→50 dims) so it's fine at any n.
+        full_dr_max_points = 15_000
+        run_tsne_isomap = n <= full_dr_max_points
+
+        logger.info(
+            "fpv dataset: DR start n=%s run_3d=%s tsne_isomap=%s",
+            n,
+            run_3d,
+            run_tsne_isomap,
+        )
+
         coords["pca_2d"] = run_dr_pca(X, dimensions=2)
-        coords["umap_2d"] = run_dr_umap(X, dimensions=2)
+        logger.info("fpv dataset: PCA 2D done n=%s", n)
 
-        #perplexity = max(2, min(30, X.shape[0] - 1))
-        coords["tsne_2d"] = run_dr_tsne(X, dimensions=2)
+        coords["umap_2d"] = run_dr_umap(X, dimensions=2, low_memory=True)
+        logger.info("fpv dataset: UMAP 2D done n=%s", n)
 
-        #n_neighbors = max(2, min(5, X.shape[0] - 1))
-        coords["isomap_2d"] = run_dr_isomap(X, dimensions=2)
+        if run_tsne_isomap:
+            coords["tsne_2d"] = run_dr_tsne(X, dimensions=2)
+            logger.info("fpv dataset: t-SNE 2D done n=%s", n)
+            coords["isomap_2d"] = run_dr_isomap(X, dimensions=2)
+            logger.info("fpv dataset: Isomap 2D done n=%s", n)
+        else:
+            logger.warning(
+                "fpv dataset: skipping t-SNE and Isomap for n=%s (limit %s)",
+                n,
+                full_dr_max_points,
+            )
 
-        if run_3d and X.shape[0] >= 3 and X.shape[1] >= 3:
+        if run_3d and n >= 3 and X.shape[1] >= 3:
             coords["pca_3d"] = run_dr_pca(X, dimensions=3)
 
-        if run_3d and X.shape[0] >= 3:
-            coords["umap_3d"] = run_dr_umap(X, dimensions=3)
+        if run_3d and n >= 3:
+            coords["umap_3d"] = run_dr_umap(X, dimensions=3, low_memory=True)
 
-        if run_3d and X.shape[0] >= 4:
+        if run_3d and run_tsne_isomap and n >= 4:
             coords["tsne_3d"] = run_dr_tsne(X, dimensions=3)
             coords["isomap_3d"] = run_dr_isomap(X, dimensions=3)
 
+        logger.info("fpv dataset: DR finished n=%s methods=%s", n, list(coords.keys()))
         return coords
 
     def _upsert_fpv_vis_rows(
