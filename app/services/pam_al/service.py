@@ -761,6 +761,7 @@ class PAMActiveLearningService:
                 self.db.commit()
 
             labeled_ids = ann_h.get_labeled_snippet_ids_for_dataset(self.db, model_ckpt.dataset_id)
+            # run_and_store_inference commits before forward pass and per upsert chunk.
             inf_h.run_and_store_inference(
                 self.db, model_ckpt.dataset_id, model_ckpt, model, X, snippet_rows, label_order, labeled_ids,
                 threshold, density_k, wu, wd, wr,

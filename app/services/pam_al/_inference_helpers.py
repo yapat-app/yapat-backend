@@ -230,7 +230,9 @@ def save_prediction_rows(
             if to_add:
                 db.add_all(to_add)
 
-        db.flush()
+        # Commit each chunk so a long inference run does not hold one transaction
+        # open (Postgres idle_in_transaction_session_timeout kills idle connections).
+        db.commit()
 
         logger.info(
             "pam-al inference: upsert chunk %s/%s (rows=%s, dialect=%s)",
@@ -264,6 +266,11 @@ def run_and_store_inference(
     threshold, density_k, wu, wd, wr = resolve_inference_params(
         threshold=threshold, density_k=density_k, wu=wu, wd=wd, wr=wr,
     )
+
+    # End any read transaction before CPU-bound forward pass; callers often load
+    # embeddings in the same session, which would otherwise sit idle-in-transaction
+    # for minutes and hit idle_in_transaction_session_timeout on Postgres.
+    db.commit()
 
     device = next(model.parameters()).device
 
