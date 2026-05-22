@@ -10,7 +10,7 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 import torch
-from sqlalchemy import func, text
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -141,20 +141,6 @@ def build_inference_rows(
     return rows
 
 
-def _refresh_db_connection_after_cpu_work(db: Session) -> None:
-    """
-    After long CPU-only work the pooled TCP connection may be closed by Postgres
-    or a firewall while not in a transaction. Invalidate so the next statement
-    checks out a fresh connection (pool_pre_ping).
-    """
-    try:
-        db.execute(text("SELECT 1"))
-    except Exception:
-        db.rollback()
-        db.connection().invalidate()
-        db.execute(text("SELECT 1"))
-
-
 def save_prediction_rows(
     db: Session,
     model_checkpoint_id: int,
@@ -163,16 +149,18 @@ def save_prediction_rows(
     """
     Persist model predictions using chunked bulk upserts.
 
-    PostgreSQL uses the checkpoint/snippet unique constraint for conflict
-    resolution, avoiding ORM hydration of existing prediction rows.
+    Opens a fresh DB session for writes so that a stale/dead connection from
+    the caller's long-running session (idle during forward pass + scoring) never
+    causes OperationalError.  Each chunk is committed independently so partial
+    progress survives a mid-run failure.
     """
+    from app.database import SessionLocal
 
-    # Keep each statement large enough for throughput while bounding payload size.
-    chunk_size = 5000
     rows = list(rows)
-
     total = len(rows)
+    chunk_size = 5000
     total_chunks = (total + chunk_size - 1) // chunk_size
+
     logger.info(
         "pam-al inference: saving %s prediction rows for checkpoint_id=%s in %s chunks (chunk_size=%s)",
         total,
@@ -181,72 +169,85 @@ def save_prediction_rows(
         chunk_size,
     )
 
-    bind = db.get_bind()
-    dialect_name = bind.dialect.name if bind is not None else ""
+    write_db = SessionLocal()
+    try:
+        bind = write_db.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else ""
 
-    for chunk_idx, start in enumerate(range(0, len(rows), chunk_size), start=1):
-        chunk = rows[start : start + chunk_size]
-        values = [
-            {
-                "model_checkpoint_id": model_checkpoint_id,
-                "snippet_id": row.snippet_id,
-                "predicted_labels": row.predicted_labels,
-                "predicted_probabilities": row.predicted_probabilities,
-                "uncertainty": row.uncertainty,
-                "diversity": row.diversity,
-                "density": row.density,
-                "composite_score": row.composite_score,
-            }
-            for row in chunk
-        ]
+        for chunk_idx, start in enumerate(range(0, total, chunk_size), start=1):
+            chunk = rows[start : start + chunk_size]
+            values = [
+                {
+                    "model_checkpoint_id": model_checkpoint_id,
+                    "snippet_id": row.snippet_id,
+                    "predicted_labels": row.predicted_labels,
+                    "predicted_probabilities": row.predicted_probabilities,
+                    "uncertainty": row.uncertainty,
+                    "diversity": row.diversity,
+                    "density": row.density,
+                    "composite_score": row.composite_score,
+                }
+                for row in chunk
+            ]
 
-        if dialect_name == "postgresql":
-            stmt = pg_insert(ALPrediction).values(values)
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_al_prediction",
-                set_={
-                    "predicted_labels": stmt.excluded.predicted_labels,
-                    "predicted_probabilities": stmt.excluded.predicted_probabilities,
-                    "uncertainty": stmt.excluded.uncertainty,
-                    "diversity": stmt.excluded.diversity,
-                    "density": stmt.excluded.density,
-                    "composite_score": stmt.excluded.composite_score,
-                },
-            )
-            db.execute(stmt)
-        else:
-            # Preserve compatibility with non-Postgres engines used in local tests.
-            snippet_ids = [row.snippet_id for row in chunk]
-            existing_rows = (
-                db.query(ALPrediction)
-                .filter(
-                    ALPrediction.model_checkpoint_id == model_checkpoint_id,
-                    ALPrediction.snippet_id.in_(snippet_ids),
+            if dialect_name == "postgresql":
+                stmt = pg_insert(ALPrediction).values(values)
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_al_prediction",
+                    set_={
+                        "predicted_labels": stmt.excluded.predicted_labels,
+                        "predicted_probabilities": stmt.excluded.predicted_probabilities,
+                        "uncertainty": stmt.excluded.uncertainty,
+                        "diversity": stmt.excluded.diversity,
+                        "density": stmt.excluded.density,
+                        "composite_score": stmt.excluded.composite_score,
+                    },
                 )
-                .all()
+                write_db.execute(stmt)
+            else:
+                # Preserve compatibility with non-Postgres engines used in local tests.
+                snippet_ids = [row.snippet_id for row in chunk]
+                existing_rows = (
+                    write_db.query(ALPrediction)
+                    .filter(
+                        ALPrediction.model_checkpoint_id == model_checkpoint_id,
+                        ALPrediction.snippet_id.in_(snippet_ids),
+                    )
+                    .all()
+                )
+                existing_by_sid = {p.snippet_id: p for p in existing_rows}
+
+                to_add: list[ALPrediction] = []
+                for row in chunk:
+                    pred = existing_by_sid.get(row.snippet_id)
+                    if pred is None:
+                        pred = ALPrediction(model_checkpoint_id=model_checkpoint_id, snippet_id=row.snippet_id)
+                        to_add.append(pred)
+
+                    pred.predicted_labels = row.predicted_labels
+                    pred.predicted_probabilities = row.predicted_probabilities
+                    pred.uncertainty = row.uncertainty
+                    pred.diversity = row.diversity
+                    pred.density = row.density
+                    pred.composite_score = row.composite_score
+
+                if to_add:
+                    write_db.add_all(to_add)
+
+            write_db.commit()
+
+            logger.info(
+                "pam-al inference: upsert chunk %s/%s (rows=%s)",
+                chunk_idx,
+                total_chunks,
+                len(chunk),
             )
-            existing_by_sid = {p.snippet_id: p for p in existing_rows}
 
-            to_add: list[ALPrediction] = []
-            for row in chunk:
-                pred = existing_by_sid.get(row.snippet_id)
-                if pred is None:
-                    pred = ALPrediction(model_checkpoint_id=model_checkpoint_id, snippet_id=row.snippet_id)
-                    to_add.append(pred)
-
-                pred.predicted_labels = row.predicted_labels
-                pred.predicted_probabilities = row.predicted_probabilities
-                pred.uncertainty = row.uncertainty
-                pred.diversity = row.diversity
-                pred.density = row.density
-                pred.composite_score = row.composite_score
-
-            if to_add:
-                db.add_all(to_add)
-
-        # Commit each chunk so a long inference run does not hold one transaction
-        # open (Postgres idle_in_transaction_session_timeout kills idle connections).
-        db.commit()
+    except Exception:
+        write_db.rollback()
+        raise
+    finally:
+        write_db.close()
 
         logger.info(
             "pam-al inference: upsert chunk %s/%s (rows=%s, dialect=%s)",
@@ -384,7 +385,6 @@ def run_and_store_inference(
 
     t2 = time.perf_counter()
 
-    _refresh_db_connection_after_cpu_work(db)
     save_prediction_rows(db=db, model_checkpoint_id=model_ckpt.id, rows=rows)
 
     logger.info(
