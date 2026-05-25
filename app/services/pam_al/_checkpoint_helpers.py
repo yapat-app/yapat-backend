@@ -32,13 +32,17 @@ from app.models.wssed_pytorch_models import SimpleLinearClassifier
 logger = logging.getLogger(__name__)
 
 
+_AL_ELIGIBLE_DATASET_TYPES = frozenset({DatasetType.PAM, DatasetType.FOCAL_RECORDINGS})
+
+
 def get_pam_dataset(db: Session, dataset_id: int) -> Dataset:
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if ds is None:
         raise ValueError(f"Dataset {dataset_id} not found")
-    if ds.dataset_type != DatasetType.PAM:
+    if ds.dataset_type not in _AL_ELIGIBLE_DATASET_TYPES:
         raise ValueError(
-            f"Dataset {dataset_id} is of type '{ds.dataset_type.value}', expected 'PAM'"
+            f"Dataset {dataset_id} is of type '{ds.dataset_type.value}', "
+            f"expected one of {[t.value for t in _AL_ELIGIBLE_DATASET_TYPES]}"
         )
     return ds
 
