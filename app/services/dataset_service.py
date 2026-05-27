@@ -21,6 +21,10 @@ from app.models.user import User, UserRole
 from app.schemas.dataset import DatasetCreate, DatasetUpdate
 from app.core.permissions import check_team_owner_membership
 from app.config import settings
+from app.utils.recording_filename_metadata import (
+    location_source_for_filename,
+    parse_location_from_filename,
+)
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
 
@@ -422,6 +426,59 @@ class DatasetService:
     # Helpers
     # ---------------------------------------------------------
 
+    @staticmethod
+    def _location_metadata_from_filename(file_name: str) -> Optional[dict]:
+        location = parse_location_from_filename(file_name)
+        if not location:
+            return None
+        source = location_source_for_filename(file_name)
+        meta = {"location": location}
+        if source:
+            meta["location_source"] = source
+        return meta
+
+    def backfill_recording_locations(self, dataset_id: int) -> int:
+        """
+        Parse locations from file names for recordings missing extra_metadata.location.
+        Returns the number of rows updated.
+        """
+        recs = (
+            self.db.query(RecordingModel)
+            .filter(RecordingModel.dataset_id == dataset_id)
+            .all()
+        )
+        updated = 0
+        for rec in recs:
+            meta = dict(rec.extra_metadata or {})
+            if meta.get("location"):
+                continue
+            parsed = self._location_metadata_from_filename(rec.file_name)
+            if not parsed:
+                continue
+            meta.update(parsed)
+            rec.extra_metadata = meta
+            updated += 1
+        if updated:
+            self.db.commit()
+        return updated
+
+    def list_recording_locations(self, dataset_id: int) -> List[str]:
+        """Distinct location values for a dataset (after optional backfill)."""
+        self.backfill_recording_locations(dataset_id)
+        rows = (
+            self.db.query(RecordingModel.extra_metadata)
+            .filter(RecordingModel.dataset_id == dataset_id)
+            .all()
+        )
+        locations: set[str] = set()
+        for (meta,) in rows:
+            if not meta or not isinstance(meta, dict):
+                continue
+            loc = meta.get("location")
+            if isinstance(loc, str) and loc.strip():
+                locations.add(loc.strip())
+        return sorted(locations)
+
     def _scan_audio_files(self, root_dir: str) -> List[str]:
         audio_files: List[str] = []
         for root, _dirs, files in os.walk(root_dir):
@@ -475,14 +532,16 @@ class DatasetService:
             return None
 
         checksum = self._compute_checksum(filepath)
+        file_name = os.path.basename(filepath)
+        extra_metadata = self._location_metadata_from_filename(file_name)
 
         rec = RecordingModel(
             dataset_id=dataset.id,
             file_path=relative_path,  # Store relative path
-            file_name=os.path.basename(filepath),
+            file_name=file_name,
             duration=duration,
             sample_rate=sample_rate,
-            extra_metadata=None,
+            extra_metadata=extra_metadata,
             audio_sha256=checksum,
         )
         self.db.add(rec)

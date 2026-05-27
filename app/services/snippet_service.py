@@ -287,6 +287,113 @@ class SnippetService:
         # Apply pagination
         return all_snippets[skip:skip + limit]
 
+    def get_feed_filter(
+        self,
+        dataset_id: Optional[int] = None,
+        snippet_set_id: Optional[int] = None,
+        recording_id: Optional[int] = None,
+        annotation_status: Optional[str] = None,
+        location: Optional[str] = None,
+        user_id: Optional[int] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[Snippet]:
+        """
+        Return a randomly-ordered, SQL-filtered feed.
+
+        Args:
+            dataset_id: Optional dataset ID (required when snippet_set_id not given)
+            snippet_set_id: Optional snippet set ID (uses dataset default if absent)
+            recording_id: Optional recording ID to restrict snippets to one recording
+            annotation_status: "annotated" | "unannotated" | "any" (default).
+                               Annotation scope is any user annotation on the snippet.
+            location: Optional site/locality filter. Supports one value or a comma-separated
+                      list for multi-select filtering.
+            user_id: Unused for annotation_status filtering (kept for API compatibility).
+            skip: Pagination offset
+            limit: Maximum snippets to return (default 50)
+
+        Returns:
+            List of Snippet objects in random order
+
+        Raises:
+            ValueError: If parameters are invalid or SnippetSet is not READY
+        """
+        from sqlalchemy import cast, func, exists, select, String
+
+        snippet_set_id = self._resolve_and_validate_snippet_set(dataset_id, snippet_set_id)
+
+        query = (
+            self.db.query(Snippet)
+            .join(Snippet.recording)
+            .join(Snippet.snippet_set)
+            .filter(Snippet.snippet_set_id == snippet_set_id)
+        )
+
+        if dataset_id is not None:
+            query = query.filter(SnippetSet.dataset_id == dataset_id)
+
+        if recording_id is not None:
+            query = query.filter(Snippet.recording_id == recording_id)
+
+        if location is not None and location.strip():
+            loc_values = [p.strip() for p in location.split(",") if p.strip()]
+            if not loc_values:
+                loc_values = []
+            # Parse & persist location from file names for rows that still lack it
+            backfill_dataset_id = dataset_id
+            if backfill_dataset_id is None:
+                ss_row = (
+                    self.db.query(SnippetSet)
+                    .filter(SnippetSet.id == snippet_set_id)
+                    .first()
+                )
+                if ss_row is not None:
+                    backfill_dataset_id = ss_row.dataset_id
+            if backfill_dataset_id is not None:
+                from app.services.dataset_service import DatasetService
+
+                DatasetService(self.db).backfill_recording_locations(
+                    backfill_dataset_id
+                )
+
+            bind = self.db.get_bind()
+            dialect = bind.dialect.name
+            # PG: cast(json['k'], String) is wrong for string JSON values; use ->> for text.
+            if loc_values:
+                if dialect == "postgresql":
+                    query = query.filter(
+                        Recording.extra_metadata.op("->>")("location").in_(loc_values)
+                    )
+                elif dialect == "sqlite":
+                    query = query.filter(
+                        func.json_extract(Recording.extra_metadata, "$.location")
+                        .in_(loc_values)
+                    )
+                else:
+                    query = query.filter(
+                        cast(Recording.extra_metadata["location"], String).in_(loc_values)
+                    )
+
+        # Apply annotation status filter based on any annotation on the snippet
+        status = (annotation_status or "any").lower()
+        if status in ("annotated", "unannotated"):
+            ann_subq = (
+                select(Annotation.id)
+                .where(
+                    Annotation.snippet_id == Snippet.id,
+                )
+                .correlate(Snippet)
+                .exists()
+            )
+            if status == "annotated":
+                query = query.filter(ann_subq)
+            else:
+                query = query.filter(~ann_subq)
+
+        # Push randomisation + pagination into the DB — avoids loading the full set in Python
+        return query.order_by(func.random()).offset(skip).limit(limit).all()
+
     def get_feed_similarity(
         self,
         dataset_id: int,

@@ -106,3 +106,8 @@ class AvailableDatasetPathsResponse(BaseModel):
     current_path: str = ""
     parent_path: Optional[str] = None
     paths: List[AvailableDatasetPath]
+
+
+class RecordingLocationsResponse(BaseModel):
+    """Distinct site/locality values parsed from recording file names."""
+    locations: List[str]

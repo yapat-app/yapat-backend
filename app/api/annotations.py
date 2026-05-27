@@ -280,6 +280,11 @@ def read_annotations(
         query = query.join(Snippet).join(Recording).filter(Recording.dataset_id == dataset_id)
     
     annotations = query.offset(skip).limit(eff_limit).all()
+    for ann in annotations:
+        try:
+            ann.username = ann.user.username if ann.user else None
+        except Exception:
+            ann.username = None
     return annotations
 
 
@@ -293,6 +298,10 @@ def read_annotation(
     annotation = db.query(AnnotationModel).filter(AnnotationModel.id == annotation_id).first()
     if not annotation:
         raise HTTPException(status_code=404, detail="Annotation not found")
+    try:
+        annotation.username = annotation.user.username if annotation.user else None
+    except Exception:
+        annotation.username = None
     return annotation
 
 
@@ -305,19 +314,40 @@ def delete_annotation(
     """
     Delete an annotation.
     
-    Users can only delete their own annotations.
-    Team owners can delete any annotation in their teams (future enhancement).
+    Team members can delete annotations made by other users within the same team.
     """
     annotation = db.query(AnnotationModel).filter(AnnotationModel.id == annotation_id).first()
     if not annotation:
         raise HTTPException(status_code=404, detail="Annotation not found")
-    
-    # Check ownership - users can only delete their own annotations
-    if annotation.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only delete your own annotations"
-        )
+
+    # Determine the owning team for the snippet's recording dataset.
+    # If dataset has no team (admin-created personal dataset), only allow self-deletes or admins.
+    snippet_row = db.query(Snippet).filter(Snippet.id == annotation.snippet_id).first()
+    if not snippet_row:
+        raise HTTPException(status_code=404, detail="Snippet not found")
+
+    recording_row = db.query(Recording).filter(Recording.id == snippet_row.recording_id).first()
+    if not recording_row:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    dataset_row = db.query(Dataset).filter(Dataset.id == recording_row.dataset_id).first()
+    if not dataset_row:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    from app.core.permissions import check_admin, check_team_member
+
+    if dataset_row.team_id is None:
+        if annotation.user_id != current_user.id and not check_admin(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to delete this annotation",
+            )
+    else:
+        if not (check_admin(current_user) or check_team_member(current_user, dataset_row.team_id, db)):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to delete annotations in this team",
+            )
     
     db.delete(annotation)
     db.commit()

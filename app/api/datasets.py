@@ -25,6 +25,7 @@ from app.schemas.dataset import (
     DatasetExplorerResponse,
     AvailableDatasetPath,
     AvailableDatasetPathsResponse,
+    RecordingLocationsResponse,
     SpeciesFolder,
     AudioFile
 )
@@ -161,6 +162,27 @@ def read_datasets(
         )
     
     return result
+
+
+@router.get("/{dataset_id}/recording-locations", response_model=RecordingLocationsResponse)
+def list_recording_locations(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    List distinct recording locations for a dataset.
+
+    Locations are parsed from file names (PAM site codes or FNJV locality)
+    and stored on ``Recording.extra_metadata['location']``.
+    Existing recordings are backfilled on first request.
+    """
+    svc = DatasetService(db)
+    dataset = svc.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    locations = svc.list_recording_locations(dataset_id)
+    return RecordingLocationsResponse(locations=locations)
 
 
 @router.get("/{dataset_id}", response_model=Dataset)

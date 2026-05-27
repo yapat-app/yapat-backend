@@ -83,6 +83,8 @@ def get_feed(
         limit: int = Query(default=100, ge=1, le=1000, description="Maximum number of snippets to return"),
         # Method-specific parameters
         status: Optional[str] = Query(default=None, description="Filter by snippet status (for 'random' method)"),
+        annotation_status: Optional[str] = Query(default=None, description="Filter by annotation state scoped to the current user: 'annotated', 'unannotated', or 'any' (default). Used with method='filter'."),
+        location: Optional[str] = Query(default=None, description="Filter by recording site/locality (from filename metadata). Pass one value or comma-separated values for multi-select. Used with method='filter'."),
         embedding_model_id: Optional[int] = Query(default=None, description="Embedding model ID (for 'similarity' method)"),
         query_snippet_id: Optional[int] = Query(default=None, description="Snippet ID to use as query (for 'similarity' method)"),
         crop_start_sec: Optional[float] = Query(default=None, description="Crop start time in seconds (for 'similarity' method)"),
@@ -94,7 +96,7 @@ def get_feed(
     Get feed of snippets for annotation using various sampling methods.
     
     If no method is specified, defaults to prioritizing unannotated snippets.
-    Supported methods: 'random', 'similarity'
+    Supported methods: 'random', 'similarity', 'filter'
     
     If snippet_set_id is not provided, uses the dataset's default SnippetSet.
     Only READY SnippetSets are allowed; PENDING sets are rejected.
@@ -156,15 +158,32 @@ def get_feed(
                 skip=skip,
                 limit=limit
             )
+        elif method == "filter":
+            # Validate annotation_status value
+            valid_statuses = ("any", "annotated", "unannotated")
+            if annotation_status is not None and annotation_status not in valid_statuses:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid annotation_status '{annotation_status}'. Must be one of: {', '.join(valid_statuses)}"
+                )
+            snippets = snippet_service.get_feed_filter(
+                dataset_id=dataset_id,
+                snippet_set_id=snippet_set_id,
+                recording_id=recording_id,
+                annotation_status=annotation_status,
+                location=location,
+                user_id=current_user.id,
+                skip=skip,
+                limit=limit,
+            )
         else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown feed method: '{method}'. Supported methods: 'random', 'similarity'"
+                detail=f"Unknown feed method: '{method}'. Supported methods: 'random', 'similarity', 'filter'"
             )
         
         # Persist feed snapshot for the user (last 5 per user+method)
-        # Only store feeds when method is explicitly "random" or "similarity"
-        if method in ("random", "similarity"):
+        if method in ("random", "similarity", "filter"):
             request_params: Dict[str, Any] = {
                 "method": method,
                 "dataset_id": dataset_id,
@@ -173,6 +192,8 @@ def get_feed(
                 "skip": skip,
                 "limit": limit,
                 "status": status,
+                "annotation_status": annotation_status,
+                "location": location,
                 "embedding_model_id": embedding_model_id,
                 "query_snippet_id": query_snippet_id,
                 "crop_start_sec": crop_start_sec,
@@ -222,7 +243,7 @@ def _dataset_id_from_request_params(rp: Optional[Dict[str, Any]]) -> Optional[in
         return None
 
 
-_CLASSIC_FEED_METHODS = ("random", "similarity")
+_CLASSIC_FEED_METHODS = ("random", "similarity", "filter")
 
 
 @router.get("/history", response_model=List[UserFeedSnapshot])
