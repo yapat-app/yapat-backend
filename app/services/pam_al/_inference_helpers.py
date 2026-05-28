@@ -10,7 +10,7 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 import torch
-from sqlalchemy import func
+from sqlalchemy import Float, cast, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -28,6 +28,25 @@ from active_learning.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _max_probability_expr(predicted_probabilities_col):
+    """
+    SQL expression for max(predicted_probabilities.values()).
+
+    - PostgreSQL: uses jsonb_each_text + correlated MAX(value::float)
+    - Other dialects: fallback to NULL (caller should use Python fallback).
+    """
+    probs_tvf = (
+        func.jsonb_each_text(predicted_probabilities_col)
+        .table_valued("key", "value")
+        .alias("probs")
+    )
+    return (
+        select(func.max(cast(probs_tvf.c.value, Float)))
+        .select_from(probs_tvf)
+        .scalar_subquery()
+    )
 
 
 def resolve_inference_params(
@@ -493,6 +512,25 @@ def get_top_prediction_suggestions(
     if strategy == "random":
         return query.order_by(func.random()).limit(k).all()
 
+    if strategy == "confidence":
+        bind = db.get_bind()
+        dialect = bind.dialect.name if bind is not None else ""
+        if dialect == "postgresql":
+            max_prob_expr = _max_probability_expr(ALPrediction.predicted_probabilities)
+            return (
+                query.order_by(max_prob_expr.desc().nullslast(), ALPrediction.id.asc())
+                .limit(k)
+                .all()
+            )
+
+        # Non-Postgres fallback (e.g. local SQLite tests): compute in Python.
+        candidates = query.all()
+        candidates.sort(
+            key=lambda p: max((p.predicted_probabilities or {}).values(), default=float("-inf")),
+            reverse=True,
+        )
+        return candidates[:k]
+
     score_columns = {
         "uncertainty": ALPrediction.uncertainty,
         "diversity": ALPrediction.diversity,
@@ -531,6 +569,7 @@ def rank_prediction_suggestions(
         "diversity": lambda p: p.diversity if p.diversity is not None else float("-inf"),
         "density": lambda p: p.density if p.density is not None else float("-inf"),
         "composite": lambda p: p.composite_score if p.composite_score is not None else float("-inf"),
+        "confidence": lambda p: max((p.predicted_probabilities or {}).values(), default=float("-inf")),
     }
 
     if strategy not in key_map:

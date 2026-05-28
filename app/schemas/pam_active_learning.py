@@ -41,6 +41,7 @@ class SamplingMode(str, Enum):
     DIVERSITY = "diversity"
     DENSITY = "density"
     COMPOSITE = "composite"
+    CONFIDENCE = "confidence"
 
 # ── Model Checkpoint ───────────────────────────────────────────────────
 
@@ -128,6 +129,16 @@ class ALRunInferenceRequest(BaseModel):
     k: Optional[int] = Field(
         default=5,
         description="Number of suggestions to return when sample_suggestion=true.",
+    )
+    min_confidence: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional confidence floor in [0,1]. Confidence is computed as "
+            "max(predicted_probabilities.values()) per snippet. "
+            "Applied to suggestions and can also filter full prediction responses."
+        ),
     )
 
 
