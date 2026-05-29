@@ -247,11 +247,18 @@ class MultiLabelLinearClassifier(nn.Module):
     @classmethod
     def load_from_checkpoint(cls, checkpoint_path: str, device: str = "cpu"):
         checkpoint = torch.load(checkpoint_path, map_location=device)
+        if not isinstance(checkpoint, dict):
+            raise ValueError(f"Checkpoint at {checkpoint_path} is not a dict payload.")
+        return cls.load_from_checkpoint_dict(checkpoint, device=device)
 
+    @classmethod
+    def load_from_checkpoint_dict(cls, checkpoint: dict, device: str = "cpu"):
         # Backward compatibility: older checkpoints may not store n_dim/num_classes.
         if "n_dim" not in checkpoint or "num_classes" not in checkpoint:
             sd = checkpoint.get("state_dict") or {}
             w = sd.get("model.weight")
+            if w is None:
+                w = sd.get("model.0.weight")
             if w is None:
                 # Fall back to any weight tensor we can find.
                 for k, v in sd.items():

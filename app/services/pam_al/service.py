@@ -744,18 +744,25 @@ class PAMActiveLearningService:
                         f"Legacy checkpoint {model_ckpt.id} missing 'state_dict'; cannot rebuild classifier."
                     )
 
-                model = ckpt_h.make_model(model_ckpt.model_type)
-                model.create_classifier(
-                    n_dim=int(X.shape[1]),
-                    num_classes=len(label_order),
-                    hidden_dim=int((model_ckpt.hyperparameters or {}).get("hidden_dim"))
-                    if (model_ckpt.hyperparameters or {}).get("hidden_dim") is not None
-                    else None,
-                    dropout=float((model_ckpt.hyperparameters or {}).get("dropout"))
-                    if (model_ckpt.hyperparameters or {}).get("dropout") is not None
-                    else None,
-                )
-                model.load_state_dict(state_dict)
+                if isinstance(state_dict, dict) and ckpt_h.detect_checkpoint_layout(state_dict) == "mlp":
+                    model = MultiLabelMLPClassifier.load_from_checkpoint(
+                        model_ckpt.checkpoint_path, device=device
+                    )
+                else:
+                    if isinstance(state_dict, dict):
+                        state_dict = ckpt_h.remap_legacy_linear_state_dict(state_dict)
+                    model = ckpt_h.make_model(model_ckpt.model_type)
+                    model.create_classifier(
+                        n_dim=int(X.shape[1]),
+                        num_classes=len(label_order),
+                        hidden_dim=int((model_ckpt.hyperparameters or {}).get("hidden_dim"))
+                        if (model_ckpt.hyperparameters or {}).get("hidden_dim") is not None
+                        else None,
+                        dropout=float((model_ckpt.hyperparameters or {}).get("dropout"))
+                        if (model_ckpt.hyperparameters or {}).get("dropout") is not None
+                        else None,
+                    )
+                    model.load_state_dict(state_dict)
                 model.to(device)
                 model.eval()
                 model.label_order = label_order

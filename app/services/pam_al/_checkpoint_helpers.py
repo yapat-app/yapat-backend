@@ -11,7 +11,7 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import torch
 from sqlalchemy import and_
@@ -299,6 +299,74 @@ def make_label_config_path(dataset_id: int, family_name: str, version: str, ckpt
     )
     return os.path.join(checkpoint_dir, f"{family_name}_{version}_labels_{ckpt_id}.json")
 
+CheckpointLayout = Literal["linear", "mlp", "unknown"]
+
+_LINEAR_MODEL_TYPES = frozenset(
+    {
+        "pam_multilabel_classifier",
+        "pam_multi_label_classifier",
+        ALModelType.PAM_LINEAR_MULTILABEL.value,
+    }
+)
+
+
+def detect_checkpoint_layout(state_dict: Dict[str, Any]) -> CheckpointLayout:
+    """Infer classifier architecture from saved ``state_dict`` key names."""
+    if not state_dict:
+        return "unknown"
+    keys = state_dict.keys()
+    if "model.weight" in keys:
+        return "linear"
+    # MLP Sequential: Linear(0) -> ReLU(1) -> Dropout(2) -> Linear(3)
+    if "model.3.weight" in keys:
+        return "mlp"
+    if "model.0.weight" in keys:
+        return "linear"
+    weight_keys = [k for k in keys if k.endswith(".weight") and isinstance(state_dict[k], torch.Tensor)]
+    if len(weight_keys) == 1:
+        return "linear"
+    if len(weight_keys) >= 2:
+        return "mlp"
+    return "unknown"
+
+
+def remap_legacy_linear_state_dict(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Remap legacy single-layer Sequential checkpoints (``model.0.*``) to the
+    current ``nn.Linear`` layout (``model.*``).
+
+    MLP checkpoints (``model.0.*`` + ``model.3.*``) are returned unchanged;
+    callers should load those with :class:`MultiLabelMLPClassifier`.
+    """
+    if not state_dict or "model.weight" in state_dict:
+        return state_dict
+    if "model.3.weight" in state_dict:
+        return state_dict
+
+    remapped: Dict[str, Any] = {}
+    for key, value in state_dict.items():
+        if key.startswith("model.0."):
+            remapped["model." + key[len("model.0.") :]] = value
+        else:
+            remapped[key] = value
+    return remapped
+
+
+def prepare_linear_classifier_checkpoint(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a checkpoint dict whose ``state_dict`` is compatible with linear load."""
+    payload = dict(checkpoint)
+    state_dict = payload.get("state_dict")
+    if isinstance(state_dict, dict):
+        payload["state_dict"] = remap_legacy_linear_state_dict(state_dict)
+    return payload
+
+
+def _is_linear_model_type(model_type: ALModelType | str) -> bool:
+    if model_type == ALModelType.PAM_LINEAR_MULTILABEL:
+        return True
+    return str(model_type) in _LINEAR_MODEL_TYPES
+
+
 def make_model(model_type: ALModelType | str):
     # Backward compatibility:
     # older checkpoints used 'pam_multilabel_classifier' (and sometimes the typo
@@ -314,10 +382,27 @@ def make_model(model_type: ALModelType | str):
     raise ValueError(f"Unsupported model_type '{model_type}'")
 
 def load_model_from_checkpoint(model_ckpt, device: str):
-    if model_ckpt.model_type == ALModelType.WSSED_BIRDNET_SEGMENT or model_ckpt.model_type == ALModelType.WSSED_BIRDNET_SEGMENT.value:
-        return SimpleLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
-    if model_ckpt.model_type in {"pam_multilabel_classifier", "pam_multi_label_classifier"}:
-        return MultiLabelLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
-    if model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL or model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL.value:
-        return MultiLabelLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
-    return MultiLabelMLPClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
+    path = model_ckpt.checkpoint_path
+    model_type = model_ckpt.model_type
+
+    if model_type == ALModelType.WSSED_BIRDNET_SEGMENT or model_type == ALModelType.WSSED_BIRDNET_SEGMENT.value:
+        return SimpleLinearClassifier.load_from_checkpoint(path, device=device)
+
+    if _is_linear_model_type(model_type):
+        checkpoint = torch.load(path, map_location=device)
+        if not isinstance(checkpoint, dict):
+            raise ValueError(f"Checkpoint at {path} is not a dict payload.")
+        state_dict = checkpoint.get("state_dict")
+        if isinstance(state_dict, dict):
+            layout = detect_checkpoint_layout(state_dict)
+            if layout == "mlp":
+                logger.warning(
+                    "Checkpoint id=%s is registered as linear but contains legacy MLP "
+                    "Sequential weights (model.0 + model.3); loading as MLP.",
+                    model_ckpt.id,
+                )
+                return MultiLabelMLPClassifier.load_from_checkpoint(path, device=device)
+        prepared = prepare_linear_classifier_checkpoint(checkpoint)
+        return MultiLabelLinearClassifier.load_from_checkpoint_dict(prepared, device=device)
+
+    return MultiLabelMLPClassifier.load_from_checkpoint(path, device=device)
