@@ -246,41 +246,51 @@ def get_or_create_predictions(
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Return cached predictions for the active checkpoint, or run inference if
-    none exist yet (or force_refresh=true).
+    Return cached predictions for the active checkpoint.
+
+    If predictions are already cached and force_refresh=False, return them immediately
+    (sync, fast). If predictions are missing or force_refresh=True, dispatch an async
+    Celery job and return an ALJobDispatch so the client can poll for completion.
+    When no checkpoint exists, random snippet suggestions are returned immediately.
     """
     service = PAMActiveLearningService(db)
     try:
-        # Fast path: if predictions exist and no refresh requested, return them immediately.
-        if not body.force_refresh:
-            try:
-                return service.get_or_create_predictions(body)
-            except ValueError:
-                db.rollback()
-                raise
-            except Exception as fast_err:
-                # Sync path failed (OOM, timeout, DB error, etc.) — roll back so the
-                # async fallback below can use the same session.
-                db.rollback()
-                logger.warning(
-                    "Sync inference fast path failed for dataset_id=%s model_family=%s; "
-                    "falling back to async job: %s",
-                    body.dataset_id,
-                    body.model_family_name,
-                    fast_err,
-                    exc_info=True,
-                )
-
-        # Async path: create a job record and let the pam_al worker handle inference.
         from datetime import datetime, timezone
 
         from app.models.pam_active_learning import ALRetrainJob, ALRetrainStatus
         from app.services.pam_al import _checkpoint_helpers as ckpt_h
+        from app.services.pam_al import _inference_helpers as inf_h
 
         model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(db, body.dataset_id, body.model_family_name)
+
+        if not body.force_refresh and model_ckpt is not None:
+            # Only use sync path when predictions are already cached — avoids blocking
+            # the request thread on full ML inference over large datasets.
+            predictions_cached = inf_h.predictions_exist_for_checkpoint_and_snippet_set(
+                db, model_ckpt.id, body.snippet_set_id
+            )
+            if predictions_cached:
+                try:
+                    return service.get_or_create_predictions(body)
+                except ValueError:
+                    db.rollback()
+                    raise
+                except Exception as fast_err:
+                    db.rollback()
+                    logger.warning(
+                        "Sync inference fast path failed for dataset_id=%s model_family=%s; "
+                        "falling back to async job: %s",
+                        body.dataset_id,
+                        body.model_family_name,
+                        fast_err,
+                        exc_info=True,
+                    )
+
         if model_ckpt is None:
-            # No checkpoint: keep previous behavior (random suggestions).
+            # No checkpoint: return random snippet suggestions immediately.
             return service.get_or_create_predictions(body)
+
+        # Async path: predictions missing or force_refresh — dispatch to worker.
 
         job = ALRetrainJob(
             model_checkpoint_id=model_ckpt.id,

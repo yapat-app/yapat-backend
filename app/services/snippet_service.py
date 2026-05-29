@@ -2,8 +2,8 @@
 Snippet retrieval and utility service (for SnippetSet-based architecture)
 """
 
-import random
 from typing import List, Optional
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.snippet import Snippet
@@ -224,13 +224,8 @@ class SnippetService:
         # Filter by recording_id if provided
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
-        
-        # Return random snippets as placeholder
-        all_snippets = query.all()
-        random.shuffle(all_snippets)
-        
-        # Apply pagination
-        return all_snippets[skip:skip + limit]
+
+        return query.order_by(func.random()).offset(skip).limit(limit).all()
 
     def get_feed_random(
         self,
@@ -278,14 +273,8 @@ class SnippetService:
         # Filter by recording_id if provided
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
-        
-        # Return random snippets
-        import random
-        all_snippets = query.all()
-        random.shuffle(all_snippets)
-        
-        # Apply pagination
-        return all_snippets[skip:skip + limit]
+
+        return query.order_by(func.random()).offset(skip).limit(limit).all()
 
     def get_feed_filter(
         self,

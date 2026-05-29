@@ -1497,17 +1497,19 @@ class PAMActiveLearningService:
     # ==================================================================
 
     def _build_random_snippet_suggestions(self, body) -> dict:
+        from sqlalchemy import func as sa_func
+
         k = body.k or 20
 
-        snippets = (
+        sampled = (
             self.db.query(Snippet)
             .filter(Snippet.snippet_set_id == body.snippet_set_id)
+            .order_by(sa_func.random())
+            .limit(k)
             .all()
         )
-        if not snippets:
+        if not sampled:
             raise ValueError(f"No snippets found for snippet_set_id={body.snippet_set_id}.")
-
-        sampled = random.sample(snippets, min(k, len(snippets)))
 
         rows = [
             ALPredictionResponse(
