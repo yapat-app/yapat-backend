@@ -393,15 +393,17 @@ def load_model_from_checkpoint(model_ckpt, device: str):
         if not isinstance(checkpoint, dict):
             raise ValueError(f"Checkpoint at {path} is not a dict payload.")
         state_dict = checkpoint.get("state_dict")
-        if isinstance(state_dict, dict):
-            layout = detect_checkpoint_layout(state_dict)
-            if layout == "mlp":
-                logger.warning(
-                    "Checkpoint id=%s is registered as linear but contains legacy MLP "
-                    "Sequential weights (model.0 + model.3); loading as MLP.",
-                    model_ckpt.id,
-                )
-                return MultiLabelMLPClassifier.load_from_checkpoint(path, device=device)
+        # Some checkpoints are saved as a bare state_dict (no "state_dict" wrapper key).
+        # Fall back to treating the checkpoint itself as the state_dict for layout detection.
+        effective_state_dict = state_dict if isinstance(state_dict, dict) else checkpoint
+        layout = detect_checkpoint_layout(effective_state_dict)
+        if layout == "mlp":
+            logger.warning(
+                "Checkpoint id=%s is registered as linear but contains MLP "
+                "Sequential weights (model.0 + model.3); loading as MLP.",
+                model_ckpt.id,
+            )
+            return MultiLabelMLPClassifier.load_from_checkpoint(path, device=device)
         prepared = prepare_linear_classifier_checkpoint(checkpoint)
         return MultiLabelLinearClassifier.load_from_checkpoint_dict(prepared, device=device)
 
