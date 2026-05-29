@@ -28,6 +28,7 @@ from app.schemas.pam_active_learning import (
     ALRetrainRequest,
     ALStats,
     ALTrainFromScratchRequest,
+    ALTrainingPathDefaultsResponse,
     ALPredictionListResponse,
     ALJobDispatch,
     ALRetrainJobStatusResponse,
@@ -43,6 +44,41 @@ router = APIRouter()
 
 
 # ============ MODEL CHECKPOINT ENDPOINTS ============
+
+@router.get(
+    "/datasets/{dataset_id}/training-path-defaults",
+    response_model=ALTrainingPathDefaultsResponse,
+)
+def get_training_path_defaults(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return default metadata and label-config paths for cold-start training."""
+    from app.config import settings
+    from app.utils.pam_training_paths import resolve_pam_training_paths
+
+    svc = PAMActiveLearningService(db)
+    try:
+        ds = svc.get_dataset_for_training_paths(dataset_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    data_root = settings.DATA_ROOT or "/data"
+    try:
+        metadata_path, label_config_path = resolve_pam_training_paths(
+            data_root,
+            ds.source_uri,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return ALTrainingPathDefaultsResponse(
+        metadata_path=metadata_path,
+        label_config_path=label_config_path,
+        source_uri=ds.source_uri,
+    )
+
 
 @router.post(
     "/checkpoints",
