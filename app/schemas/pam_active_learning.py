@@ -135,9 +135,19 @@ class ALRunInferenceRequest(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Optional confidence floor in [0,1]. Confidence is computed as "
-            "max(predicted_probabilities.values()) per snippet. "
+            "Optional confidence floor in [0,1]. Confidence uses noisy-OR over "
+            "label_scope when set: c = 1 - prod(1 - p(label) for label in label_scope). "
+            "When label_scope is None, falls back to max(predicted_probabilities.values()). "
             "Applied to suggestions and can also filter full prediction responses."
+        ),
+    )
+    label_scope: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "User-specific list of label names to include in the noisy-OR aggregate "
+            "confidence calculation: c = 1 - prod(1 - p(label) for label in label_scope). "
+            "When None, confidence falls back to max(predicted_probabilities.values()). "
+            "Used by suggestion_strategy='confidence' and the min_confidence filter."
         ),
     )
 
@@ -170,6 +180,11 @@ class ALPredictionListResponse(BaseModel):
     )
     k: Optional[int] = None
     rows: List[ALPredictionResponse]
+    label_scope: Optional[List[str]] = Field(
+        default=None,
+        description="Label scope used for noisy-OR confidence, if any.",
+    )
+
 
 class ALInferenceRow(BaseModel):
     snippet_id: int
@@ -299,6 +314,14 @@ class ALRetrainJobResponse(BaseModel):
         from_attributes = True
 
 # ── Train from scratch ────────────────────────────────────────────────────────────
+
+class ALTrainingPathDefaultsResponse(BaseModel):
+    """Default relative paths (under DATA_ROOT) for cold-start training files."""
+
+    metadata_path: str = Field(..., description="Relative path to ground-truth metadata CSV")
+    label_config_path: str = Field(..., description="Relative path to species label config JSON")
+    source_uri: str = Field(..., description="Dataset source_uri used for resolution")
+
 
 class ALTrainFromScratchRequest(BaseModel):
     """Train a fresh classifier from ground-truth labels to mitigate cold start."""

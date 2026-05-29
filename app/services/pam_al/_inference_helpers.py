@@ -5,12 +5,13 @@ Inference helpers: scoring, prediction CRUD, and suggestion ranking.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Iterable, List, Sequence
 
 import numpy as np
 import torch
-from sqlalchemy import Float, cast, func, select
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -30,22 +31,27 @@ from active_learning.config import (
 logger = logging.getLogger(__name__)
 
 
-def _max_probability_expr(predicted_probabilities_col):
+def aggregate_confidence(
+    predicted_probabilities: dict[str, float],
+    label_scope: list[str] | None = None,
+) -> float:
     """
-    SQL expression for max(predicted_probabilities.values()).
+    Noisy-OR aggregate confidence: P(at least one label in scope is present).
 
-    - PostgreSQL: uses jsonb_each_text + correlated MAX(value::float)
-    - Other dialects: fallback to NULL (caller should use Python fallback).
+        c = 1 - prod(1 - p(x_i)  for i in label_scope)
+
+    label_scope: subset of label names to consider.
+        - If None or empty, falls back to max(predicted_probabilities.values())
+          to avoid the inflation artefact that occurs when many low-probability
+          labels are combined without a meaningful scope.
     """
-    probs_tvf = (
-        func.jsonb_each_text(predicted_probabilities_col)
-        .table_valued("key", "value")
-        .alias("probs")
-    )
-    return (
-        select(func.max(cast(probs_tvf.c.value, Float)))
-        .select_from(probs_tvf)
-        .scalar_subquery()
+    if not label_scope:
+        # No scope → avoid noisy-OR inflation; use max as a conservative fallback.
+        return max(predicted_probabilities.values(), default=0.0)
+
+    return 1.0 - math.prod(
+        1.0 - predicted_probabilities.get(label, 0.0)
+        for label in label_scope
     )
 
 
@@ -489,6 +495,7 @@ def get_top_prediction_suggestions(
     snippet_set_id: int,
     strategy: str,
     k: int,
+    label_scope: list[str] | None = None,
 ) -> list[ALPrediction]:
     annotated_exists = (
         db.query(ALSnippetAnnotation.id)
@@ -513,20 +520,11 @@ def get_top_prediction_suggestions(
         return query.order_by(func.random()).limit(k).all()
 
     if strategy == "confidence":
-        bind = db.get_bind()
-        dialect = bind.dialect.name if bind is not None else ""
-        if dialect == "postgresql":
-            max_prob_expr = _max_probability_expr(ALPrediction.predicted_probabilities)
-            return (
-                query.order_by(max_prob_expr.desc().nullslast(), ALPrediction.id.asc())
-                .limit(k)
-                .all()
-            )
-
-        # Non-Postgres fallback (e.g. local SQLite tests): compute in Python.
+        # Noisy-OR is label_scope-specific and cannot be pushed into a JSONB SQL
+        # expression, so we always sort in Python.
         candidates = query.all()
         candidates.sort(
-            key=lambda p: max((p.predicted_probabilities or {}).values(), default=float("-inf")),
+            key=lambda p: aggregate_confidence(p.predicted_probabilities or {}, label_scope),
             reverse=True,
         )
         return candidates[:k]
@@ -555,6 +553,7 @@ def rank_prediction_suggestions(
     predictions: list[ALPrediction],
     strategy: str,
     annotated_ids: set[int],
+    label_scope: list[str] | None = None,
 ) -> list[ALPrediction]:
     candidates = [p for p in predictions if p.snippet_id not in annotated_ids]
 
@@ -569,7 +568,10 @@ def rank_prediction_suggestions(
         "diversity": lambda p: p.diversity if p.diversity is not None else float("-inf"),
         "density": lambda p: p.density if p.density is not None else float("-inf"),
         "composite": lambda p: p.composite_score if p.composite_score is not None else float("-inf"),
-        "confidence": lambda p: max((p.predicted_probabilities or {}).values(), default=float("-inf")),
+        "confidence": lambda p: aggregate_confidence(
+            p.predicted_probabilities or {},
+            label_scope,
+        ),
     }
 
     if strategy not in key_map:

@@ -32,6 +32,7 @@ from app.models.pam_active_learning import (
     ALAnnotationSource,
 )
 from app.models.snippet import Snippet
+from app.models.dataset import Dataset
 from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
     ALFeedbackSubmit,
@@ -40,6 +41,7 @@ from app.schemas.pam_active_learning import (
     SamplingMode,
 )
 
+from app.utils.pam_training_paths import resolve_pam_training_paths
 from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
 from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
 from active_learning.config import RETRAIN_AFTER
@@ -137,6 +139,9 @@ class PAMActiveLearningService:
     def _get_checkpoint(self, checkpoint_id: int) -> Optional[ALModelCheckpoint]:
         return ckpt_h.get_checkpoint(self.db, checkpoint_id)
 
+    def get_dataset_for_training_paths(self, dataset_id: int) -> Dataset:
+        return ckpt_h.get_pam_dataset(self.db, dataset_id)
+
     # ==================================================================
     # Train from scratch  (sync — kept for backward compat)
     # ==================================================================
@@ -149,10 +154,16 @@ class PAMActiveLearningService:
         if snippet_set_id is None:
             raise ValueError("No snippet_set_id provided and dataset has no default_snippet_set_id.")
 
-        use_metadata_labels = bool(body.metadata_path and body.label_config_path)
+        use_metadata_labels = bool(body.metadata_path or body.label_config_path)
         if use_metadata_labels:
-            metadata_path = os.path.join(DATA_ROOT, body.metadata_path)
-            label_config_path = os.path.join(DATA_ROOT, body.label_config_path)
+            meta_rel, label_rel = resolve_pam_training_paths(
+                DATA_ROOT,
+                ds.source_uri,
+                body.metadata_path,
+                body.label_config_path,
+            )
+            metadata_path = os.path.join(DATA_ROOT, meta_rel)
+            label_config_path = os.path.join(DATA_ROOT, label_rel)
             species_list = ckpt_h.load_species_from_label_config(label_config_path)
         else:
             metadata_path = None
@@ -769,12 +780,21 @@ class PAMActiveLearningService:
             self.db.commit()
 
         if not body.sample_suggestion:
-            predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(self.db, model_ckpt.id, body.snippet_set_id)
+            predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(
+                self.db, model_ckpt.id, body.snippet_set_id,
+            )
+            if body.min_confidence is not None:
+                predictions = [
+                    p
+                    for p in predictions
+                    if inf_h.aggregate_confidence(p.predicted_probabilities or {}, body.label_scope)
+                    >= body.min_confidence
+                ]
             return {
                 "mode": "predictions", "model_family_name": body.model_family_name,
                 "used_checkpoint_id": model_ckpt.id, "total_predictions": len(predictions),
                 "returned_count": len(predictions), "suggestion_strategy": body.suggestion_strategy,
-                "k": body.k, "rows": predictions,
+                "k": body.k, "rows": predictions, "label_scope": body.label_scope,
             }
 
         strategy = body.suggestion_strategy.value if hasattr(body.suggestion_strategy, "value") else body.suggestion_strategy
@@ -793,13 +813,22 @@ class PAMActiveLearningService:
             body.snippet_set_id,
             strategy,
             k,
+            label_scope=body.label_scope,
         )
+
+        if body.min_confidence is not None:
+            ranked = [
+                p
+                for p in ranked
+                if inf_h.aggregate_confidence(p.predicted_probabilities or {}, body.label_scope)
+                >= body.min_confidence
+            ]
 
         return {
             "mode": "suggestions", "model_family_name": body.model_family_name,
             "used_checkpoint_id": model_ckpt.id, "total_predictions": total_predictions,
             "returned_count": len(ranked), "suggestion_strategy": body.suggestion_strategy,
-            "k": k, "rows": ranked,
+            "k": k, "rows": ranked, "label_scope": body.label_scope,
         }
 
     # ==================================================================
@@ -991,6 +1020,15 @@ class PAMActiveLearningService:
         if snippet_set_id is None:
             raise ValueError("No snippet_set_id provided and dataset has no default_snippet_set_id.")
 
+        meta_rel, label_rel = resolve_pam_training_paths(
+            DATA_ROOT,
+            ds.source_uri,
+            body.metadata_path,
+            body.label_config_path,
+        )
+        metadata_abs = os.path.join(DATA_ROOT, meta_rel)
+        label_abs = os.path.join(DATA_ROOT, label_rel)
+
         is_mlp = body.model_type == ALModelType.PAM_MLP_MULTILABEL
         device = _resolve_device(body.device)
 
@@ -1000,13 +1038,13 @@ class PAMActiveLearningService:
         model_ckpt = ALModelCheckpoint(
             dataset_id=body.dataset_id, model_family_name=body.model_family_name,
             version=body.version, checkpoint_path="",
-            label_config_path=body.label_config_path,
+            label_config_path=label_rel,
             model_type=body.model_type.value if hasattr(body.model_type, "value") else body.model_type,
             hyperparameters={
                 "training_mode": "cold_start", "embedding_model_id": body.embedding_model_id,
                 "snippet_set_id": snippet_set_id,
-                "metadata_path": os.path.join(DATA_ROOT, body.metadata_path),
-                "label_config_path": os.path.join(DATA_ROOT, body.label_config_path),
+                "metadata_path": metadata_abs,
+                "label_config_path": label_abs,
                 "min_samples_per_class": body.min_samples_per_class,
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs, "learning_rate": body.learning_rate,
