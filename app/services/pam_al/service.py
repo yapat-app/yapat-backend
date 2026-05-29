@@ -797,11 +797,12 @@ class PAMActiveLearningService:
                     if inf_h.aggregate_confidence(p.predicted_probabilities or {}, body.label_scope)
                     >= body.min_confidence
                 ]
+            rows = [ALPredictionResponse.from_prediction(p) for p in predictions]
             return {
                 "mode": "predictions", "model_family_name": body.model_family_name,
-                "used_checkpoint_id": model_ckpt.id, "total_predictions": len(predictions),
-                "returned_count": len(predictions), "suggestion_strategy": body.suggestion_strategy,
-                "k": body.k, "rows": predictions, "label_scope": body.label_scope,
+                "used_checkpoint_id": model_ckpt.id, "total_predictions": len(rows),
+                "returned_count": len(rows), "suggestion_strategy": body.suggestion_strategy,
+                "k": body.k, "rows": rows, "label_scope": body.label_scope,
             }
 
         strategy = body.suggestion_strategy.value if hasattr(body.suggestion_strategy, "value") else body.suggestion_strategy
@@ -831,11 +832,12 @@ class PAMActiveLearningService:
                 >= body.min_confidence
             ]
 
+        rows = [ALPredictionResponse.from_prediction(p) for p in ranked]
         return {
             "mode": "suggestions", "model_family_name": body.model_family_name,
             "used_checkpoint_id": model_ckpt.id, "total_predictions": total_predictions,
-            "returned_count": len(ranked), "suggestion_strategy": body.suggestion_strategy,
-            "k": k, "rows": ranked, "label_scope": body.label_scope,
+            "returned_count": len(rows), "suggestion_strategy": body.suggestion_strategy,
+            "k": k, "rows": rows, "label_scope": body.label_scope,
         }
 
     # ==================================================================

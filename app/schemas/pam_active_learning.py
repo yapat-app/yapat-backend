@@ -156,6 +156,7 @@ class ALPredictionResponse(BaseModel):
     id: Optional[int] = None
     model_checkpoint_id: Optional[int] = None
     snippet_id: int
+    recording_id: Optional[int] = None
     predicted_labels: Optional[List[str]] = None
     predicted_probabilities: Optional[Dict[str, float]] = None
     uncertainty: Optional[float] = None
@@ -166,6 +167,26 @@ class ALPredictionResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @classmethod
+    def from_prediction(cls, prediction) -> "ALPredictionResponse":
+        """Build response, pulling recording_id from the joined Snippet relation."""
+        recording_id = None
+        if hasattr(prediction, "snippet") and prediction.snippet is not None:
+            recording_id = prediction.snippet.recording_id
+        return cls(
+            id=prediction.id,
+            model_checkpoint_id=prediction.model_checkpoint_id,
+            snippet_id=prediction.snippet_id,
+            recording_id=recording_id,
+            predicted_labels=prediction.predicted_labels,
+            predicted_probabilities=prediction.predicted_probabilities,
+            uncertainty=prediction.uncertainty,
+            diversity=prediction.diversity,
+            density=prediction.density,
+            composite_score=prediction.composite_score,
+            created_at=prediction.created_at,
+        )
 
 
 class ALPredictionListResponse(BaseModel):
