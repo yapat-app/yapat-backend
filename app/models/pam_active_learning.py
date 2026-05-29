@@ -1,6 +1,6 @@
 
 from sqlalchemy import (
-    Column, Integer, String, DateTime, ForeignKey, Float, Text, JSON,
+    Column, Index, Integer, String, DateTime, ForeignKey, Float, Text, JSON,
     Enum as SQLEnum, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
@@ -168,6 +168,8 @@ class ALPrediction(Base):
     snippet = relationship("Snippet", back_populates="al_predictions")
     __table_args__ = (
         UniqueConstraint("model_checkpoint_id", "snippet_id", name="uq_al_prediction"),
+        # Speeds up top-suggestions queries that order by composite_score DESC per checkpoint.
+        Index("ix_al_predictions_ckpt_score", "model_checkpoint_id", "composite_score"),
     )
 
 class ALSnippetAnnotation(Base):

@@ -441,20 +441,44 @@ class DatasetService:
         """
         Parse locations from file names for recordings missing extra_metadata.location.
         Returns the number of rows updated.
+        Only queries recordings that actually lack a location to avoid a full table
+        scan on every filter-feed request for datasets already backfilled.
         """
-        recs = (
-            self.db.query(RecordingModel)
-            .filter(RecordingModel.dataset_id == dataset_id)
-            .all()
+        from sqlalchemy import cast, String as SAString
+
+        bind = self.db.get_bind()
+        dialect = bind.dialect.name
+
+        # Filter to only rows that are missing a location value.
+        base_q = self.db.query(RecordingModel).filter(
+            RecordingModel.dataset_id == dataset_id
         )
+        if dialect == "postgresql":
+            base_q = base_q.filter(
+                RecordingModel.extra_metadata.op("->>")(
+                    "location"
+                ).is_(None)
+            )
+        elif dialect == "sqlite":
+            from sqlalchemy import func as sa_func
+
+            base_q = base_q.filter(
+                sa_func.json_extract(
+                    RecordingModel.extra_metadata, "$.location"
+                ).is_(None)
+            )
+        else:
+            base_q = base_q.filter(
+                cast(RecordingModel.extra_metadata["location"], SAString).is_(None)
+            )
+
+        recs = base_q.all()
         updated = 0
         for rec in recs:
-            meta = dict(rec.extra_metadata or {})
-            if meta.get("location"):
-                continue
             parsed = self._location_metadata_from_filename(rec.file_name)
             if not parsed:
                 continue
+            meta = dict(rec.extra_metadata or {})
             meta.update(parsed)
             rec.extra_metadata = meta
             updated += 1
