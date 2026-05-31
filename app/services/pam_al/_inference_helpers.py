@@ -442,11 +442,9 @@ def get_predictions_for_checkpoint_and_snippet_set(
     model_checkpoint_id: int,
     snippet_set_id: int,
 ) -> list[ALPrediction]:
-    from sqlalchemy.orm import joinedload
     return (
         db.query(ALPrediction)
         .join(Snippet, Snippet.id == ALPrediction.snippet_id)
-        .options(joinedload(ALPrediction.snippet))
         .filter(
             ALPrediction.model_checkpoint_id == model_checkpoint_id,
             Snippet.snippet_set_id == snippet_set_id,
@@ -508,11 +506,9 @@ def get_top_prediction_suggestions(
         .exists()
     )
 
-    from sqlalchemy.orm import joinedload
     query = (
         db.query(ALPrediction)
         .join(Snippet, Snippet.id == ALPrediction.snippet_id)
-        .options(joinedload(ALPrediction.snippet))
         .filter(
             ALPrediction.model_checkpoint_id == model_checkpoint_id,
             Snippet.snippet_set_id == snippet_set_id,

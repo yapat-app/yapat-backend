@@ -81,6 +81,18 @@ def _resolve_device(*candidates: Any) -> str:
     return str(settings.PAM_DEFAULT_DEVICE or "cpu")
 
 
+def _bulk_recording_ids(db: Session, snippet_ids: list[int]) -> dict[int, int]:
+    """Return {snippet_id: recording_id} for a list of snippet IDs in one query."""
+    if not snippet_ids:
+        return {}
+    rows = (
+        db.query(Snippet.id, Snippet.recording_id)
+        .filter(Snippet.id.in_(snippet_ids))
+        .all()
+    )
+    return {row[0]: row[1] for row in rows if row[1] is not None}
+
+
 class PAMActiveLearningService:
     """Thin orchestrator that wires helper functions together."""
 
@@ -804,7 +816,11 @@ class PAMActiveLearningService:
                     if inf_h.aggregate_confidence(p.predicted_probabilities or {}, effective_scope)
                     >= body.min_confidence
                 ]
-            rows = [ALPredictionResponse.from_prediction(p) for p in predictions]
+            recording_id_by_snippet = _bulk_recording_ids(self.db, [p.snippet_id for p in predictions])
+            rows = [
+                ALPredictionResponse.from_prediction(p, recording_id=recording_id_by_snippet.get(p.snippet_id))
+                for p in predictions
+            ]
             return {
                 "mode": "predictions", "model_family_name": body.model_family_name,
                 "used_checkpoint_id": model_ckpt.id, "total_predictions": len(rows),
@@ -839,7 +855,11 @@ class PAMActiveLearningService:
                 >= body.min_confidence
             ]
 
-        rows = [ALPredictionResponse.from_prediction(p) for p in ranked]
+        recording_id_by_snippet = _bulk_recording_ids(self.db, [p.snippet_id for p in ranked])
+        rows = [
+            ALPredictionResponse.from_prediction(p, recording_id=recording_id_by_snippet.get(p.snippet_id))
+            for p in ranked
+        ]
         return {
             "mode": "suggestions", "model_family_name": body.model_family_name,
             "used_checkpoint_id": model_ckpt.id, "total_predictions": total_predictions,
@@ -1523,6 +1543,7 @@ class PAMActiveLearningService:
         rows = [
             ALPredictionResponse(
                 snippet_id=snippet.id,
+                recording_id=snippet.recording_id,
                 predicted_labels=None,
                 predicted_probabilities=None,
                 uncertainty=None,

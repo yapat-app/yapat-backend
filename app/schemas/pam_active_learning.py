@@ -10,8 +10,6 @@ from datetime import datetime
 from enum import Enum
 
 
-# ── Enums (mirror ORM enums for API layer) ─────────────────────────────
-
 class ALModelType(str, Enum):
     PAM_MLP_MULTILABEL = "pam_mlp_multilabel_classifier"
     PAM_LINEAR_MULTILABEL = "pam_linear_multilabel_classifier"
@@ -43,7 +41,6 @@ class SamplingMode(str, Enum):
     COMPOSITE = "composite"
     CONFIDENCE = "confidence"
 
-# ── Model Checkpoint ───────────────────────────────────────────────────
 
 class ALCheckpointCreate(BaseModel):
     """Register / checkout a model checkpoint for a dataset."""
@@ -100,7 +97,6 @@ class ALCheckpointResponse(BaseModel):
         from_attributes = True
 
 
-# ── Inference / Predictions ────────────────────────────────────────────
 class ALRunInferenceRequest(BaseModel):
     model_family_name: Optional[str] = Field(default=None, description="Model family name shared across checkpoint versions")
     dataset_id : int
@@ -135,19 +131,15 @@ class ALRunInferenceRequest(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Optional confidence floor in [0,1]. Confidence uses noisy-OR over "
-            "label_scope when set: c = 1 - prod(1 - p(label) for label in label_scope). "
-            "When label_scope is None, falls back to max(predicted_probabilities.values()). "
-            "Applied to suggestions and can also filter full prediction responses."
+            "Optional confidence floor in [0,1]. Uses noisy-OR over label_scope when set; "
+            "otherwise max(predicted_probabilities). Applies to suggestions and full responses."
         ),
     )
     label_scope: Optional[List[str]] = Field(
         default=None,
         description=(
-            "User-specific list of label names to include in the noisy-OR aggregate "
-            "confidence calculation: c = 1 - prod(1 - p(label) for label in label_scope). "
-            "When None, confidence falls back to max(predicted_probabilities.values()). "
-            "Used by suggestion_strategy='confidence' and the min_confidence filter."
+            "Label names for noisy-OR confidence. When omitted, uses max(predicted_probabilities). "
+            "Used by suggestion_strategy='confidence' and min_confidence filtering."
         ),
     )
 
@@ -169,11 +161,12 @@ class ALPredictionResponse(BaseModel):
         from_attributes = True
 
     @classmethod
-    def from_prediction(cls, prediction) -> "ALPredictionResponse":
-        """Build response, pulling recording_id from the joined Snippet relation."""
-        recording_id = None
-        if hasattr(prediction, "snippet") and prediction.snippet is not None:
-            recording_id = prediction.snippet.recording_id
+    def from_prediction(
+        cls,
+        prediction,
+        recording_id: Optional[int] = None,
+    ) -> "ALPredictionResponse":
+        """Build response with an explicitly supplied recording_id."""
         return cls(
             id=prediction.id,
             model_checkpoint_id=prediction.model_checkpoint_id,
@@ -218,14 +211,13 @@ class ALInferenceRow(BaseModel):
     composite_score: float | None = None
 
 
-# ── Feedback ───────────────────────────────────────────────────────────
 class ALFeedbackSubmit(BaseModel):
     dataset_id: int = Field(..., description="Dataset ID")
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
     snippet_id: int = Field(..., description="Snippet being reviewed")
     embedding_model_id: Optional[int] = Field(
-        default=1, # for birdnet
-        description="Required in bootstrap mode before the first checkpoint exists",
+        default=1,
+        description="Embedding model ID; required in bootstrap mode before the first checkpoint exists",
     )
     model_type: ALModelType = Field(
         default=ALModelType.PAM_LINEAR_MULTILABEL,
@@ -251,9 +243,8 @@ class ALFeedbackSubmit(BaseModel):
     persist_annotations: bool = Field(
         default=True,
         description=(
-            "If true, confirmed labels are also persisted into the canonical `annotations` table. "
-            "Set false for study flows where labels are dataset-specific codes and taxonomy resolution "
-            "would add avoidable latency."
+            "If true, confirmed labels are persisted to the canonical annotations table. "
+            "Set false to skip annotation persistence when labels are dataset-specific codes."
         ),
     )
 
@@ -288,16 +279,17 @@ class ALFeedbackCountResponse(BaseModel):
     retrain_pending: bool = False
 
 
-# ── Retrain ────────────────────────────────────────────────────────────
-
 class ALRetrainRequest(BaseModel):
     dataset_id: int = Field(..., description="Dataset ID")
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
 
     run_inference: bool = Field(default=True)
-    # Optional hyperparameters for manual retrain. These are read by the service layer
-    # (and defaulted to values from the active checkpoint when omitted).
-    epochs: Optional[int] = Field(default=None, ge=1, le=500)
+    epochs: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=500,
+        description="Optional; defaults to active checkpoint hyperparameters when omitted",
+    )
     learning_rate: Optional[float] = Field(default=None)
     batch_size: Optional[int] = Field(default=None, ge=1)
     hidden_dim: Optional[int] = Field(default=None, ge=1)
@@ -327,14 +319,18 @@ class ALRetrainJobResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: datetime
-    # Populated after successful retrain — the new versioned checkpoint
-    new_checkpoint_id: Optional[int] = None
-    new_checkpoint_path: Optional[str] = None
+    new_checkpoint_id: Optional[int] = Field(
+        default=None,
+        description="New versioned checkpoint ID after a successful retrain",
+    )
+    new_checkpoint_path: Optional[str] = Field(
+        default=None,
+        description="Filesystem path of the new checkpoint after a successful retrain",
+    )
 
     class Config:
         from_attributes = True
 
-# ── Train from scratch ────────────────────────────────────────────────────────────
 
 class ALTrainingPathDefaultsResponse(BaseModel):
     """Default relative paths (under DATA_ROOT) for cold-start training files."""
@@ -393,7 +389,6 @@ class ALTrainFromScratchRequest(BaseModel):
     composite_wd: Optional[float] = Field(default=0.25)
     composite_wr: Optional[float] = Field(default=0.25)
 
-# ── Stats ──────────────────────────────────────────────────────────────
 
 class ALStats(BaseModel):
     model_checkpoint_id: int
@@ -412,14 +407,8 @@ class ALSingleSampleScore(BaseModel):
     composite: Optional[float]
 
 
-# ── Async job dispatch ──────────────────────────────────────────────────
-
 class ALJobDispatch(BaseModel):
-    """
-    Returned immediately when a training or retrain request is accepted and
-    dispatched to the background worker.  The client should poll
-    GET /api/pam-al/retrain/jobs/{job_id} to track progress.
-    """
+    """Immediate response when a training or retrain job is dispatched to the worker."""
     job_id: int
     checkpoint_id: int
     status: ALRetrainStatusSchema
@@ -427,7 +416,7 @@ class ALJobDispatch(BaseModel):
 
 
 class ALRetrainJobStatusResponse(BaseModel):
-    """Full status of a retrain job — use for polling."""
+    """Retrain job status for client polling."""
     id: int
     dataset_id: int
     model_checkpoint_id: int
@@ -444,9 +433,6 @@ class ALRetrainJobStatusResponse(BaseModel):
         from_attributes = True
 
 
-# ── User Study-mode helpers (labeled pool / ground-truth coloring) ──────────
-
-
 class ALLabeledSnippetsResponse(BaseModel):
     """List of snippet IDs that already have at least one annotation."""
     dataset_id: int
@@ -460,7 +446,7 @@ class ALSnippetLabel(BaseModel):
 
 
 class ALSnippetLabelsResponse(BaseModel):
-    """Per-snippet ground-truth / user labels — used for `actual_label` coloring."""
+    """Per-snippet labels for projection coloring and filtering."""
     dataset_id: int
     snippet_set_id: Optional[int] = None
     items: List[ALSnippetLabel]
