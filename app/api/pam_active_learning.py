@@ -153,20 +153,31 @@ def get_checkpoint_species(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Return the species list stored in the checkpoint's label config file."""
+    """Return the species the checkpoint was actually trained on.
+
+    Prefers hyperparameters["used_species"] (set during training, excludes
+    low-sample species). Falls back to parsing label_config_path for older
+    checkpoints that pre-date the used_species field.
+    """
     from app.services.pam_al._checkpoint_helpers import load_species_from_label_config
 
     svc = PAMActiveLearningService(db)
     ckpt = svc._get_checkpoint(checkpoint_id)
     if ckpt is None:
         raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found.")
+
+    # Prefer used_species — these are the labels the model actually knows.
+    hyper = ckpt.hyperparameters or {}
+    used_species = hyper.get("used_species")
+    if used_species:
+        return used_species
+
+    # Fallback: parse label config file (older checkpoints without used_species).
     if not ckpt.label_config_path:
-        raise HTTPException(status_code=404, detail="Checkpoint has no label config path.")
+        raise HTTPException(status_code=404, detail="Checkpoint has no species information.")
     try:
         return load_species_from_label_config(ckpt.label_config_path)
     except ValueError as e:
-        # The checkpoint exists and the file might exist, but its contents are invalid.
-        # Treat this as a client/configuration error, not "not found".
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -262,6 +273,21 @@ def get_or_create_predictions(
         from app.services.pam_al import _inference_helpers as inf_h
 
         model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(db, body.dataset_id, body.model_family_name)
+
+        # Validate label_scope entries against the checkpoint's known species.
+        if body.label_scope and model_ckpt is not None:
+            hyper = model_ckpt.hyperparameters or {}
+            used_species = hyper.get("used_species")
+            if used_species:
+                invalid = [s for s in body.label_scope if s not in used_species]
+                if invalid:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"label_scope contains species not known to this checkpoint: {invalid}. "
+                            f"Valid species are: {used_species}"
+                        ),
+                    )
 
         if not body.force_refresh and model_ckpt is not None:
             # Only use sync path when predictions are already cached — avoids blocking

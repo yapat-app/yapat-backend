@@ -786,6 +786,13 @@ class PAMActiveLearningService:
             )
             self.db.commit()
 
+        # When no label_scope is requested, default to the species the model was
+        # actually trained on (used_species). This gives a semantically correct
+        # noisy-OR confidence — "how likely is any trained species present?" —
+        # rather than falling back to max(p) which ignores the training context.
+        hyper = model_ckpt.hyperparameters or {}
+        effective_scope = body.label_scope or hyper.get("used_species") or None
+
         if not body.sample_suggestion:
             predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(
                 self.db, model_ckpt.id, body.snippet_set_id,
@@ -794,7 +801,7 @@ class PAMActiveLearningService:
                 predictions = [
                     p
                     for p in predictions
-                    if inf_h.aggregate_confidence(p.predicted_probabilities or {}, body.label_scope)
+                    if inf_h.aggregate_confidence(p.predicted_probabilities or {}, effective_scope)
                     >= body.min_confidence
                 ]
             rows = [ALPredictionResponse.from_prediction(p) for p in predictions]
@@ -802,7 +809,7 @@ class PAMActiveLearningService:
                 "mode": "predictions", "model_family_name": body.model_family_name,
                 "used_checkpoint_id": model_ckpt.id, "total_predictions": len(rows),
                 "returned_count": len(rows), "suggestion_strategy": body.suggestion_strategy,
-                "k": body.k, "rows": rows, "label_scope": body.label_scope,
+                "k": body.k, "rows": rows, "label_scope": effective_scope,
             }
 
         strategy = body.suggestion_strategy.value if hasattr(body.suggestion_strategy, "value") else body.suggestion_strategy
@@ -821,14 +828,14 @@ class PAMActiveLearningService:
             body.snippet_set_id,
             strategy,
             k,
-            label_scope=body.label_scope,
+            label_scope=effective_scope,
         )
 
         if body.min_confidence is not None:
             ranked = [
                 p
                 for p in ranked
-                if inf_h.aggregate_confidence(p.predicted_probabilities or {}, body.label_scope)
+                if inf_h.aggregate_confidence(p.predicted_probabilities or {}, effective_scope)
                 >= body.min_confidence
             ]
 
@@ -837,7 +844,7 @@ class PAMActiveLearningService:
             "mode": "suggestions", "model_family_name": body.model_family_name,
             "used_checkpoint_id": model_ckpt.id, "total_predictions": total_predictions,
             "returned_count": len(rows), "suggestion_strategy": body.suggestion_strategy,
-            "k": k, "rows": rows, "label_scope": body.label_scope,
+            "k": k, "rows": rows, "label_scope": effective_scope,
         }
 
     # ==================================================================
