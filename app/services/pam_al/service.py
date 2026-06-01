@@ -81,16 +81,26 @@ def _resolve_device(*candidates: Any) -> str:
     return str(settings.PAM_DEFAULT_DEVICE or "cpu")
 
 
-def _bulk_recording_ids(db: Session, snippet_ids: list[int]) -> dict[int, int]:
-    """Return {snippet_id: recording_id} for a list of snippet IDs in one query."""
+def _bulk_snippet_meta(
+    db: Session, snippet_ids: list[int]
+) -> tuple[dict[int, int], dict[int, float]]:
+    """Return ({snippet_id: recording_id}, {snippet_id: duration}) in one query."""
     if not snippet_ids:
-        return {}
+        return {}, {}
     rows = (
-        db.query(Snippet.id, Snippet.recording_id)
+        db.query(Snippet.id, Snippet.recording_id, Snippet.duration)
         .filter(Snippet.id.in_(snippet_ids))
         .all()
     )
-    return {row[0]: row[1] for row in rows if row[1] is not None}
+    rec_ids = {row[0]: row[1] for row in rows if row[1] is not None}
+    durations = {row[0]: row[2] for row in rows if row[2] is not None}
+    return rec_ids, durations
+
+
+def _bulk_recording_ids(db: Session, snippet_ids: list[int]) -> dict[int, int]:
+    """Return {snippet_id: recording_id} for a list of snippet IDs in one query."""
+    rec_ids, _ = _bulk_snippet_meta(db, snippet_ids)
+    return rec_ids
 
 
 class PAMActiveLearningService:
@@ -816,9 +826,13 @@ class PAMActiveLearningService:
                     if inf_h.aggregate_confidence(p.predicted_probabilities or {}, effective_scope)
                     >= body.min_confidence
                 ]
-            recording_id_by_snippet = _bulk_recording_ids(self.db, [p.snippet_id for p in predictions])
+            recording_id_by_snippet, duration_by_snippet = _bulk_snippet_meta(self.db, [p.snippet_id for p in predictions])
             rows = [
-                ALPredictionResponse.from_prediction(p, recording_id=recording_id_by_snippet.get(p.snippet_id))
+                ALPredictionResponse.from_prediction(
+                    p,
+                    recording_id=recording_id_by_snippet.get(p.snippet_id),
+                    duration_sec=duration_by_snippet.get(p.snippet_id),
+                )
                 for p in predictions
             ]
             return {
@@ -855,9 +869,13 @@ class PAMActiveLearningService:
                 >= body.min_confidence
             ]
 
-        recording_id_by_snippet = _bulk_recording_ids(self.db, [p.snippet_id for p in ranked])
+        recording_id_by_snippet, duration_by_snippet = _bulk_snippet_meta(self.db, [p.snippet_id for p in ranked])
         rows = [
-            ALPredictionResponse.from_prediction(p, recording_id=recording_id_by_snippet.get(p.snippet_id))
+            ALPredictionResponse.from_prediction(
+                p,
+                recording_id=recording_id_by_snippet.get(p.snippet_id),
+                duration_sec=duration_by_snippet.get(p.snippet_id),
+            )
             for p in ranked
         ]
         return {

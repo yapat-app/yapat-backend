@@ -149,6 +149,7 @@ class ALPredictionResponse(BaseModel):
     model_checkpoint_id: Optional[int] = None
     snippet_id: int
     recording_id: Optional[int] = None
+    duration_sec: Optional[float] = None
     predicted_labels: Optional[List[str]] = None
     predicted_probabilities: Optional[Dict[str, float]] = None
     uncertainty: Optional[float] = None
@@ -165,6 +166,7 @@ class ALPredictionResponse(BaseModel):
         cls,
         prediction,
         recording_id: Optional[int] = None,
+        duration_sec: Optional[float] = None,
     ) -> "ALPredictionResponse":
         """Build response with an explicitly supplied recording_id."""
         return cls(
@@ -172,6 +174,7 @@ class ALPredictionResponse(BaseModel):
             model_checkpoint_id=prediction.model_checkpoint_id,
             snippet_id=prediction.snippet_id,
             recording_id=recording_id,
+            duration_sec=duration_sec,
             predicted_labels=prediction.predicted_labels,
             predicted_probabilities=prediction.predicted_probabilities,
             uncertainty=prediction.uncertainty,
