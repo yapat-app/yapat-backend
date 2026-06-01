@@ -3,7 +3,7 @@ Annotation endpoints
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 
 from app.api.deps import get_db, get_current_active_user
@@ -265,8 +265,8 @@ def read_annotations(
     max_limit = 2000 if parsed_id_list else 500
     eff_limit = min(limit, max_limit)
 
-    query = db.query(AnnotationModel)
-    
+    query = db.query(AnnotationModel).options(joinedload(AnnotationModel.user))
+
     if parsed_id_list:
         query = query.filter(AnnotationModel.snippet_id.in_(parsed_id_list))
     elif snippet_id:
@@ -278,7 +278,7 @@ def read_annotations(
     if dataset_id:
         # Join through Snippet -> Recording -> Dataset to filter by dataset_id
         query = query.join(Snippet).join(Recording).filter(Recording.dataset_id == dataset_id)
-    
+
     annotations = query.offset(skip).limit(eff_limit).all()
     for ann in annotations:
         try:
