@@ -446,9 +446,12 @@ def list_custom_taxonomies(
     - User's teams (if team_id specified, only that team)
     - Global taxonomies (created by admins)
     """
-    # If team_id specified, verify user is member
+    # If team_id specified, return empty list gracefully when user is not a member
+    # (rather than 403) to avoid request storms from clients that fall back to a
+    # default team_id the user may not belong to.
     if team_id:
-        require_team_member(current_user, team_id, db)
+        if not (check_admin(current_user) or check_team_member(current_user, team_id, db)):
+            return CustomTaxonomyListResponse(taxonomies=[], total=0)
         taxonomies = custom_taxonomy_service.get_available_taxonomies(
             team_id=team_id,
             user_id=current_user.id,
