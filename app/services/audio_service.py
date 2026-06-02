@@ -110,6 +110,9 @@ class AudioService:
                 frames=frames_to_read,
                 dtype='float32'
             )
+            # Handle stereo by converting to mono
+            if audio_data.ndim > 1:
+                audio_data = audio_data.mean(axis=1)
 
             # Save to cache
             cached_path = self._get_cached_path(snippet_id)
