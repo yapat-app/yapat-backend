@@ -23,3 +23,7 @@ tests/
 *.log
 .DS_Store
 
+# Runtime model/checkpoint/cache dirs (mounted via docker-compose volumes)
+models_AL/
+data/
+
