@@ -376,6 +376,14 @@ class VISService:
             coords=coords,
         )
 
+        # Projections changed — drop any cached serialized responses so the next
+        # request rebuilds (and re-warms) them.
+        try:
+            from app.services.fpv_cache import invalidate_fpv
+            invalidate_fpv(body.dataset_id, body.embedding_model_id)
+        except Exception:
+            pass
+
         read_db = SessionLocal()
         try:
             return VISService(read_db).get_fpv_for_dataset_embeddings(body)

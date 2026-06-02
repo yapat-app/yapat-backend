@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.services.visualisation_service import VISService
+from app.services.fpv_cache import get_cached_fpv, set_cached_fpv
 from app.schemas.visualisation import (
     FPVRequest,
     FPVDatasetRequest,
@@ -64,7 +65,7 @@ def generate_fpv_dataset(body: FPVDatasetRequest, db: Session = Depends(get_db))
         raise HTTPException(status_code=500, detail=f"FPV dataset generation failed: {str(e)}")
 
 
-@router.get("/fpv-dataset", response_model=FPVResponse)
+@router.get("/fpv-dataset")
 def get_fpv_dataset(
     dataset_id: int,
     embedding_model_id: int,
@@ -72,6 +73,17 @@ def get_fpv_dataset(
     method: FPVMethod | None = None,
     db: Session = Depends(get_db),
 ):
+    # Dataset-level projections are static until regenerated. Large datasets
+    # (>100k snippets) take 15-25s to build/serialize and the work is CPU-bound,
+    # so recomputing per request per user starves the workers. Serve the
+    # pre-serialized JSON from Redis; the first request warms it, every
+    # subsequent request (any user) is served in milliseconds. We also return a
+    # raw Response to skip FastAPI's response_model re-validation of ~130k points.
+    method_key = method.value if method is not None else "all"
+    cached = get_cached_fpv(dataset_id, embedding_model_id, method_key, run_3d)
+    if cached is not None:
+        return Response(content=cached, media_type="application/json")
+
     service = VISService(db)
     try:
         body = FPVDatasetRequest(
@@ -80,7 +92,11 @@ def get_fpv_dataset(
             run_3d=run_3d,
             method=method,
         )
-        return service.get_fpv_for_dataset_embeddings(body)
+        result = service.get_fpv_for_dataset_embeddings(body)
+        # Pydantic v2's Rust serializer is fast and avoids FastAPI re-encoding.
+        payload = result.model_dump_json().encode("utf-8")
+        set_cached_fpv(dataset_id, embedding_model_id, method_key, run_3d, payload)
+        return Response(content=payload, media_type="application/json")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
