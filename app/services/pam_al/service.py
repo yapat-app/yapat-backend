@@ -793,6 +793,7 @@ class PAMActiveLearningService:
             body.snippet_set_id,
             strategy,
             k,
+            label_scope=body.label_scope or None,
         )
 
         return {

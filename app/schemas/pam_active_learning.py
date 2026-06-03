@@ -41,6 +41,7 @@ class SamplingMode(str, Enum):
     DIVERSITY = "diversity"
     DENSITY = "density"
     COMPOSITE = "composite"
+    CONFIDENCE = "confidence"
 
 # ── Model Checkpoint ───────────────────────────────────────────────────
 

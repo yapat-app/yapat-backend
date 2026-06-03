@@ -463,6 +463,32 @@ def count_predictions_for_checkpoint_and_snippet_set(
     return int(count or 0)
 
 
+def _noisy_or_confidence(
+    predicted_probabilities: dict | None,
+    label_scope: list[str] | None,
+) -> float:
+    """
+    Aggregate confidence over a label scope using noisy-OR:
+        P(any species present) = 1 - prod(1 - p_i  for i in scope)
+
+    Falls back to max probability when no scope is given, or 0 if no
+    probabilities are available.
+    """
+    probs = predicted_probabilities or {}
+    if not probs:
+        return 0.0
+    if label_scope:
+        scope_probs = [probs.get(s, 0.0) for s in label_scope]
+    else:
+        scope_probs = list(probs.values())
+    if not scope_probs:
+        return 0.0
+    result = 1.0
+    for p in scope_probs:
+        result *= 1.0 - max(0.0, min(1.0, float(p)))
+    return 1.0 - result
+
+
 def get_top_prediction_suggestions(
     db: Session,
     dataset_id: int,
@@ -470,6 +496,7 @@ def get_top_prediction_suggestions(
     snippet_set_id: int,
     strategy: str,
     k: int,
+    label_scope: list[str] | None = None,
 ) -> list[ALPrediction]:
     annotated_exists = (
         db.query(ALSnippetAnnotation.id)
@@ -492,6 +519,16 @@ def get_top_prediction_suggestions(
 
     if strategy == "random":
         return query.order_by(func.random()).limit(k).all()
+
+    # confidence: noisy-OR over label_scope — must be computed in Python since
+    # predicted_probabilities is a JSON column. Fetch all candidates and sort.
+    if strategy == "confidence":
+        candidates = query.all()
+        candidates.sort(
+            key=lambda p: _noisy_or_confidence(p.predicted_probabilities, label_scope),
+            reverse=True,
+        )
+        return candidates[:k]
 
     score_columns = {
         "uncertainty": ALPrediction.uncertainty,
