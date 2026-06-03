@@ -312,6 +312,38 @@ def get_dataset_explorer(
     )
 
 
+@router.get("/{dataset_id}/recording-locations")
+def get_recording_locations(
+        dataset_id: int,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_active_user),
+):
+    """
+    Return unique location values for all recordings in a dataset.
+
+    Location is read from extra_metadata['location'] when present, otherwise
+    parsed from the recording file name as the first segment before an underscore
+    (e.g. 'SITE001' from 'SITE001_20240101_120000.wav').
+    """
+    recordings = (
+        db.query(Recording.file_name, Recording.extra_metadata)
+        .filter(Recording.dataset_id == dataset_id)
+        .all()
+    )
+
+    locations: set[str] = set()
+    for file_name, meta in recordings:
+        if meta and isinstance(meta, dict) and meta.get("location"):
+            locations.add(str(meta["location"]))
+        elif file_name:
+            stem = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+            part = stem.split("_")[0] if "_" in stem else stem
+            if part:
+                locations.add(part)
+
+    return {"locations": sorted(locations)}
+
+
 @router.delete("/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_dataset(
         dataset_id: int,

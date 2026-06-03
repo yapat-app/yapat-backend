@@ -293,6 +293,7 @@ class SnippetService:
         snippet_set_id: Optional[int] = None,
         recording_id: Optional[int] = None,
         annotation_status: Optional[str] = "any",
+        location: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> List[Snippet]:
@@ -338,6 +339,32 @@ class SnippetService:
                 f"Invalid annotation_status '{annotation_status}'. "
                 "Expected 'any', 'annotated', or 'unannotated'."
             )
+
+        # Location filter: comma-separated list of location values.
+        # A recording's location is extra_metadata['location'] if set, otherwise
+        # the first underscore-delimited segment of the file name.
+        if location:
+            wanted = {loc.strip() for loc in location.split(",") if loc.strip()}
+            if wanted:
+                # Collect recording IDs whose location matches any wanted value.
+                all_recordings = (
+                    self.db.query(Recording.id, Recording.file_name, Recording.extra_metadata)
+                    .filter(Recording.dataset_id == dataset_id)
+                    .all()
+                )
+                matching_ids = []
+                for rec_id, file_name, meta in all_recordings:
+                    if meta and isinstance(meta, dict) and meta.get("location"):
+                        loc_val = str(meta["location"])
+                    else:
+                        stem = file_name.rsplit(".", 1)[0] if file_name and "." in file_name else (file_name or "")
+                        loc_val = stem.split("_")[0] if "_" in stem else stem
+                    if loc_val in wanted:
+                        matching_ids.append(rec_id)
+                if matching_ids:
+                    query = query.filter(Snippet.recording_id.in_(matching_ids))
+                else:
+                    return []
 
         all_snippets = query.all()
         random.shuffle(all_snippets)
