@@ -774,7 +774,7 @@ class PAMActiveLearningService:
                 "mode": "predictions", "model_family_name": body.model_family_name,
                 "used_checkpoint_id": model_ckpt.id, "total_predictions": len(predictions),
                 "returned_count": len(predictions), "suggestion_strategy": body.suggestion_strategy,
-                "k": body.k, "rows": predictions,
+                "k": body.k, "rows": [ALPredictionResponse.from_orm_with_snippet(p) for p in predictions],
             }
 
         strategy = body.suggestion_strategy.value if hasattr(body.suggestion_strategy, "value") else body.suggestion_strategy
@@ -800,7 +800,7 @@ class PAMActiveLearningService:
             "mode": "suggestions", "model_family_name": body.model_family_name,
             "used_checkpoint_id": model_ckpt.id, "total_predictions": total_predictions,
             "returned_count": len(ranked), "suggestion_strategy": body.suggestion_strategy,
-            "k": k, "rows": ranked,
+            "k": k, "rows": [ALPredictionResponse.from_orm_with_snippet(p) for p in ranked],
         }
 
     # ==================================================================
@@ -1474,6 +1474,8 @@ class PAMActiveLearningService:
                 diversity=None,
                 density=None,
                 composite_score=None,
+                duration_sec=snippet.end_time - snippet.start_time,
+                recording_id=snippet.recording_id,
             )
             for snippet in sampled
         ]

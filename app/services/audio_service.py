@@ -26,6 +26,11 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# In-memory cache: snippet_id → (sample_rate, channels)
+# Sample rate never changes for a given snippet, so we only need to read the
+# WAV header once per process restart. Avoids sf.info() on every request.
+_snippet_meta_cache: dict[int, tuple[int, int]] = {}
+
 
 class AudioService:
     """Service for extracting and caching audio snippets"""
@@ -69,8 +74,13 @@ class AudioService:
             cached_path = self._get_cached_path(snippet_id)
             if cached_path.exists():
                 logger.debug(f"Serving cached snippet {snippet_id}")
-                info = sf.info(str(cached_path))
-                return cached_path, info.samplerate, info.channels
+                if snippet_id in _snippet_meta_cache:
+                    sample_rate, channels = _snippet_meta_cache[snippet_id]
+                else:
+                    info = sf.info(str(cached_path))
+                    sample_rate, channels = info.samplerate, info.channels
+                    _snippet_meta_cache[snippet_id] = (sample_rate, channels)
+                return cached_path, sample_rate, channels
 
         # Resolve full path
         DATA_ROOT = settings.DATA_ROOT or "/data"
@@ -124,6 +134,7 @@ class AudioService:
                 subtype='PCM_16'
             )
 
+            _snippet_meta_cache[snippet_id] = (sample_rate, info.channels)
             logger.info(f"Extracted and cached snippet {snippet_id}")
             return cached_path, sample_rate, info.channels
 

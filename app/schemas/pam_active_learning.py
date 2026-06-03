@@ -147,9 +147,30 @@ class ALPredictionResponse(BaseModel):
     density: Optional[float] = None
     composite_score: Optional[float] = None
     created_at: Optional[datetime] = None
+    duration_sec: Optional[float] = None
+    recording_id: Optional[int] = None
 
     class Config:
         from_attributes = True
+
+    @classmethod
+    def from_orm_with_snippet(cls, pred) -> "ALPredictionResponse":
+        """Build response, pulling duration_sec/recording_id from the eagerly-loaded snippet."""
+        snippet = getattr(pred, "snippet", None)
+        return cls(
+            id=pred.id,
+            model_checkpoint_id=pred.model_checkpoint_id,
+            snippet_id=pred.snippet_id,
+            predicted_labels=pred.predicted_labels,
+            predicted_probabilities=pred.predicted_probabilities,
+            uncertainty=pred.uncertainty,
+            diversity=pred.diversity,
+            density=pred.density,
+            composite_score=pred.composite_score,
+            created_at=getattr(pred, "created_at", None),
+            duration_sec=(snippet.end_time - snippet.start_time) if snippet else None,
+            recording_id=snippet.recording_id if snippet else None,
+        )
 
 
 class ALPredictionListResponse(BaseModel):

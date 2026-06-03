@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.snippet import Snippet
 from app.models.pam_active_learning import ALPrediction, ALSnippetAnnotation
@@ -432,6 +432,11 @@ def get_predictions_for_checkpoint_and_snippet_set(
             ALPrediction.model_checkpoint_id == model_checkpoint_id,
             Snippet.snippet_set_id == snippet_set_id,
         )
+        .options(
+            selectinload(ALPrediction.snippet).load_only(
+                Snippet.start_time, Snippet.end_time, Snippet.recording_id
+            )
+        )
         .order_by(ALPrediction.composite_score.desc().nullslast(), ALPrediction.id.asc())
         .all()
     )
@@ -526,7 +531,16 @@ def get_top_prediction_suggestions(
     )
 
     if strategy == "random":
-        return query.order_by(func.random()).limit(k).all()
+        return (
+            query.order_by(func.random())
+            .limit(k)
+            .options(
+                selectinload(ALPrediction.snippet).load_only(
+                    Snippet.start_time, Snippet.end_time, Snippet.recording_id
+                )
+            )
+            .all()
+        )
 
     # confidence: noisy-OR over label_scope — must be computed in Python since
     # predicted_probabilities is a JSON column.
@@ -553,6 +567,11 @@ def get_top_prediction_suggestions(
                 .filter(
                     ALPrediction.model_checkpoint_id == model_checkpoint_id,
                     Snippet.snippet_set_id == snippet_set_id,
+                )
+                .options(
+                    selectinload(ALPrediction.snippet).load_only(
+                        Snippet.start_time, Snippet.end_time, Snippet.recording_id
+                    )
                 )
                 .all()
             )
@@ -595,6 +614,11 @@ def get_top_prediction_suggestions(
         objs = (
             db.query(ALPrediction)
             .filter(ALPrediction.id.in_(top_k_pred_ids))
+            .options(
+                selectinload(ALPrediction.snippet).load_only(
+                    Snippet.start_time, Snippet.end_time, Snippet.recording_id
+                )
+            )
             .all()
         )
         objs.sort(key=lambda p: id_to_rank[p.id])
@@ -613,6 +637,11 @@ def get_top_prediction_suggestions(
     return (
         query.order_by(score_column.desc().nullslast(), ALPrediction.id.asc())
         .limit(k)
+        .options(
+            selectinload(ALPrediction.snippet).load_only(
+                Snippet.start_time, Snippet.end_time, Snippet.recording_id
+            )
+        )
         .all()
     )
 
