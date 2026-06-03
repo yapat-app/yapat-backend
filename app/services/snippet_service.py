@@ -283,8 +283,64 @@ class SnippetService:
         import random
         all_snippets = query.all()
         random.shuffle(all_snippets)
-        
+
         # Apply pagination
+        return all_snippets[skip:skip + limit]
+
+    def get_feed_filter(
+        self,
+        dataset_id: Optional[int] = None,
+        snippet_set_id: Optional[int] = None,
+        recording_id: Optional[int] = None,
+        annotation_status: Optional[str] = "any",
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[Snippet]:
+        """
+        Filter snippets by annotation status.
+
+        Args:
+            annotation_status: 'any' (default), 'annotated' (has >=1 annotation),
+                or 'unannotated' (has no annotations).
+
+        Returns:
+            List of Snippet objects in random order.
+
+        Raises:
+            ValueError: If dataset_id is required but not provided, or if SnippetSet is not READY.
+        """
+        snippet_set_id = self._resolve_and_validate_snippet_set(dataset_id, snippet_set_id)
+
+        query = (
+            self.db.query(Snippet)
+            .join(Snippet.recording)
+            .join(Snippet.snippet_set)
+            .filter(Snippet.snippet_set_id == snippet_set_id)
+        )
+
+        if dataset_id is not None:
+            query = query.filter(SnippetSet.dataset_id == dataset_id)
+        if recording_id is not None:
+            query = query.filter(Snippet.recording_id == recording_id)
+
+        status = (annotation_status or "any").lower()
+        has_annotation = (
+            self.db.query(Annotation.id)
+            .filter(Annotation.snippet_id == Snippet.id)
+            .exists()
+        )
+        if status == "annotated":
+            query = query.filter(has_annotation)
+        elif status == "unannotated":
+            query = query.filter(~has_annotation)
+        elif status not in ("any", ""):
+            raise ValueError(
+                f"Invalid annotation_status '{annotation_status}'. "
+                "Expected 'any', 'annotated', or 'unannotated'."
+            )
+
+        all_snippets = query.all()
+        random.shuffle(all_snippets)
         return all_snippets[skip:skip + limit]
 
     def get_feed_similarity(
