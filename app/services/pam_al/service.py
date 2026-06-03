@@ -32,6 +32,7 @@ from app.models.pam_active_learning import (
     ALAnnotationSource,
 )
 from app.models.snippet import Snippet
+from app.models.embedding import SnippetSet
 from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
     ALFeedbackSubmit,
@@ -648,6 +649,24 @@ class PAMActiveLearningService:
     # ==================================================================
 
     def get_or_create_predictions(self, body):
+        # Guard against cross-dataset contamination: the snippet_set must belong
+        # to the requested dataset. 
+        ss = (
+            self.db.query(SnippetSet)
+            .filter(SnippetSet.id == body.snippet_set_id)
+            .one_or_none()
+        )
+        if ss is None:
+            raise ValueError(
+                f"snippet_set_id={body.snippet_set_id} does not exist."
+            )
+        if ss.dataset_id != body.dataset_id:
+            raise ValueError(
+                f"snippet_set_id={body.snippet_set_id} belongs to dataset_id={ss.dataset_id}, "
+                f"not dataset_id={body.dataset_id}. Possible stale session data — "
+                f"please refresh the page and regenerate the feed."
+            )
+
         model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(self.db, body.dataset_id, body.model_family_name)
 
         if model_ckpt is None:
