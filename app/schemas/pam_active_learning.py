@@ -130,6 +130,10 @@ class ALRunInferenceRequest(BaseModel):
         default=5,
         description="Number of suggestions to return when sample_suggestion=true.",
     )
+    label_scope: Optional[List[str]] = Field(
+        default=None,
+        description="Species to use for confidence ranking (validate mode noisy-OR).",
+    )
 
 
 class ALPredictionResponse(BaseModel):
