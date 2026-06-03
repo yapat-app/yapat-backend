@@ -1,12 +1,11 @@
 """Follow-up marker after dataset spectrogram range migration.
 
-Revision ID: 2026_05_22_merge_heads
-Revises: 2026_05_21_spec_range
-Create Date: 2026-05-22
+Merge-only revision.
 
-No-op revision kept for continuity in environments that already reached
-`2026_05_22_merge_heads`. The previous dependency on `b5dd26a8d59c` caused
-startup failures where that missing revision never existed.
+This previously depended on an indexes migration revision (`b5dd26a8d59c`) that
+is not present in this repository, which breaks Alembic startup when the DB is
+stamped past this point. Keep this as a no-op marker that follows the
+spectrogram range migration.
 """
 
 from alembic import op

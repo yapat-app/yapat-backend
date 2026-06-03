@@ -184,6 +184,16 @@ class ALPredictionResponse(BaseModel):
             created_at=prediction.created_at,
         )
 
+    @classmethod
+    def from_orm_with_snippet(cls, pred) -> "ALPredictionResponse":
+        """Build response from a prediction with an eagerly-loaded snippet relation."""
+        snippet = getattr(pred, "snippet", None)
+        return cls.from_prediction(
+            pred,
+            recording_id=snippet.recording_id if snippet else None,
+            duration_sec=(snippet.end_time - snippet.start_time) if snippet else None,
+        )
+
 
 class ALPredictionListResponse(BaseModel):
     mode: Literal["predictions", "suggestions"]

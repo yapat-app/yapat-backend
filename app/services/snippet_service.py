@@ -366,6 +366,11 @@ class SnippetService:
 
         # Apply annotation status filter based on any annotation on the snippet
         status = (annotation_status or "any").lower()
+        if status not in ("any", "", "annotated", "unannotated"):
+            raise ValueError(
+                f"Invalid annotation_status '{annotation_status}'. "
+                "Expected 'any', 'annotated', or 'unannotated'."
+            )
         if status in ("annotated", "unannotated"):
             ann_subq = (
                 select(Annotation.id)

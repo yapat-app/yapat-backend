@@ -202,6 +202,10 @@ def get_feed(
             _save_feed_snapshot(db, current_user.id, method, snippets, request_params)
 
         return snippets
+    except HTTPException:
+        # Intended HTTP errors (400/404/409/...) must propagate as-is, not be
+        # re-wrapped into a 500 by the broad handler below.
+        raise
     except ValueError as e:
         # Convert service layer errors to appropriate HTTP exceptions
         error_msg = str(e)

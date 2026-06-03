@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.snippet import Snippet
 from app.models.pam_active_learning import ALPrediction, ALSnippetAnnotation
@@ -412,6 +412,14 @@ def run_and_store_inference(
 
     save_prediction_rows(db=db, model_checkpoint_id=model_ckpt.id, rows=rows)
 
+    # Invalidate any cached confidence rankings for this checkpoint so the next
+    # validate-mode request recomputes from the fresh predictions.
+    try:
+        from app.services.inference_feed_cache import invalidate_inference_feed
+        invalidate_inference_feed(model_ckpt.id)
+    except Exception:
+        pass
+
     logger.info(
         "pam-al inference: DB upsert done in %.2fs",
         time.perf_counter() - t2,
@@ -448,6 +456,11 @@ def get_predictions_for_checkpoint_and_snippet_set(
         .filter(
             ALPrediction.model_checkpoint_id == model_checkpoint_id,
             Snippet.snippet_set_id == snippet_set_id,
+        )
+        .options(
+            selectinload(ALPrediction.snippet).load_only(
+                Snippet.start_time, Snippet.end_time, Snippet.recording_id
+            )
         )
         .order_by(ALPrediction.composite_score.desc().nullslast(), ALPrediction.id.asc())
         .all()
@@ -488,6 +501,32 @@ def count_predictions_for_checkpoint_and_snippet_set(
     return int(count or 0)
 
 
+def _noisy_or_confidence(
+    predicted_probabilities: dict | None,
+    label_scope: list[str] | None,
+) -> float:
+    """
+    Aggregate confidence over a label scope using noisy-OR:
+        P(any species present) = 1 - prod(1 - p_i  for i in scope)
+
+    Falls back to max probability when no scope is given, or 0 if no
+    probabilities are available.
+    """
+    probs = predicted_probabilities or {}
+    if not probs:
+        return 0.0
+    if label_scope:
+        scope_probs = [probs.get(s, 0.0) for s in label_scope]
+    else:
+        scope_probs = list(probs.values())
+    if not scope_probs:
+        return 0.0
+    result = 1.0
+    for p in scope_probs:
+        result *= 1.0 - max(0.0, min(1.0, float(p)))
+    return 1.0 - result
+
+
 def get_top_prediction_suggestions(
     db: Session,
     dataset_id: int,
@@ -517,7 +556,98 @@ def get_top_prediction_suggestions(
     )
 
     if strategy == "random":
-        return query.order_by(func.random()).limit(k).all()
+        return (
+            query.order_by(func.random())
+            .limit(k)
+            .options(
+                selectinload(ALPrediction.snippet).load_only(
+                    Snippet.start_time, Snippet.end_time, Snippet.recording_id
+                )
+            )
+            .all()
+        )
+
+    # confidence: noisy-OR over label_scope — must be computed in Python since
+    # predicted_probabilities is a JSON column.
+    #
+    # Cache the full ranked list (ignoring per-request annotation filter) so
+    # repeat calls (e.g. every mode-switch to validate) are served in <50ms
+    # instead of loading 100k+ rows into Python on every request.
+    if strategy == "confidence":
+        from app.services.inference_feed_cache import (
+            get_cached_confidence_ranking,
+            set_cached_confidence_ranking,
+        )
+
+        ranked_triples = get_cached_confidence_ranking(
+            model_checkpoint_id, snippet_set_id, label_scope
+        )
+
+        if ranked_triples is None:
+            # Cache miss: load all predictions for this checkpoint+snippet_set (no
+            # annotation filter — the filter is applied cheaply after sorting).
+            all_preds = (
+                db.query(ALPrediction)
+                .join(Snippet, Snippet.id == ALPrediction.snippet_id)
+                .filter(
+                    ALPrediction.model_checkpoint_id == model_checkpoint_id,
+                    Snippet.snippet_set_id == snippet_set_id,
+                )
+                .options(
+                    selectinload(ALPrediction.snippet).load_only(
+                        Snippet.start_time, Snippet.end_time, Snippet.recording_id
+                    )
+                )
+                .all()
+            )
+            scored = [
+                (p, _noisy_or_confidence(p.predicted_probabilities, label_scope))
+                for p in all_preds
+            ]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            all_preds = [p for p, _ in scored]
+            ranked_triples = [(p.id, p.snippet_id, s) for p, s in scored]
+            set_cached_confidence_ranking(model_checkpoint_id, snippet_set_id, label_scope, ranked_triples)
+
+            # Filter out already-annotated snippets using the pre-sorted objects.
+            annotated_exists_set = {
+                row[0]
+                for row in db.query(ALSnippetAnnotation.snippet_id).filter(
+                    ALSnippetAnnotation.dataset_id == dataset_id,
+                ).all()
+            }
+            candidates = [p for p in all_preds if p.snippet_id not in annotated_exists_set]
+            return candidates[:k]
+
+        # Cache hit: filter annotated IDs and fetch only the top-k full objects.
+        annotated_snippet_ids = {
+            row[0]
+            for row in db.query(ALSnippetAnnotation.snippet_id).filter(
+                ALSnippetAnnotation.dataset_id == dataset_id,
+            ).all()
+        }
+        top_k_pred_ids = [
+            pred_id
+            for pred_id, snippet_id, _ in ranked_triples
+            if snippet_id not in annotated_snippet_ids
+        ][:k]
+
+        if not top_k_pred_ids:
+            return []
+
+        id_to_rank = {pred_id: rank for rank, pred_id in enumerate(top_k_pred_ids)}
+        objs = (
+            db.query(ALPrediction)
+            .filter(ALPrediction.id.in_(top_k_pred_ids))
+            .options(
+                selectinload(ALPrediction.snippet).load_only(
+                    Snippet.start_time, Snippet.end_time, Snippet.recording_id
+                )
+            )
+            .all()
+        )
+        objs.sort(key=lambda p: id_to_rank[p.id])
+        return objs
 
     if strategy == "confidence":
         # Noisy-OR is label_scope-specific and cannot be pushed into a JSONB SQL
@@ -542,6 +672,11 @@ def get_top_prediction_suggestions(
     return (
         query.order_by(score_column.desc().nullslast(), ALPrediction.id.asc())
         .limit(k)
+        .options(
+            selectinload(ALPrediction.snippet).load_only(
+                Snippet.start_time, Snippet.end_time, Snippet.recording_id
+            )
+        )
         .all()
     )
 

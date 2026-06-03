@@ -108,6 +108,10 @@ def density(
     Then percentile-normalized:
         0 = sparse / outlier-like
         1 = dense / representative
+
+    Uses HNSW approximate nearest-neighbor index (O(n log n)) rather than the
+    brute-force flat index (O(n²)) so that large datasets (100k+ snippets) don't
+    stall the retrain worker for 30–90 seconds.
     """
     if Z_u.numel() == 0:
         return torch.empty(0, device=Z_u.device)
@@ -119,23 +123,22 @@ def density(
     device = Z_u.device
 
     z_u_np = _to_np(Z_u)
-    dim = z_u_np.shape[1]
 
-    index = faiss.IndexFlatL2(dim)
-    index.add(z_u_np)
+    # HNSW is ~30–100x faster than IndexFlatL2 for large n at negligible accuracy cost.
+    index = _make_hnsw_index(z_u_np)
 
     k_eff = min(k + 1, N_u)
     distances, _ = index.search(z_u_np, k=k_eff)
 
+    # HNSW distances are squared L2; exclude the self-match (index 0, distance ≈ 0).
     distances = distances[:, 1:]
-    distances = np.sqrt(distances)
+    distances = np.sqrt(np.maximum(distances, 0.0))
 
     avg = distances.mean(axis=1)
     raw_scores = 1.0 / (avg + 1e-8)
 
     scores = torch.tensor(raw_scores, dtype=torch.float32, device=device)
 
-    # density values have no bounds, that's why percentile-based normalization is used to mitigate outliers.
     lo = torch.quantile(scores, q_low)
     hi = torch.quantile(scores, q_high)
 

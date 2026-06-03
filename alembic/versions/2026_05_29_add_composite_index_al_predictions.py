@@ -3,7 +3,7 @@
 Speeds up get_top_prediction_suggestions queries which ORDER BY composite_score DESC
 filtered by model_checkpoint_id on every "Generate Feed" call.
 
-Revision ID: 2026_05_29_add_composite_index_al_predictions
+Revision ID: 2026_05_29_al_predictions_ckpt_score_idx
 Revises: 2026_05_22_merge_heads
 Create Date: 2026-05-29
 """
