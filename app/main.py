@@ -35,10 +35,12 @@ from app.api import (
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version="1.0.0",
-    openapi_url=f"{settings.API_STR}/openapi.json",
+    openapi_url=f"{settings.API_STR}/openapi.json" if settings.ENABLE_DOCS else None,
+    docs_url="/docs" if settings.ENABLE_DOCS else None,
+    redoc_url="/redoc" if settings.ENABLE_DOCS else None,
     swagger_ui_parameters={
-        "persistAuthorization": True,  # Keep authorization after page refresh
-    }
+        "persistAuthorization": True,
+    },
 )
 
 # CORS middleware

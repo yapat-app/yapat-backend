@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     API_STR: str = "/api"
     PROJECT_NAME: str = "YAPAT Backend"
     LOG_LEVEL: str = "INFO"
+    ENABLE_DOCS: bool = False  # Disable Swagger/ReDoc in production; set to true in dev
     DATA_ROOT: Optional[str] = "/data"
     HOST_DATA_ROOT: str | None = None  # host path (optional)
     HOST_MODELS_AL: str | None = None  # host path for models; used by docker-compose for mounts only
