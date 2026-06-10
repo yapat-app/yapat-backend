@@ -12,7 +12,7 @@ REST API for the PAM-specific active learning flow:
 import logging
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -296,8 +296,28 @@ def get_or_create_predictions(
                 db, model_ckpt.id, body.snippet_set_id
             )
             if predictions_cached:
+                from app.services import inference_feed_cache
+
+                # The whole-dataset prediction payload (sample_suggestion=False)
+                # is large and identical across users. Serve it straight from
+                # Redis as raw JSON to skip the ORM load + Pydantic round-trip
+                # over tens of thousands of rows. Returning a Response bypasses
+                # response_model re-validation.
+                payload_cacheable = not body.sample_suggestion
+                effective_scope = None
+                if payload_cacheable:
+                    hyper = model_ckpt.hyperparameters or {}
+                    effective_scope = body.label_scope or hyper.get("used_species") or None
+                    cached_json = inference_feed_cache.get_cached_full_payload(
+                        model_ckpt.id,
+                        body.snippet_set_id,
+                        body.min_confidence,
+                        effective_scope,
+                    )
+                    if cached_json is not None:
+                        return Response(content=cached_json, media_type="application/json")
                 try:
-                    return service.get_or_create_predictions(body)
+                    result = service.get_or_create_predictions(body)
                 except ValueError:
                     db.rollback()
                     raise
@@ -311,6 +331,24 @@ def get_or_create_predictions(
                         fast_err,
                         exc_info=True,
                     )
+                else:
+                    if payload_cacheable:
+                        try:
+                            payload = ALPredictionListResponse.model_validate(result)
+                            inference_feed_cache.set_cached_full_payload(
+                                model_ckpt.id,
+                                body.snippet_set_id,
+                                body.min_confidence,
+                                effective_scope,
+                                payload.model_dump_json(),
+                            )
+                        except Exception as cache_err:
+                            logger.warning(
+                                "Full-payload cache store failed for checkpoint_id=%s: %s",
+                                model_ckpt.id,
+                                cache_err,
+                            )
+                    return result
 
         if model_ckpt is None:
             # No checkpoint: return random snippet suggestions immediately.
