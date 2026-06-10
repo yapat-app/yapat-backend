@@ -2,7 +2,7 @@
 Recording endpoints
 """
 
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -43,16 +43,21 @@ def read_recordings(
     dataset_id: int,
     skip: int = 0,
     limit: int = 100,
+    ids: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Get list of recordings belonging to a dataset."""
-    query = (
-        db.query(RecordingModel)
-        .filter(RecordingModel.dataset_id == dataset_id)
-        .offset(skip)
-        .limit(limit)
-    )
+    """Get list of recordings belonging to a dataset.
+
+    Pass ``ids`` as a comma-separated list of recording IDs to fetch only
+    those specific recordings (skip/limit are ignored when ids is provided).
+    """
+    query = db.query(RecordingModel).filter(RecordingModel.dataset_id == dataset_id)
+    if ids:
+        id_list = [int(i) for i in ids.split(",") if i.strip().lstrip("-").isdigit()]
+        query = query.filter(RecordingModel.id.in_(id_list))
+    else:
+        query = query.offset(skip).limit(limit)
     return query.all()
 
 
