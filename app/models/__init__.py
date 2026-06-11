@@ -41,6 +41,7 @@ from app.models.pam_active_learning import (
     ALFeedbackAction,
     ALRetrainStatus,
 )
+from app.models.study_event import StudyEvent
 
 __all__ = [
     "User",
@@ -76,4 +77,6 @@ __all__ = [
     "ALModelStatus",
     "ALFeedbackAction",
     "ALRetrainStatus",
+    # Study interaction logging
+    "StudyEvent",
 ]

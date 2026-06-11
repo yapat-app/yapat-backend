@@ -25,6 +25,7 @@ from app.api import (
     pam_active_learning,
     recordings,
     snippets,
+    study_events,
     tasks,
     taxonomy,
     teams,
@@ -86,6 +87,7 @@ app.include_router(embeddings.router, prefix=f"{settings.API_STR}", tags=["embed
 app.include_router(pam_active_learning.router, prefix=f"{settings.API_STR}/pam-al", tags=["pam-active-learning"])
 app.include_router(visualisations.router, prefix=f"{settings.API_STR}/visualisations", tags=["visualisations"])
 app.include_router(wssed.router, prefix=f"{settings.API_STR}/wssed", tags=["wssed"])
+app.include_router(study_events.router, prefix=f"{settings.API_STR}/study-events", tags=["study-events"])
 
 
 @app.get("/")
