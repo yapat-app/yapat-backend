@@ -34,8 +34,10 @@ services:
 
   # FastAPI application
   api:
-    build: .
-    gpus: all
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
     container_name: yapat-api
     command: ["bash", "/app/startup.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
@@ -71,7 +73,10 @@ services:
 
   # Celery worker for asynchronous task processing
   celery-worker:
-    build: .
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
     container_name: yapat-celery-worker
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=default,embeddings,processing,exports
     depends_on:
@@ -104,7 +109,10 @@ services:
 
   # Dedicated Celery worker for PAM Active Learning (training is CPU/GPU-intensive)
   celery-worker-pam-al:
-    build: .
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
     container_name: yapat-celery-worker-pam-al
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=pam_al -n pam_al@%h
     depends_on:
@@ -118,10 +126,6 @@ services:
           memory: 16G
         reservations:
           memory: 8G
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -139,7 +143,10 @@ services:
 
   # Celery beat scheduler for periodic tasks
   celery-beat:
-    build: .
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
     container_name: yapat-celery-beat
     command: celery -A app.celery_app beat --loglevel=info --scheduler=celery.beat:PersistentScheduler
     depends_on:
@@ -163,7 +170,10 @@ services:
 
   # Flower monitoring dashboard for Celery
   flower:
-    build: .
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
     container_name: yapat-flower
     command: celery -A app.celery_app flower --port=5555
     depends_on:

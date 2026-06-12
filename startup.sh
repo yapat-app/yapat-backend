@@ -17,6 +17,16 @@ ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(128);\
 "
 
 echo "Running database migrations..."
+# If the DB points to a revision that no longer exists in the codebase (e.g. a
+# migration was applied locally but never committed), stamp it to the current
+# head so `upgrade head` doesn't crash.  This is safe because stamping only
+# updates the version pointer — it never drops or alters schema.
+if ! alembic current 2>&1 | grep -q "(head)"; then
+  if alembic current 2>&1 | grep -q "Can't locate revision"; then
+    echo "WARNING: DB points to an unknown revision. Stamping to current head..."
+    alembic stamp head
+  fi
+fi
 alembic upgrade head
 
 echo "Starting application..."

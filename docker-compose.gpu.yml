@@ -1,0 +1,18 @@
+# GPU additions — included via COMPOSE_FILE in .env when DEVICE=gpu.
+# See .env.example for usage.
+services:
+  api:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  celery-worker-pam-al:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
