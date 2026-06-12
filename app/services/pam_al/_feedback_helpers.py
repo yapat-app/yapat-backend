@@ -98,24 +98,32 @@ def sync_feedback_events_to_annotations(db: Session, checkpoint_id: int) -> int:
     """
     Sync recent ACCEPT / MODIFY feedback since the last retrain into
     ALSnippetAnnotation.  Returns the number of events processed.
+
+    Events are deduplicated by (snippet_id, user_id) keeping only the latest
+    before writing, so that re-labeling the same snippet twice within one
+    retrain window never produces duplicate annotation rows.
     """
     events = get_feedback_events_since_last_retrain(db, checkpoint_id)
     if not events:
         return 0
 
+    # Keep only the latest actionable event per (snippet_id, user_id).
+    # Events are ordered oldest-first; iterating forward means later entries
+    # overwrite earlier ones, leaving the most-recent label per snippet+user.
+    latest: dict[tuple[int, int | None], ALFeedbackEvent] = {}
     for event in events:
         if event.action not in {ALFeedbackAction.ACCEPT, ALFeedbackAction.MODIFY}:
             continue
-
-        labels_to_store = event.final_labels or []
-        if not labels_to_store:
+        if not (event.final_labels or []):
             continue
+        latest[(event.snippet_id, event.user_id)] = event
 
+    for event in latest.values():
         replace_user_labels_for_snippet(
             db=db,
             dataset_id=event.dataset_id,
             snippet_id=event.snippet_id,
-            labels=labels_to_store,
+            labels=event.final_labels or [],
             model_checkpoint_id=event.model_checkpoint_id,
             user_id=event.user_id,
         )

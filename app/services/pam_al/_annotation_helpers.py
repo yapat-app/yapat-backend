@@ -33,11 +33,18 @@ def store_snippet_annotations(
     if len(label_order) != y.shape[1]:
         raise ValueError(f"Mismatch: {len(label_order)=} but y has {y.shape[1]} columns.")
 
+    # Track (snippet_id, label) pairs added within this call so that duplicate
+    # input rows don't produce two pending session adds before the flush.
+    seen: set[tuple[int, str]] = set()
+
     for row_idx, snippet_id in enumerate(snippet_ids):
         positive_indices = np.where(y[row_idx] > 0)[0]
 
         for class_idx in positive_indices:
             label = label_order[class_idx]
+
+            if (snippet_id, label) in seen:
+                continue
 
             exists = (
                 db.query(ALSnippetAnnotation)
@@ -62,6 +69,7 @@ def store_snippet_annotations(
                         model_checkpoint_id=model_checkpoint_id,
                     )
                 )
+                seen.add((snippet_id, label))
 
 
 def replace_user_labels_for_snippet(
