@@ -103,24 +103,29 @@ def sync_feedback_events_to_annotations(db: Session, checkpoint_id: int) -> int:
     if not events:
         return 0
 
+    # Events are ordered by created_at asc, so iterating in order means the
+    # last assignment per (snippet_id, user_id) wins — correct for re-feedback.
+    latest_by_snippet_user: dict[tuple[int, int | None], ALFeedbackEvent] = {}
     for event in events:
         if event.action not in {ALFeedbackAction.ACCEPT, ALFeedbackAction.MODIFY}:
             continue
-
-        labels_to_store = event.final_labels or []
-        if not labels_to_store:
+        if not (event.final_labels or []):
             continue
+        latest_by_snippet_user[(event.snippet_id, event.user_id)] = event
 
+    for event in latest_by_snippet_user.values():
         replace_user_labels_for_snippet(
             db=db,
             dataset_id=event.dataset_id,
             snippet_id=event.snippet_id,
-            labels=labels_to_store,
+            labels=event.final_labels or [],
             model_checkpoint_id=event.model_checkpoint_id,
             user_id=event.user_id,
         )
+        # Flush per snippet to avoid a single massive INSERT batch that can
+        # exceed SQLAlchemy's insertmanyvalues compile limit.
+        db.flush()
 
-    db.flush()
     return len(events)
 
 
