@@ -470,3 +470,65 @@ def export_dataset_annotations(
     else:
         # Return JSON (using Pydantic for validation)
         return [AnnotationExport(**data) for data in annotations_data]
+
+
+# ── Quick Labels ────────────────────────────────────────────────────────────
+
+@router.get("/{dataset_id}/quick-labels")
+def get_quick_labels(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return dataset quick labels. Falls back to active checkpoint species list if not configured."""
+    from app.models.dataset import Dataset as DatasetModel
+    from app.models.pam_active_learning import ALModelFamilyState, ALModelCheckpoint
+    from app.services.pam_al._checkpoint_helpers import list_active_family_checkpoints, load_species_from_label_config
+
+    dataset = db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    if dataset.quick_labels is not None:
+        return dataset.quick_labels
+
+    # Fallback: pre-populate from active checkpoint species list (read-only, not persisted)
+    checkpoints = list_active_family_checkpoints(db, dataset_id=dataset_id)
+    for ckpt in checkpoints:
+        if ckpt.label_config_path:
+            try:
+                species = load_species_from_label_config(ckpt.label_config_path)
+                return [
+                    {
+                        "taxon_id": f"local:{s.lower().replace(' ', '_')[:120]}",
+                        "display_name": s,
+                    }
+                    for s in species
+                ]
+            except Exception:
+                continue
+    return []
+
+
+@router.put("/{dataset_id}/quick-labels")
+def put_quick_labels(
+    dataset_id: int,
+    body: List[dict],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Replace the dataset's quick label list."""
+    from app.models.dataset import Dataset as DatasetModel
+
+    dataset = db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    cleaned = [
+        {"taxon_id": str(item["taxon_id"]), "display_name": str(item["display_name"])}
+        for item in body
+        if isinstance(item, dict) and item.get("taxon_id") and item.get("display_name")
+    ]
+    dataset.quick_labels = cleaned
+    db.commit()
+    return cleaned

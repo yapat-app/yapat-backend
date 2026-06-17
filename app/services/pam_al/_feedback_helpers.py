@@ -110,15 +110,15 @@ def sync_feedback_events_to_annotations(db: Session, checkpoint_id: int) -> int:
     # Keep only the latest actionable event per (snippet_id, user_id).
     # Events are ordered oldest-first; iterating forward means later entries
     # overwrite earlier ones, leaving the most-recent label per snippet+user.
-    latest: dict[tuple[int, int | None], ALFeedbackEvent] = {}
+    latest_by_snippet_user: dict[tuple[int, int | None], ALFeedbackEvent] = {}
     for event in events:
         if event.action not in {ALFeedbackAction.ACCEPT, ALFeedbackAction.MODIFY}:
             continue
         if not (event.final_labels or []):
             continue
-        latest[(event.snippet_id, event.user_id)] = event
+        latest_by_snippet_user[(event.snippet_id, event.user_id)] = event
 
-    for event in latest.values():
+    for event in latest_by_snippet_user.values():
         replace_user_labels_for_snippet(
             db=db,
             dataset_id=event.dataset_id,
@@ -127,8 +127,10 @@ def sync_feedback_events_to_annotations(db: Session, checkpoint_id: int) -> int:
             model_checkpoint_id=event.model_checkpoint_id,
             user_id=event.user_id,
         )
+        # Flush per snippet to avoid a single massive INSERT batch that can
+        # exceed SQLAlchemy's insertmanyvalues compile limit.
+        db.flush()
 
-    db.flush()
     return len(events)
 
 

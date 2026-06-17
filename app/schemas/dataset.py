@@ -3,7 +3,7 @@ Dataset schemas
 """
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from enum import Enum
 
 from pydantic import BaseModel, field_validator
@@ -52,6 +52,7 @@ class Dataset(DatasetBase):
     default_snippet_set_id: Optional[int] = None
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
+    quick_labels: Optional[List[Dict[str, Any]]] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     recording_count: Optional[int] = None  # Number of recordings in this dataset
