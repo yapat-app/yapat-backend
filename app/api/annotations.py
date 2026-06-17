@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from app.api.deps import get_db, get_current_active_user
 from app.schemas.annotation import (
-    Annotation, AnnotationCreate, AnnotationBatchCreate, 
+    Annotation, AnnotationCreate, AnnotationBatchCreate,
     DatasetAnnotationStats, AllDatasetsAnnotationStats
 )
 from app.models.annotation import Annotation as AnnotationModel
@@ -16,12 +16,62 @@ from app.models.snippet import Snippet
 from app.models.recording import Recording
 from app.models.dataset import Dataset
 from app.models.user import User
+from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
 from app.core import taxonomy
 from sqlalchemy import func
 
 _MAX_ANNOTATION_SNIPPET_IDS_FILTER = 400
 
 router = APIRouter()
+
+
+def _mirror_to_al(db: Session, annotation: AnnotationModel) -> None:
+    """Mirror a canonical annotation into al_snippet_annotation (USER source)."""
+    snippet = db.get(Snippet, annotation.snippet_id)
+    if snippet is None or snippet.recording is None:
+        return
+    dataset_id = snippet.recording.dataset_id
+    label = (annotation.resolved_name_snapshot or "").strip()
+    if not label:
+        return
+    exists = (
+        db.query(ALSnippetAnnotation)
+        .filter(
+            ALSnippetAnnotation.snippet_id == annotation.snippet_id,
+            ALSnippetAnnotation.label == label,
+            ALSnippetAnnotation.source == ALAnnotationSource.USER,
+            ALSnippetAnnotation.user_id == annotation.user_id,
+            ALSnippetAnnotation.model_checkpoint_id.is_(None),
+        )
+        .first()
+    )
+    if exists is None:
+        db.add(ALSnippetAnnotation(
+            dataset_id=dataset_id,
+            snippet_id=annotation.snippet_id,
+            label=label,
+            source=ALAnnotationSource.USER,
+            user_id=annotation.user_id,
+            model_checkpoint_id=None,
+        ))
+
+
+def _unmirror_from_al(db: Session, annotation: AnnotationModel) -> None:
+    """Remove the mirrored al_snippet_annotation row for a deleted annotation."""
+    label = (annotation.resolved_name_snapshot or "").strip()
+    if not label:
+        return
+    (
+        db.query(ALSnippetAnnotation)
+        .filter(
+            ALSnippetAnnotation.snippet_id == annotation.snippet_id,
+            ALSnippetAnnotation.label == label,
+            ALSnippetAnnotation.source == ALAnnotationSource.USER,
+            ALSnippetAnnotation.user_id == annotation.user_id,
+            ALSnippetAnnotation.model_checkpoint_id.is_(None),
+        )
+        .delete(synchronize_session=False)
+    )
 
 
 @router.post("/", response_model=Annotation, status_code=status.HTTP_201_CREATED)
@@ -121,6 +171,8 @@ def create_annotation(
     db.add(annotation)
     db.commit()
     db.refresh(annotation)
+    _mirror_to_al(db, annotation)
+    db.commit()
     return annotation
 
 
@@ -230,7 +282,9 @@ def create_annotations_batch(
     db.commit()
     for annotation in created_annotations:
         db.refresh(annotation)
-    
+    for annotation in created_annotations:
+        _mirror_to_al(db, annotation)
+    db.commit()
     return created_annotations
 
 
@@ -318,7 +372,8 @@ def delete_annotation(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only delete your own annotations"
         )
-    
+
+    _unmirror_from_al(db, annotation)
     db.delete(annotation)
     db.commit()
     return None
