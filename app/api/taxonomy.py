@@ -555,3 +555,31 @@ def validate_taxon(
     is_valid = taxonomy.validate_taxon_id(id, db_session=db)
     return {"taxon_id": id, "valid": is_valid}
 
+
+
+@router.get("/envo/suggest")
+def suggest_envo(
+    q: str = Query(..., min_length=1, description="Search term for ENVO ontology"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Search ENVO terms via OLS4 API. Returns [{taxon_id, display_name}]."""
+    import requests as req
+    try:
+        resp = req.get(
+            "https://www.ebi.ac.uk/ols4/api/search",
+            params={"q": q, "ontology": "envo", "rows": limit, "fieldList": "id,label,short_form"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        docs = resp.json().get("response", {}).get("docs", [])
+        results = []
+        for doc in docs:
+            short = doc.get("short_form", "")   # e.g. ENVO_01001867
+            label = doc.get("label", "")
+            if not short or not label:
+                continue
+            envo_id = short.replace("_", ":", 1).lower()  # ENVO_01001867 → envo:01001867
+            results.append({"taxon_id": envo_id, "display_name": label})
+        return results
+    except Exception:
+        return []
