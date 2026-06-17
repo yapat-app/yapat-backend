@@ -1,0 +1,182 @@
+services:
+  db:
+    image: pgvector/pgvector:pg15
+    command: postgres -c shared_buffers=2GB -c work_mem=32MB -c effective_cache_size=6GB -c maintenance_work_mem=256MB
+    container_name: yapat-postgres-staging
+    environment:
+      POSTGRES_USER: yapat_user
+      POSTGRES_PASSWORD: yapat_password
+      POSTGRES_DB: yapat
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yapat_user -d yapat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: yapat-redis-staging
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
+    container_name: yapat-api-staging
+    command: /app/startup.sh uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://yapat_user:yapat_password@db/yapat
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      API_STR: /api
+      PROJECT_NAME: YAPAT Backend
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS}
+      WSSED_FOCAL_DATA_ROOT: /wssed-focal-data
+      WSSED_GPU_SERVER_URL: ${WSSED_GPU_SERVER_URL:-http://172.17.0.1:8004}
+      WSSED_TIMEOUT: ${WSSED_TIMEOUT:-300}
+      DATA_ROOT: /data
+      OE_YAPAT_SERVICE_URL: http://host.docker.internal:8002
+      OE_YAPAT_TIMEOUT: 120
+    ports:
+      - "3101:8000"
+    volumes:
+      - .:/app
+      - ${HOST_DATA_ROOT}:/data:ro
+      - /srv/demos/apps/yapat-tool/WSSED-YAPAT/focal-data:/wssed-focal-data:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  celery-worker:
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
+    container_name: yapat-celery-worker-staging
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 --queues=default,embeddings,processing,exports
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://yapat_user:yapat_password@db/yapat
+      CELERY_BROKER_URL: redis://redis:6379/0
+      WSSED_GPU_SERVER_URL: ${WSSED_GPU_SERVER_URL:-http://172.17.0.1:8004}
+      WSSED_TIMEOUT: ${WSSED_TIMEOUT:-300}     
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      DATA_ROOT: /data
+      OE_YAPAT_SERVICE_URL: http://host.docker.internal:8002
+    volumes:
+      - .:/app
+      - ${HOST_DATA_ROOT}:/data:ro
+    restart: unless-stopped
+
+  celery-worker-pam-al:
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
+    container_name: yapat-celery-worker-pam-al-staging
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=pam_al
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://yapat_user:yapat_password@db/yapat
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      DATA_ROOT: /data
+      OE_YAPAT_SERVICE_URL: http://host.docker.internal:8002
+    volumes:
+      - .:/app
+      - ${HOST_DATA_ROOT}:/data:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  celery-beat:
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
+    container_name: yapat-celery-beat-staging
+    command: celery -A app.celery_app beat --loglevel=info --scheduler=celery.beat:PersistentScheduler
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://yapat_user:yapat_password@db/yapat
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      DATA_ROOT: /data
+      OE_YAPAT_SERVICE_URL: http://host.docker.internal:8002
+    volumes:
+      - .:/app
+      - ${HOST_DATA_ROOT}:/data:ro
+    restart: unless-stopped
+
+  flower:
+    build:
+      context: .
+      args:
+        DEVICE: ${DEVICE:-cpu}
+    container_name: yapat-flower-staging
+    command: celery -A app.celery_app flower --port=5555
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:5567:5555"
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    external: true
+    name: yapat-backend-staging_postgres_data
+  redis_data:
+    external: true
+    name: yapat-backend-staging_redis_data
+
