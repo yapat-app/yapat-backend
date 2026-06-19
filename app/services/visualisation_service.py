@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -24,7 +25,9 @@ from app.schemas.visualisation import (
     FPVColorMetadata,
     FPVMethod,
 )
-from utils.dr_methods import run_dr_isomap, run_dr_pca, run_dr_tsne, run_dr_umap
+from utils.dr_methods import (
+    build_knn_graph, pre_reduce_pca, run_dr_isomap, run_dr_tsne, run_dr_umap,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -522,33 +525,56 @@ class VISService:
             run_tsne_isomap,
         )
 
-        coords["pca_2d"] = run_dr_pca(X, dimensions=2)
-        logger.info("fpv dataset: PCA 2D done n=%s", n)
-
-        coords["umap_2d"] = run_dr_umap(X, dimensions=2, low_memory=True)
-        logger.info("fpv dataset: UMAP 2D done n=%s", n)
-
-        if run_tsne_isomap:
-            coords["tsne_2d"] = run_dr_tsne(X, dimensions=2)
-            logger.info("fpv dataset: t-SNE 2D done n=%s", n)
-            coords["isomap_2d"] = run_dr_isomap(X, dimensions=2)
-            logger.info("fpv dataset: Isomap 2D done n=%s", n)
-        else:
+        if not run_tsne_isomap:
             logger.warning(
                 "fpv dataset: skipping t-SNE and Isomap for n=%s (limit %s)",
                 n,
                 full_dr_max_points,
             )
 
+        # Single PCA: covers pca_2d/3d slices AND pre-reduces for kNN methods.
+        max_vis_dims = 3 if (run_3d and n >= 3 and X.shape[1] >= 3) else 2
+        X_r = pre_reduce_pca(X, max_vis_dims=max_vis_dims)
+
+        coords["pca_2d"] = X_r[:, :2]
+        logger.info("fpv dataset: PCA 2D done n=%s", n)
+
+        # Build shared kNN graph once on the already-reduced space.
+        # k=90 satisfies all three methods:
+        #   UMAP      needs k ≥ n_neighbors (90)
+        #   t-SNE     needs k ≥ 3 × perplexity (3 × 30 = 90)
+        #   Isomap    needs k ≥ n_neighbors (90), dense enough to avoid disconnected geodesic graph
+        # This is cheaper than the original code which built three separate graphs
+        # totalling ~151 neighbours (91 for t-SNE + 30 for UMAP + 30 for Isomap).
+        _knn_neighbors = 90
+        knn = build_knn_graph(X_r, n_neighbors=_knn_neighbors)
+        logger.info("fpv dataset: kNN graph built n=%s k=%s", n, _knn_neighbors)
+
+        # PCA coords are free slices; the remaining methods run in parallel.
         if run_3d and n >= 3 and X.shape[1] >= 3:
-            coords["pca_3d"] = run_dr_pca(X, dimensions=3)
+            coords["pca_3d"] = X_r[:, :3]
 
+        dr_tasks: dict[str, object] = {
+            "umap_2d": lambda: run_dr_umap(X_r, dimensions=2, n_neighbors=_knn_neighbors, low_memory=True, precomputed_knn=knn),
+        }
+        if run_tsne_isomap:
+            dr_tasks["tsne_2d"] = lambda: run_dr_tsne(X_r, dimensions=2, precomputed_knn=knn)
+            dr_tasks["isomap_2d"] = lambda: run_dr_isomap(X_r, dimensions=2, n_neighbors=_knn_neighbors, precomputed_knn=knn)
         if run_3d and n >= 3:
-            coords["umap_3d"] = run_dr_umap(X, dimensions=3, low_memory=True)
-
+            dr_tasks["umap_3d"] = lambda: run_dr_umap(X_r, dimensions=3, n_neighbors=_knn_neighbors, low_memory=True, precomputed_knn=knn)
         if run_3d and run_tsne_isomap and n >= 4:
-            coords["tsne_3d"] = run_dr_tsne(X, dimensions=3)
-            coords["isomap_3d"] = run_dr_isomap(X, dimensions=3)
+            dr_tasks["tsne_3d"] = lambda: run_dr_tsne(X_r, dimensions=3, precomputed_knn=knn)
+            dr_tasks["isomap_3d"] = lambda: run_dr_isomap(X_r, dimensions=3, n_neighbors=_knn_neighbors, precomputed_knn=knn)
+
+        with ThreadPoolExecutor(max_workers=len(dr_tasks)) as executor:
+            futures = {executor.submit(fn): name for name, fn in dr_tasks.items()}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    coords[name] = future.result()
+                    logger.info("fpv dataset: %s done n=%s", name, n)
+                except Exception:
+                    logger.exception("fpv dataset: %s failed n=%s, skipping", name, n)
 
         logger.info("fpv dataset: DR finished n=%s methods=%s", n, list(coords.keys()))
         return coords
