@@ -1,102 +1,40 @@
-import logging
-
 import numpy as np
-import scipy.sparse as sp
 from typing import Optional
 from sklearn.decomposition import PCA
-from sklearn.manifold import Isomap
+from sklearn.manifold import Isomap, TSNE
 
-logger = logging.getLogger(__name__)
-
-_PRE_REDUCE_DIMS = 50
-
-
-def pre_reduce_pca(embeddings: np.ndarray, max_vis_dims: int = 2) -> np.ndarray:
-    """Single PCA covering both visualisation slices and pre-reduction for kNN methods.
-
-    Computes PCA to max(max_vis_dims, _PRE_REDUCE_DIMS) so the caller can:
-      - slice [:, :2] / [:, :3] for PCA visualisation coordinates
-      - pass the full result as already-reduced input to UMAP / t-SNE / Isomap
-
-    Logs explained variance and warns if it falls below 95%.
-    """
-    n_components = min(
-        max(max_vis_dims, _PRE_REDUCE_DIMS),
-        embeddings.shape[0] - 1,
-        embeddings.shape[1],
-    )
-    pca = PCA(n_components=n_components)
-    result = pca.fit_transform(embeddings)
-    explained = float(pca.explained_variance_ratio_.sum())
-    msg = "pre_reduce_pca: %d → %d dims, %.1f%% variance explained"
-    args = (embeddings.shape[1], n_components, explained * 100)
-    if explained < 0.95:
-        logger.warning(msg, *args)
-    else:
-        logger.info(msg, *args)
-    return result
+# When input dimensionality exceeds this threshold, pre-reduce via PCA before
+# running UMAP or t-SNE/Isomap. Drops memory ~20x for 1024-dim embeddings.
+_UMAP_PRE_REDUCE_THRESHOLD = 50
+_UMAP_PRE_REDUCE_DIMS = 50
 
 
-def build_knn_graph(
-    embeddings: np.ndarray,
-    n_neighbors: int = 30,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute kNN graph with pynndescent (UMAP's own backend).
-
-    Returns (indices, distances) each of shape (n, n_neighbors).
-    Distances are Euclidean (not squared).
-    """
-    from pynndescent import NNDescent
-    index = NNDescent(embeddings, n_neighbors=n_neighbors)
-    return index.neighbor_graph
+def run_dr_pca(embeddings, dimensions: int):
+    reducer = PCA(n_components=dimensions)
+    return reducer.fit_transform(embeddings)
 
 
-class _PrecomputedKNNIndex:
-    """Thin wrapper so openTSNE can consume a precomputed kNN graph."""
-    def __init__(self, indices: np.ndarray, distances: np.ndarray) -> None:
-        self._indices = indices
-        self._distances = distances
-
-    def query(self, data: np.ndarray, k: int):
-        return self._indices[:, :k], self._distances[:, :k]
-
-
-def run_dr_isomap(
-    embeddings,
-    dimensions: int,
-    n_neighbors: Optional[int] = 30,
-    precomputed_knn: Optional[tuple] = None,
-):
-    if precomputed_knn is not None:
-        indices, distances = precomputed_knn
-        n = len(indices)
-        rows = np.repeat(np.arange(n), indices.shape[1])
-        dist_matrix = sp.csr_matrix(
-            (distances.ravel(), (rows, indices.ravel())), shape=(n, n)
-        )
-        reducer = Isomap(n_neighbors=n_neighbors, n_components=dimensions, metric="precomputed")
-        return reducer.fit_transform(dist_matrix)
+def run_dr_isomap(embeddings, dimensions: int, n_neighbors: Optional[int] = 30):
     reducer = Isomap(n_neighbors=n_neighbors, n_components=dimensions)
     return reducer.fit_transform(embeddings)
 
 
-def run_dr_tsne(
-    embeddings,
-    dimensions: int,
-    perplexity: Optional[int] = 30,
-    precomputed_knn: Optional[tuple] = None,
-):
-    from openTSNE import TSNE as OpenTSNE
-    from openTSNE.affinity import PerplexityBasedNN
-    if precomputed_knn is not None:
-        indices, distances = precomputed_knn
-        affinities = PerplexityBasedNN(
-            embeddings,
-            perplexity=perplexity,
-            knn_index=_PrecomputedKNNIndex(indices, distances),
-        )
-        return np.array(OpenTSNE(n_components=dimensions).fit(embeddings, affinities=affinities))
-    return np.array(OpenTSNE(n_components=dimensions, perplexity=perplexity).fit(embeddings))
+def run_dr_tsne(embeddings, dimensions: int, perplexity: Optional[int] = 30):
+    reducer = TSNE(n_components=dimensions, perplexity=perplexity)
+    return reducer.fit_transform(embeddings)
+
+
+def _maybe_pre_reduce(embeddings: np.ndarray) -> np.ndarray:
+    """PCA pre-reduction: if dims > threshold, reduce to _UMAP_PRE_REDUCE_DIMS first.
+
+    UMAP and t-SNE kNN search memory scales with input dimensionality.
+    Pre-reducing 1024-dim BirdNET embeddings to 50 dims cuts peak RAM ~20x
+    with negligible loss of neighbourhood structure.
+    """
+    if embeddings.shape[1] > _UMAP_PRE_REDUCE_THRESHOLD:
+        n_components = min(_UMAP_PRE_REDUCE_DIMS, embeddings.shape[0] - 1, embeddings.shape[1])
+        return PCA(n_components=n_components).fit_transform(embeddings)
+    return embeddings
 
 
 def run_dr_umap(
@@ -105,14 +43,16 @@ def run_dr_umap(
     n_neighbors: Optional[int] = 30,
     min_dist: Optional[float] = 0.25,
     low_memory: bool = False,
-    precomputed_knn: Optional[tuple] = None,
 ):
     from umap import UMAP
-    kwargs = dict(n_components=dimensions, n_neighbors=n_neighbors, min_dist=min_dist)
-    if precomputed_knn is not None:
-        kwargs["precomputed_knn"] = precomputed_knn
+    reduced = _maybe_pre_reduce(np.asarray(embeddings))
+    kwargs = dict(
+        n_components=dimensions,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+    )
     try:
         reducer = UMAP(**kwargs, low_memory=low_memory)
     except TypeError:
         reducer = UMAP(**kwargs)
-    return reducer.fit_transform(np.asarray(embeddings))
+    return reducer.fit_transform(reduced)
