@@ -37,9 +37,13 @@ def X_r(X):
 
 @pytest.fixture()
 def knn(X_r):
-    """3-tuple (indices, distances, NNDescent index) as returned by build_knn_graph."""
+    """3-tuple (indices, distances, NNDescent index) as returned by build_knn_graph.
+
+    Uses n_neighbors=90 to match production: satisfies UMAP (90), t-SNE (3×perplexity=90),
+    and Isomap (90) with a single shared graph.
+    """
     from utils.dr_methods import build_knn_graph
-    return build_knn_graph(X_r, n_neighbors=15)
+    return build_knn_graph(X_r, n_neighbors=90)
 
 
 # ---------------------------------------------------------------------------
@@ -118,14 +122,14 @@ class TestBuildKnnGraph:
 class TestRunDrUmap:
     def test_2d_output_shape(self, X_r, knn):
         from utils.dr_methods import run_dr_umap
-        result = run_dr_umap(X_r, dimensions=2, n_neighbors=15, precomputed_knn=knn)
+        result = run_dr_umap(X_r, dimensions=2, n_neighbors=90, precomputed_knn=knn)
         assert result.shape == (X_r.shape[0], 2)
 
     def test_3d_output_shape(self, X):
         from utils.dr_methods import pre_reduce_pca, build_knn_graph, run_dr_umap
         X_r = pre_reduce_pca(X, max_vis_dims=3)
-        knn3 = build_knn_graph(X_r, n_neighbors=15)
-        result = run_dr_umap(X_r, dimensions=3, n_neighbors=15, precomputed_knn=knn3)
+        knn3 = build_knn_graph(X_r, n_neighbors=90)
+        result = run_dr_umap(X_r, dimensions=3, n_neighbors=90, precomputed_knn=knn3)
         assert result.shape == (X_r.shape[0], 3)
 
     def test_without_precomputed_knn(self, X_r):
@@ -157,7 +161,7 @@ class TestRunDrTsne:
 class TestRunDrIsomap:
     def test_2d_output_shape_with_precomputed(self, X_r, knn):
         from utils.dr_methods import run_dr_isomap
-        result = run_dr_isomap(X_r, dimensions=2, n_neighbors=15, precomputed_knn=knn)
+        result = run_dr_isomap(X_r, dimensions=2, n_neighbors=90, precomputed_knn=knn)
         assert result.shape == (X_r.shape[0], 2)
 
     def test_without_precomputed_knn(self, X_r):
