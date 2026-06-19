@@ -6,14 +6,32 @@
 
 ## Goal
 
-Produce paper-ready performance numbers for the YAPAT active-learning pipeline,
-measuring **wall-clock time, throughput, and peak memory** for four operations
-across **CPU (local) and GPU (toaster server)**:
+Produce paper-ready performance numbers for the **entire** YAPAT pipeline —
+from raw audio to active learning — measuring **wall-clock time, throughput,
+and peak memory** across **CPU (local) and GPU (toaster server)**.
 
-1. **Diversity & density** (distance-matrix / nearest-neighbour scoring)
-2. **Confidence & uncertainty** (forward pass over the full dataset)
-3. **Retraining** (classifier training loop)
-4. **Rendering** (number of datapoints in the frontend projection view)
+**Upstream / ingestion stages** (one-shot, end-to-end with in-code stage timers):
+
+1. **Dataset scan** (`scan_recordings` — discover recordings + read durations)
+2. **Snippet generation** (segmentation loop inside `run_embedding`)
+3. **Embedding generation** (`generate_embeddings_for_recording` forward pass)
+4. **Projection / FPV** (`generate_fpv_for_dataset` — render input)
+5. **Embedding cache build** (`load_embeddings_cached`: DB → `embeddings.npy`)
+
+**Active-learning compute stages** (direct-call harness):
+
+6. **Diversity & density** (distance-matrix / nearest-neighbour scoring)
+7. **Confidence & uncertainty** (forward pass over the full dataset)
+8. **Retraining** (classifier training loop)
+
+**Frontend:**
+
+9. **Rendering** (number of datapoints in the frontend projection view)
+
+Key efficiency principle: **ingesting Anuraset on toaster IS the upstream
+benchmark.** The platform needs Anuraset ingested anyway; that single run yields
+the upstream timings (stages 1–5) *and* the cached embeddings + ground-truth CSVs
+that stages 6–8 consume. Nothing is run twice.
 
 Datasets, in priority order:
 
@@ -30,6 +48,9 @@ Datasets, in priority order:
 | Data source | **Real cached Anuraset embeddings** (`embeddings.npy`); fractions = seeded row subsample; UAnuraset = its own cache entry |
 | Frontend render test | **Playwright + browser Performance API** (Plotly `plotly_afterplot`) |
 | Compute isolation | **Refactor to expose a compute-only core**; production behaviour unchanged |
+| Upstream driver | **Real API calls** (`POST /datasets`, `POST /embeddings`) + in-code stage timers writing to `results.csv` |
+| Embed config | Platform standard: **BirdNET, window=3.0s, step=3.0s, overlap=0** (confirm against `GET /embeddings/embedding-models` at ingestion) |
+| Data access | Mount host `/srv/demos/shared/datasets/AnuraSet` into API + embedding-worker containers under `DATA_ROOT` (`/data`); `source_uri = AnuraSet/raw_data` |
 
 ## Architecture
 
@@ -41,15 +62,37 @@ touches clocks/memory; adapters only know how to `setup(N) -> args` and
 yapat-backend/benchmarks/
   __init__.py
   runner.py          # warmup + N repeats; records time(mean/std), throughput, peak mem; appends CSV
+  stage_timer.py     # context manager: times one upstream stage, appends a results.csv row
   datasets.py        # dataset name -> (snippet_set_id, embedding_model_id) or cache path; --fraction subsamples rows
   bench_distance.py  # diversity() + density() from active_learning/samplers.py
   bench_inference.py # forward_pass_full() compute core + uncertainty() + _noisy_or_confidence()
   bench_retrain.py   # model.fit() compute core on aligned (X, y)
   plot.py            # reads results.csv -> figures (time vs N per device, throughput, peak mem)
-  results.csv        # merged results from all machines
+  results.csv        # merged results from all machines + upstream stages
 yapat-frontend/benchmarks/
   render_bench.spec.ts  # Playwright: ProjectionView at N = 1k..100k; plotly_afterplot timing -> render.csv
 ```
+
+### Upstream stage timer (`stage_timer.py`)
+
+A minimal context manager wrapping each one-shot pipeline stage so it self-reports
+to the same `results.csv` schema:
+
+```python
+with stage_timer("scan", device="cpu", dataset="anuraset", n=None):
+    new_recs = svc.scan_recordings(dataset)   # n set afterward = len(new_recs)
+```
+
+Inserted (production code, behaviour unchanged) around:
+- `DatasetService.scan_recordings` — stage `scan` (N = recordings)
+- the segmentation loop in `run_embedding` — stage `snippet_gen` (N = snippets)
+- the per-recording embedding call in `run_embedding` — stage `embedding` (N = snippets)
+- `generate_fpv_for_dataset` — stage `fpv` (N = snippets)
+- first `load_embeddings_cached` build path — stage `cache_build` (N = snippets)
+
+These stages run **end-to-end** (they write to DB) and are measured once per
+dataset during ingestion — there is no separate "compute-only" version because
+the whole stage *is* the operation of interest.
 
 ### CSV schema (`results.csv`)
 
@@ -58,7 +101,7 @@ operation, device, dataset, fraction, N, dim, repeats,
 time_mean_s, time_std_s, throughput_per_s, peak_mem_mb, gpu_peak_mem_mb, timestamp, notes
 ```
 
-- `operation`: `diversity` | `density` | `inference` | `retrain` | `render`
+- `operation`: `scan` | `snippet_gen` | `embedding` | `fpv` | `cache_build` | `diversity` | `density` | `inference` | `retrain` | `render`
 - `device`: `cpu` | `cuda`
 - `throughput_per_s`: items/sec (snippets for inference/retrain; query points for distance ops)
 - `peak_mem_mb`: process RSS delta via `psutil` (CPU side)
@@ -131,15 +174,51 @@ Both refactors extract pure-compute cores that production code and benchmarks ca
 - If `ProjectionView` is not trivially mountable in isolation, a minimal dev
   harness route renders it with injected props (no real backend calls).
 
-## Execution order (fastest path to numbers)
+## Operational flow (exact, fastest path to numbers)
 
-1. Build harness + adapters; validate locally on **CPU** with a small Anuraset
-   fraction (fast feedback, correctness check on CSV rows).
-2. **Tier 1:** Anuraset × {CPU local, GPU toaster} × {distance, inference, retrain}.
-   GPU rows = same scripts run on toaster over SSH; CSVs merge via `device` column.
-3. Frontend render test (independent, any machine).
-4. **Tier 2:** Anuraset fractions (cheap, reuses cache) + UAnuraset (needs its cache).
-5. `plot.py` → figures from merged `results.csv` + `render.csv`.
+**Phase 0 — one-time setup (toaster)**
+1. Mount `/srv/demos/shared/datasets/AnuraSet` into the API + embedding-worker
+   containers under `DATA_ROOT` (`- /srv/demos/shared/datasets/AnuraSet:/data/AnuraSet:ro`).
+   Verify `GET /datasets/available-paths` lists `AnuraSet/raw_data`.
+2. Add `stage_timer.py` + the inference `forward_pass_full` extraction; build the
+   harness. Smoke-test on CPU with a small fraction.
+
+**Phase 1 — ingest Anuraset = upstream benchmark (toaster)**
+3. `POST /datasets/` with `source_uri = "AnuraSet/raw_data"` → scan. **→ stage `scan`.**
+4. `POST /datasets/{id}/embeddings` (BirdNET, window=3, step=3, overlap=0) →
+   `run_embedding` segments + embeds + finalizes; FPV generated.
+   **→ stages `snippet_gen`, `embedding`, `fpv`.**
+5. First AL load / first distance run builds `embeddings.npy`. **→ stage `cache_build`.**
+   *Output: upstream timings + cached embeddings + ground-truth CSVs.*
+
+**Phase 2 — AL compute benchmark (toaster)**
+6. `python -m benchmarks.bench_{distance,inference,retrain} --device cuda --dataset anuraset --sizes 1000,5000,20000,full`
+7. Repeat with `--device cpu` (same machine, identical data → clean CPU/GPU comparison).
+
+**Phase 3 — frontend rendering (any machine)**
+8. `npx playwright test benchmarks/render_bench.spec.ts` → `render.csv`.
+
+**Phase 4 — Tier 2 (later, if time)**
+9. Fractions: rerun Phase 2 with `--fraction 0.1/0.25/0.5` (reuses cache, no re-embedding).
+10. UAnuraset: repeat Phases 1–2 as its own dataset/cache entry.
+
+**Phase 5 — figures**
+11. `python -m benchmarks.plot` → scaling curves + throughput + peak-mem figures
+    from merged `results.csv` + `render.csv`.
+
+### CPU-vs-GPU meaningfulness (what to expect)
+
+| Stage | Metric | CPU vs GPU meaningful? |
+|---|---|---|
+| scan | time, recordings/s | No (IO/CPU) |
+| snippet_gen | time, snippets/s | No |
+| embedding | time, snippets/s, peak mem | **Yes** (if embed model runs on GPU) |
+| fpv | time | Mostly CPU |
+| cache_build | time | No |
+| distance | time, query-pts/s, peak mem | **Yes** |
+| inference | time, snippets/s, GPU mem | **Yes** |
+| retrain | time, samples/s, GPU mem | **Yes** |
+| render | time vs N | Browser only |
 
 ## Out of scope / TODO
 
