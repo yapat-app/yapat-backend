@@ -8,6 +8,16 @@ services:
           devices:
             - capabilities: [gpu]
 
+  # BirdNET embedding worker — needs GPU for TF inference
+  celery-worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   celery-worker-pam-al:
     deploy:
       resources:

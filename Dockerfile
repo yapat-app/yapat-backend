@@ -30,6 +30,14 @@ RUN if [ "$DEVICE" = "gpu" ]; then \
         pip install torch --no-deps --index-url https://download.pytorch.org/whl/cpu; \
     fi
 
+# Install TensorFlow: GPU build ships CUDA kernels via tensorflow[and-cuda] wheels
+# (no host CUDA install required — all CUDA libs bundled). CPU build is ~1 GB lighter.
+RUN if [ "$DEVICE" = "gpu" ]; then \
+        pip install "tensorflow[and-cuda]"; \
+    else \
+        pip install tensorflow-cpu; \
+    fi
+
 # Copy application code
 COPY . .
 
