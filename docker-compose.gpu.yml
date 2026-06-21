@@ -1,7 +1,14 @@
 # GPU additions — included via COMPOSE_FILE in .env when DEVICE=gpu.
 # See .env.example for usage.
+#
+# NVIDIA_VISIBLE_DEVICES=all is the reliable way to expose GPUs when using the
+# nvidia container runtime. The deploy.resources.reservations approach is less
+# reliable across Docker Engine versions.
 services:
   api:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     deploy:
       resources:
         reservations:
@@ -10,6 +17,9 @@ services:
 
   # BirdNET embedding worker — needs GPU for TF inference
   celery-worker:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     deploy:
       resources:
         reservations:
@@ -19,6 +29,9 @@ services:
               capabilities: [gpu]
 
   celery-worker-pam-al:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     deploy:
       resources:
         reservations:
