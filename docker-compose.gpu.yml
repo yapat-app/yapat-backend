@@ -4,6 +4,10 @@
 # NVIDIA_VISIBLE_DEVICES=all is the reliable way to expose GPUs when using the
 # nvidia container runtime. The deploy.resources.reservations approach is less
 # reliable across Docker Engine versions.
+#
+# LD_LIBRARY_PATH for tensorflow CUDA libs is handled at image build time in the
+# Dockerfile (written to /etc/ld.so.conf.d/nvidia-pip.conf + ldconfig). No
+# hardcoded paths needed here.
 services:
   api:
     environment:

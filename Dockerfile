@@ -38,6 +38,16 @@ RUN if [ "$DEVICE" = "gpu" ]; then \
         pip install tensorflow-cpu; \
     fi
 
+# For GPU: register the pip-bundled CUDA libs with the dynamic linker so TF can
+# dlopen them without a hardcoded LD_LIBRARY_PATH. Computed dynamically so it
+# works regardless of Python version or package layout changes.
+RUN if [ "$DEVICE" = "gpu" ]; then \
+        python3 -c " \
+import site, glob, os; \
+paths = [p for sp in site.getsitepackages() for p in glob.glob(os.path.join(sp, 'nvidia', '*', 'lib'))]; \
+print('\n'.join(paths))" > /etc/ld.so.conf.d/nvidia-pip.conf && ldconfig; \
+    fi
+
 # Copy application code
 COPY . .
 
