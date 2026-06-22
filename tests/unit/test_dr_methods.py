@@ -114,6 +114,25 @@ class TestBuildKnnGraph:
         assert np.all(indices >= 0)
         assert np.all(indices < n)
 
+    def test_no_negative_indices_when_clamped_to_n_minus_one(self):
+        """Clamping n_neighbors to n-1 prevents NNDescent -1 sentinel indices.
+
+        When n_neighbors >= n_samples, pynndescent fills missing slots with
+        index -1 and distance inf. The service layer must clamp to min(k, n-1)
+        before calling build_knn_graph to avoid corrupting the CSR matrix.
+        """
+        from utils.dr_methods import build_knn_graph
+
+        rng = np.random.default_rng(0)
+        X_small = rng.standard_normal((20, 10)).astype("float32")
+        n = X_small.shape[0]
+        n_neighbors = min(90, n - 1)  # same clamp the service layer applies
+        indices, distances, _ = build_knn_graph(X_small, n_neighbors=n_neighbors)
+
+        assert np.all(indices >= 0), "Indices must not contain -1 sentinel values"
+        assert np.all(np.isfinite(distances)), "Distances must not contain inf"
+        assert indices.shape == (n, n_neighbors)
+
 
 # ---------------------------------------------------------------------------
 # run_dr_umap
