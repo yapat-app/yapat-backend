@@ -279,12 +279,16 @@ class DatasetService:
             raise ValueError("invalid_source_uri")
 
         DATA_ROOT = settings.DATA_ROOT or "/data"
-        dataset_path = os.path.normpath(os.path.join(DATA_ROOT, source_uri))
 
-        # Reject path traversal outside DATA_ROOT
-        data_root_norm = os.path.normpath(DATA_ROOT)
-        if not dataset_path.startswith(data_root_norm + os.sep) and dataset_path != data_root_norm:
-            raise ValueError("invalid_source_uri")
+        # Allow absolute paths that exist directly; relative paths are joined with DATA_ROOT
+        if os.path.isabs(source_uri):
+            dataset_path = os.path.normpath(source_uri)
+        else:
+            dataset_path = os.path.normpath(os.path.join(DATA_ROOT, source_uri))
+            # Reject path traversal outside DATA_ROOT for relative paths
+            data_root_norm = os.path.normpath(DATA_ROOT)
+            if not dataset_path.startswith(data_root_norm + os.sep) and dataset_path != data_root_norm:
+                raise ValueError("invalid_source_uri")
 
         if not os.path.isdir(dataset_path):
             raise ValueError("invalid_source_uri")
@@ -403,7 +407,8 @@ class DatasetService:
         Returns a list of newly created recordings.
         """
         DATA_ROOT = settings.DATA_ROOT or "/data"
-        dataset_path = os.path.join(DATA_ROOT, dataset.source_uri)
+        source_uri = dataset.source_uri
+        dataset_path = source_uri if os.path.isabs(source_uri) else os.path.join(DATA_ROOT, source_uri)
 
         if not os.path.isdir(dataset_path):
             raise ValueError(f"Invalid dataset path: {dataset_path}")
@@ -516,8 +521,9 @@ class DatasetService:
             }
         """
         DATA_ROOT = settings.DATA_ROOT or "/data"
-        dataset_path = os.path.join(DATA_ROOT, dataset.source_uri)
-        
+        source_uri = dataset.source_uri
+        dataset_path = source_uri if os.path.isabs(source_uri) else os.path.join(DATA_ROOT, source_uri)
+
         if not os.path.isdir(dataset_path):
             raise ValueError(f"Invalid dataset path: {dataset_path}")
         
