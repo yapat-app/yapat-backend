@@ -48,12 +48,17 @@ def stage_timer(
     )
 
 
-def write_csv_row(row: dict, csv_path: Optional[str] = None) -> None:
+def write_csv_row(
+    row: dict,
+    csv_path: Optional[str] = None,
+    extra_fields: Optional[list] = None,
+) -> None:
     if csv_path is None:
         csv_path = RESULTS_CSV
+    fields = extra_fields if extra_fields is not None else _FIELDS
     exists = os.path.exists(csv_path)
     with open(csv_path, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=_FIELDS, extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if not exists:
             w.writeheader()
         w.writerow(row)

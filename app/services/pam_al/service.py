@@ -62,6 +62,7 @@ from app.services.pam_al import _data_helpers as data_h
 from app.services.pam_al import _annotation_helpers as ann_h
 from app.services.pam_al import _inference_helpers as inf_h
 from app.services.pam_al import _feedback_helpers as fb_h
+from benchmarks.stage_timer import stage_timer
 
 
 logger = logging.getLogger(__name__)
@@ -1413,9 +1414,10 @@ class PAMActiveLearningService:
                 dropout=do,
             )
             model.to(dev)
-            train_metrics = model.fit(X=X_train, y=y_train,
-                epochs=int(hyper.get("epochs", 20)), learning_rate=float(hyper.get("learning_rate", 1e-3)),
-                batch_size=int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)), device=dev)
+            with stage_timer("retrain", str(dev), str(dataset_id), n=int(X_train.shape[0])):
+                train_metrics = model.fit(X=X_train, y=y_train,
+                    epochs=int(hyper.get("epochs", 20)), learning_rate=float(hyper.get("learning_rate", 1e-3)),
+                    batch_size=int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)), device=dev)
             logger.info("Finished retrain model fit checkpoint_id=%d", checkpoint_id)
 
             cp = ckpt_h.make_checkpoint_path(dataset_id, new_ckpt.model_family_name, new_ckpt.version, new_ckpt.id)

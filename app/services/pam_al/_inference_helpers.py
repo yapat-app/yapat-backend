@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models.snippet import Snippet
 from app.models.pam_active_learning import ALPrediction, ALSnippetAnnotation
 from app.schemas.pam_active_learning import ALInferenceRow
+from benchmarks.stage_timer import stage_timer
 
 from active_learning.samplers import uncertainty, density, diversity, composite
 from active_learning.config import (
@@ -263,6 +264,60 @@ def _iter_batches(n: int, batch_size: int) -> Iterable[tuple[int, int]]:
         yield start, min(n, start + batch_size)
 
 
+def forward_pass_full(
+    model,
+    X: "np.ndarray",
+    batch_size: int,
+    threshold: float,
+    dataset_id: "int | None" = None,
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor]":
+    """Pure forward pass — no DB writes. Returns (features, probs, preds)."""
+    device = next(model.parameters()).device
+    n = int(X.shape[0])
+    predict_fn = getattr(model, "predict_with_features", None)
+
+    features: torch.Tensor | None = None
+    probs: torch.Tensor | None = None
+    preds: torch.Tensor | None = None
+
+    num_batches = (n + batch_size - 1) // batch_size
+
+    with stage_timer("inference", str(device), str(dataset_id), n=n):
+        with torch.inference_mode():
+            for batch_idx, (start, end) in enumerate(_iter_batches(n, batch_size), start=1):
+                x_batch = torch.as_tensor(X[start:end], dtype=torch.float32, device=device)
+                if predict_fn is not None:
+                    feat_b, prob_b, pred_b = predict_fn(x_batch, threshold=threshold)
+                else:
+                    feat_b = model.extract_features(x_batch)
+                    prob_b, pred_b = model.predict(x_batch, threshold=threshold)
+                feat_b = feat_b.detach().cpu()
+                prob_b = prob_b.detach().cpu()
+                pred_b = pred_b.detach().cpu()
+
+                if features is None:
+                    features = torch.empty((n, feat_b.shape[1]), dtype=feat_b.dtype)
+                if probs is None:
+                    probs = torch.empty((n, prob_b.shape[1]), dtype=prob_b.dtype)
+                if preds is None:
+                    preds = torch.empty((n, pred_b.shape[1]), dtype=pred_b.dtype)
+
+                features[start:end] = feat_b
+                probs[start:end] = prob_b
+                preds[start:end] = pred_b
+
+                if batch_idx == 1 or batch_idx == num_batches or (batch_idx % 10 == 0):
+                    logger.info(
+                        "pam-al inference: batch %s/%s (snippets %s..%s)",
+                        batch_idx, num_batches, start, end,
+                    )
+
+    if features is None or probs is None or preds is None:
+        raise ValueError("Inference input is empty; no predictions generated.")
+
+    return features, probs, preds
+
+
 def run_and_store_inference(
     db: Session,
     dataset_id: int,
@@ -310,51 +365,8 @@ def run_and_store_inference(
     )
 
     # Acquisition scoring needs features/probabilities for the full snippet set.
-    # Keep intermediate tensors on CPU to reduce VRAM, and process GPU batches
-    # sequentially.
     t0 = time.perf_counter()
-    features: torch.Tensor | None = None
-    probs: torch.Tensor | None = None
-    preds: torch.Tensor | None = None
-
-    predict_fn = getattr(model, "predict_with_features", None)
-
-    with torch.inference_mode():
-        for batch_idx, (start, end) in enumerate(_iter_batches(n, batch_size), start=1):
-            x_batch = torch.as_tensor(X[start:end], dtype=torch.float32, device=device)
-            if predict_fn is not None:
-                feat_b, prob_b, pred_b = predict_fn(x_batch, threshold=threshold)
-            else:
-                feat_b = model.extract_features(x_batch)
-                prob_b, pred_b = model.predict(x_batch, threshold=threshold)
-            feat_b = feat_b.detach().cpu()
-            prob_b = prob_b.detach().cpu()
-            pred_b = pred_b.detach().cpu()
-
-            # Preallocate output tensors once we know the feature/prob dimensions.
-            if features is None:
-                features = torch.empty((n, feat_b.shape[1]), dtype=feat_b.dtype)
-            if probs is None:
-                probs = torch.empty((n, prob_b.shape[1]), dtype=prob_b.dtype)
-            if preds is None:
-                preds = torch.empty((n, pred_b.shape[1]), dtype=pred_b.dtype)
-
-            features[start:end] = feat_b
-            probs[start:end] = prob_b
-            preds[start:end] = pred_b
-
-            if batch_idx == 1 or batch_idx == num_batches or (batch_idx % 10 == 0):
-                logger.info(
-                    "pam-al inference: batch %s/%s (snippets %s..%s)",
-                    batch_idx,
-                    num_batches,
-                    start,
-                    end,
-                )
-
-
-    if features is None or probs is None or preds is None:
-        raise ValueError("Inference input is empty; no predictions generated.")
+    features, probs, preds = forward_pass_full(model, X, batch_size, threshold, dataset_id=dataset_id)
 
     logger.info(
         "pam-al inference: forward pass done in %.2fs (n=%s)",
