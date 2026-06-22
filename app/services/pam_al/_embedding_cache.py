@@ -22,6 +22,7 @@ from app.config import settings
 from app.models.embedding import EmbeddingVector
 from app.models.recording import Recording
 from app.models.snippet import Snippet
+from benchmarks.stage_timer import stage_timer
 
 logger = logging.getLogger(__name__)
 
@@ -156,82 +157,85 @@ def _build_cache_from_db(
     )
 
     try:
-        embeddings_path = _embeddings_path(tmp_dir)
-        X = np.lib.format.open_memmap(
-            embeddings_path,
-            mode="w+",
-            dtype=np.float32,
-            shape=(count, dim),
-        )
-
-        snippet_rows: List[Dict[str, Any]] = []
-        offset = 0
-
-        query = (
-            db.query(
-                Snippet.id,
-                Snippet.recording_id,
-                Snippet.start_time,
-                Snippet.end_time,
-                Recording.file_name,
-                Recording.file_path,
-                EmbeddingVector.vector,
-            )
-            .join(Recording, Snippet.recording_id == Recording.id)
-            .join(EmbeddingVector, Snippet.id == EmbeddingVector.snippet_id)
-            .filter(Snippet.snippet_set_id == snippet_set_id)
-            .filter(EmbeddingVector.embedding_model_id == embedding_model_id)
-            .order_by(Snippet.id)
-            .yield_per(_CACHE_CHUNK_SIZE)
-        )
-
-        for row in query:
-            X[offset] = _vector_to_float32(row[6])
-            snippet_rows.append(
-                {
-                    "snippet_id": row[0],
-                    "recording_id": row[1],
-                    "start_time": float(row[2]),
-                    "end_time": float(row[3]),
-                    "file_name": row[4],
-                    "file_path": row[5],
-                }
-            )
-            offset += 1
-
-        if offset != count:
-            raise ValueError(
-                f"Embedding cache build row count mismatch: expected={count}, wrote={offset}"
+        with stage_timer("cache_build", "cpu", str(snippet_set_id)) as _cache_timer:
+            embeddings_path = _embeddings_path(tmp_dir)
+            X = np.lib.format.open_memmap(
+                embeddings_path,
+                mode="w+",
+                dtype=np.float32,
+                shape=(count, dim),
             )
 
-        X.flush()
-        del X
+            snippet_rows: List[Dict[str, Any]] = []
+            offset = 0
 
-        meta = {
-            "version": _CACHE_VERSION,
-            "snippet_set_id": snippet_set_id,
-            "embedding_model_id": embedding_model_id,
-            "fingerprint": fingerprint,
-            "dtype": "float32",
-        }
-        with open(_meta_path(tmp_dir), "w", encoding="utf-8") as f:
-            json.dump(meta, f)
-        with open(_snippets_path(tmp_dir), "w", encoding="utf-8") as f:
-            json.dump(snippet_rows, f)
+            query = (
+                db.query(
+                    Snippet.id,
+                    Snippet.recording_id,
+                    Snippet.start_time,
+                    Snippet.end_time,
+                    Recording.file_name,
+                    Recording.file_path,
+                    EmbeddingVector.vector,
+                )
+                .join(Recording, Snippet.recording_id == Recording.id)
+                .join(EmbeddingVector, Snippet.id == EmbeddingVector.snippet_id)
+                .filter(Snippet.snippet_set_id == snippet_set_id)
+                .filter(EmbeddingVector.embedding_model_id == embedding_model_id)
+                .order_by(Snippet.id)
+                .yield_per(_CACHE_CHUNK_SIZE)
+            )
 
-        if os.path.isdir(cache_dir):
-            shutil.rmtree(cache_dir, ignore_errors=True)
-        os.replace(tmp_dir, cache_dir)
+            for row in query:
+                X[offset] = _vector_to_float32(row[6])
+                snippet_rows.append(
+                    {
+                        "snippet_id": row[0],
+                        "recording_id": row[1],
+                        "start_time": float(row[2]),
+                        "end_time": float(row[3]),
+                        "file_name": row[4],
+                        "file_path": row[5],
+                    }
+                )
+                offset += 1
 
-        logger.info(
-            "Built embedding cache snippet_set_id=%s embedding_model_id=%s rows=%s dim=%s path=%s",
-            snippet_set_id,
-            embedding_model_id,
-            count,
-            dim,
-            cache_dir,
-        )
-        return _load_from_cache_dir(cache_dir)
+            _cache_timer.n = offset
+
+            if offset != count:
+                raise ValueError(
+                    f"Embedding cache build row count mismatch: expected={count}, wrote={offset}"
+                )
+
+            X.flush()
+            del X
+
+            meta = {
+                "version": _CACHE_VERSION,
+                "snippet_set_id": snippet_set_id,
+                "embedding_model_id": embedding_model_id,
+                "fingerprint": fingerprint,
+                "dtype": "float32",
+            }
+            with open(_meta_path(tmp_dir), "w", encoding="utf-8") as f:
+                json.dump(meta, f)
+            with open(_snippets_path(tmp_dir), "w", encoding="utf-8") as f:
+                json.dump(snippet_rows, f)
+
+            if os.path.isdir(cache_dir):
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            os.replace(tmp_dir, cache_dir)
+
+            logger.info(
+                "Built embedding cache snippet_set_id=%s embedding_model_id=%s rows=%s dim=%s path=%s",
+                snippet_set_id,
+                embedding_model_id,
+                count,
+                dim,
+                cache_dir,
+            )
+            return _load_from_cache_dir(cache_dir)
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise

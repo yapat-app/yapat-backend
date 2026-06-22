@@ -11,6 +11,7 @@ from app.database import SessionLocal
 from app.services.dataset_service import DatasetService
 from app.celery_app import celery_app
 from app.config import settings
+from benchmarks.stage_timer import stage_timer
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,9 @@ def scan_dataset(self, dataset_id: int):
         logger.info(f"Starting scan for dataset {dataset_id} (source_uri: {dataset.source_uri})")
 
         try:
-            new_recs = svc.scan_recordings(dataset)
+            with stage_timer("scan", "cpu", dataset.source_uri) as timer:
+                new_recs = svc.scan_recordings(dataset)
+                timer.n = len(new_recs)
             logger.info(f"Scan completed for dataset {dataset_id}: {len(new_recs)} recordings created")
         except Exception as e:
             error_msg = f"Scan failed for dataset {dataset_id}: {str(e)}"

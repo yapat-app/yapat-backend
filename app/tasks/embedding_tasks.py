@@ -2,6 +2,7 @@
 Celery tasks for the embedding pipeline (SnippetSet architecture).
 """
 import os
+import time
 from typing import List
 
 from celery import chord, group
@@ -20,6 +21,7 @@ from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.services.embedding_service import EmbeddingService, VectorStore
 from app.schemas.visualisation import FPVDatasetRequest
+from benchmarks.stage_timer import stage_timer, write_csv_row
 
 
 # from sqlalchemy.orm import Session
@@ -225,38 +227,41 @@ def run_embedding(self, embedding_job_id: int):
         recording_snippet_map = {}  # recording_id -> list of snippet_ids
         total_snippets = 0
 
-        for rec in recordings:
-            duration = rec.duration or 0.0
-            t = 0.0
-            recording_snippets = []
+        with stage_timer("snippet_gen", "cpu", str(job.dataset_id)) as _snip_timer:
+            for rec in recordings:
+                duration = rec.duration or 0.0
+                t = 0.0
+                recording_snippets = []
 
-            while t + window <= duration:
-                snippet_key = (rec.id, t, t + window)
-                
-                # Check if snippet already exists
-                if snippet_key in existing_snippet_map:
-                    # Reuse existing snippet
-                    recording_snippets.append(existing_snippet_map[snippet_key])
-                else:
-                    # Create new snippet only if it doesn't exist
-                    snippet = Snippet(
-                        recording_id=rec.id,
-                        snippet_set_id=snippet_set.id,
-                        start_time=t,
-                        end_time=t + window,
-                        duration=window,
-                    )
-                    db.add(snippet)
-                    db.flush()
-                    recording_snippets.append(snippet.id)
-                    # Add to map to avoid duplicates in same run
-                    existing_snippet_map[snippet_key] = snippet.id
-                
-                t += step
+                while t + window <= duration:
+                    snippet_key = (rec.id, t, t + window)
 
-            if recording_snippets:
-                recording_snippet_map[rec.id] = recording_snippets
-                total_snippets += len(recording_snippets)
+                    # Check if snippet already exists
+                    if snippet_key in existing_snippet_map:
+                        # Reuse existing snippet
+                        recording_snippets.append(existing_snippet_map[snippet_key])
+                    else:
+                        # Create new snippet only if it doesn't exist
+                        snippet = Snippet(
+                            recording_id=rec.id,
+                            snippet_set_id=snippet_set.id,
+                            start_time=t,
+                            end_time=t + window,
+                            duration=window,
+                        )
+                        db.add(snippet)
+                        db.flush()
+                        recording_snippets.append(snippet.id)
+                        # Add to map to avoid duplicates in same run
+                        existing_snippet_map[snippet_key] = snippet.id
+
+                    t += step
+
+                if recording_snippets:
+                    recording_snippet_map[rec.id] = recording_snippets
+                    total_snippets += len(recording_snippets)
+
+            _snip_timer.n = total_snippets
 
         db.commit()
 
@@ -327,6 +332,18 @@ def finalize_embedding_job(self, results, embedding_job_id):
             )
             job = db.query(EmbeddingJob).filter_by(id=embedding_job_id).first()
             if job is not None:
+                if job.started_at and job.completed_at:
+                    elapsed = (job.completed_at - job.started_at).total_seconds()
+                    write_csv_row({
+                        "operation": "embedding",
+                        "device": os.getenv("PAM_DEFAULT_DEVICE", "cpu"),
+                        "dataset": str(job.dataset_id),
+                        "N": None,
+                        "time_s": round(elapsed, 3),
+                        "peak_mem_mb": None,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    })
+
                 from app.services.pam_al._embedding_cache import invalidate_embedding_cache
 
                 invalidate_embedding_cache(job.snippet_set_id, job.embedding_model_id)
