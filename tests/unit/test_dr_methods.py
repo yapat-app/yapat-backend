@@ -183,3 +183,16 @@ class TestRunDrIsomap:
         assert dist_matrix.shape == (n, n)
         assert dist_matrix.nnz == n * k
         assert np.all(dist_matrix.data >= 0)
+
+    def test_precomputed_forward_only_knn_produces_correct_shape(self, X_r):
+        """run_dr_isomap works correctly with a forward-only precomputed kNN graph.
+
+        scipy shortest_path(directed=False) treats absent entries as no-edge
+        (not zero-weight), so the forward-only CSR is safe to pass as-is.
+        """
+        from utils.dr_methods import build_knn_graph, run_dr_isomap
+
+        k = 10
+        knn = build_knn_graph(X_r, n_neighbors=k)
+        result = run_dr_isomap(X_r, dimensions=2, n_neighbors=k, precomputed_knn=knn)
+        assert result.shape == (X_r.shape[0], 2)

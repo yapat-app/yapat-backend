@@ -82,8 +82,8 @@ def run_dr_isomap(
             (distances.ravel(), (rows, indices.ravel())), shape=(n, n)
         )
         dist_matrix = sort_graph_by_row_values(dist_matrix, warn_when_not_sorted=False)
-        # sklearn's kneighbors_graph internally requests n_neighbors+1 to exclude
-        # the self-match, so we compensate by passing n_neighbors-1 here.
+        # sklearn internally requests n_neighbors+1 to exclude the self-match,
+        # so we compensate by passing n_neighbors-1 here.
         reducer = Isomap(n_neighbors=n_neighbors - 1, n_components=dimensions, metric="precomputed")
         return reducer.fit_transform(dist_matrix)
     reducer = Isomap(n_neighbors=n_neighbors, n_components=dimensions)
