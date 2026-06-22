@@ -70,6 +70,7 @@ def main():
         X, y = args_inner
         model = MultiLabelLinearClassifier()
         model.create_classifier(n_dim=n_dim, num_classes=args.num_classes)
+        model.model.to(args.device)
         model.fit(
             X=X, y=y,
             epochs=args.epochs,
