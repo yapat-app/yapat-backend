@@ -560,7 +560,7 @@ class VISService:
         #   Isomap    needs k ≥ n_neighbors (90), dense enough to avoid disconnected geodesic graph
         # This is cheaper than the original code which built three separate graphs
         # totalling ~151 neighbours (91 for t-SNE + 30 for UMAP + 30 for Isomap).
-        _knn_neighbors = 90
+        _knn_neighbors = min(90, n - 1)
         knn = build_knn_graph(X_r, n_neighbors=_knn_neighbors)
         logger.info("fpv dataset: kNN graph built n=%s k=%s", n, _knn_neighbors)
 
