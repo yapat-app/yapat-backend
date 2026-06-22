@@ -68,6 +68,8 @@ def main():
             P = rng.random((N, args.num_classes)).astype(np.float32)
             P = P / P.sum(axis=1, keepdims=True)
             P = torch.tensor(P, dtype=torch.float32)
+            X_u = torch.tensor(X_u, dtype=torch.float32)
+            Z_l = torch.tensor(Z_l, dtype=torch.float32)
             return P, X_u, Z_l
 
         run_fn = run_fn_factory(0)
