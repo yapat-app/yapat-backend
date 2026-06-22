@@ -65,8 +65,8 @@ def main():
     def run(N):
         # Use k=N to exercise the index at different result set sizes
         store.search(
+            model_id=args.embedding_model_id,
             query_vector=query_vec,
-            embedding_model_id=args.embedding_model_id,
             k=min(N, args.k),
         )
 
