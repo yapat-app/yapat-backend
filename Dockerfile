@@ -25,7 +25,7 @@ RUN grep -v '^torch' requirements.txt > /tmp/req-base.txt && \
 # Install torch: CPU uses --no-deps to skip ~900 MB of NVIDIA CUDA runtime libs
 # that are unnecessary for CPU inference. GPU gets the full CUDA build.
 RUN if [ "$DEVICE" = "gpu" ]; then \
-        pip install torch --index-url https://download.pytorch.org/whl/cu121; \
+        pip install torch --index-url https://download.pytorch.org/whl/cu128; \
     else \
         pip install torch --no-deps --index-url https://download.pytorch.org/whl/cpu; \
     fi
