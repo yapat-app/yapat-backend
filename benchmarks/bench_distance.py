@@ -12,6 +12,7 @@ Usage:
 import argparse
 
 import numpy as np
+import torch
 
 
 def _parse_args():
@@ -66,6 +67,7 @@ def main():
             # Synthetic probability matrix
             P = rng.random((N, args.num_classes)).astype(np.float32)
             P = P / P.sum(axis=1, keepdims=True)
+            P = torch.tensor(P, dtype=torch.float32)
             return P, X_u, Z_l
 
         run_fn = run_fn_factory(0)
