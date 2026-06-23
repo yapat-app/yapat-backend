@@ -24,7 +24,9 @@ def _parse_args():
     p.add_argument("--repeats", type=int, default=5)
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--labeled-fraction", type=float, default=0.05,
-                   help="Fraction of N used as labeled set for diversity/density")
+                   help="Fraction of N used as labeled set (ignored if --labeled-count set)")
+    p.add_argument("--labeled-count", type=int, default=None,
+                   help="Absolute number of labeled snippets (overrides --labeled-fraction)")
     p.add_argument("--num-classes", type=int, default=10)
     p.add_argument("--density-k", type=int, default=10)
     return p.parse_args()
@@ -61,9 +63,15 @@ def main():
         def setup(N, op=operation):
             idx = rng.choice(N_full, size=N, replace=False) if N < N_full else np.arange(N_full)
             X_u = X_full[idx].copy()
-            N_l = max(1, int(N * args.labeled_fraction))
-            idx_l = rng.choice(N, size=N_l, replace=False)
-            Z_l = X_u[idx_l]
+            N_l = args.labeled_count if args.labeled_count is not None else max(1, int(N * args.labeled_fraction))
+            # labeled set drawn from the remaining pool (outside X_u) if possible
+            remaining = np.setdiff1d(np.arange(N_full), idx)
+            if args.labeled_count is not None and len(remaining) >= N_l:
+                idx_l = rng.choice(remaining, size=N_l, replace=False)
+                Z_l = X_full[idx_l].copy()
+            else:
+                idx_l = rng.choice(N, size=min(N_l, N), replace=False)
+                Z_l = X_u[idx_l]
             # Synthetic probability matrix
             P = rng.random((N, args.num_classes)).astype(np.float32)
             P = P / P.sum(axis=1, keepdims=True)

@@ -28,7 +28,10 @@ def _parse_args():
     p.add_argument("--sizes", default="1000,5000,10000,20000,30687")
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--warmup", type=int, default=1)
-    p.add_argument("--labeled-fraction", type=float, default=0.05)
+    p.add_argument("--labeled-fraction", type=float, default=0.05,
+                   help="Fraction of N used as labeled set (ignored if --labeled-count set)")
+    p.add_argument("--labeled-count", type=int, default=None,
+                   help="Absolute number of labeled snippets (overrides --labeled-fraction)")
     p.add_argument("--density-k", type=int, default=10)
     p.add_argument("--hnsw-m", type=int, default=32)
     return p.parse_args()
@@ -99,9 +102,14 @@ def main():
         for N in sizes:
             idx = rng.choice(N_full, size=N, replace=False) if N < N_full else np.arange(N_full)
             z_u = X_full[idx].copy()
-            N_l = max(1, int(N * args.labeled_fraction))
-            idx_l = rng.choice(N, size=N_l, replace=False)
-            z_l = z_u[idx_l].copy()
+            N_l = args.labeled_count if args.labeled_count is not None else max(1, int(N * args.labeled_fraction))
+            remaining = np.setdiff1d(np.arange(N_full), idx)
+            if args.labeled_count is not None and len(remaining) >= N_l:
+                idx_l = rng.choice(remaining, size=N_l, replace=False)
+                z_l = X_full[idx_l].copy()
+            else:
+                idx_l = rng.choice(N, size=min(N_l, N), replace=False)
+                z_l = z_u[idx_l].copy()
 
             times = []
             for rep in range(args.warmup + args.repeats):
