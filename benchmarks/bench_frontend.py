@@ -61,6 +61,8 @@ def _parse_args():
                    help="Path to save/load Playwright auth storage state")
     p.add_argument("--background-wait", type=float, default=20.0,
                    help="Seconds to wait for all 4 methods to background-fetch after initial load")
+    p.add_argument("--render-sizes", default="1000,5000,10000,20000,30687",
+                   help="Comma-separated N values for render sweep benchmark")
     return p.parse_args()
 
 
@@ -145,23 +147,87 @@ def _time_method_switch(page, method):
     return time.perf_counter() - t0
 
 
+def _time_render_n(page, n: int) -> float:
+    """
+    Slice the already-loaded Plotly traces to N points and measure re-render time.
+    Uses Plotly.react() then gl.readPixels() to force GPU synchronization before
+    stopping the clock — ensures we capture actual WebGL draw time, not just JS
+    scheduling time.
+    Returns elapsed seconds (pure render, no fetch).
+    """
+    elapsed_ms = page.evaluate(
+        """(n) => {
+            const div = document.querySelector('.js-plotly-plot');
+            if (!div || !div.data) return -1;
+
+            // Slice every trace to n points
+            const sliced = div.data.map(trace => {
+                const t = Object.assign({}, trace);
+                if (Array.isArray(t.x)) t.x = t.x.slice(0, n);
+                if (Array.isArray(t.y)) t.y = t.y.slice(0, n);
+                if (Array.isArray(t.customdata)) t.customdata = t.customdata.slice(0, n);
+                if (Array.isArray(t.text)) t.text = t.text.slice(0, n);
+                if (t.marker) {
+                    t.marker = Object.assign({}, t.marker);
+                    if (Array.isArray(t.marker.color)) t.marker.color = t.marker.color.slice(0, n);
+                    if (Array.isArray(t.marker.size))  t.marker.size  = t.marker.size.slice(0, n);
+                    if (t.marker.line) {
+                        t.marker.line = Object.assign({}, t.marker.line);
+                        if (Array.isArray(t.marker.line.color)) t.marker.line.color = t.marker.line.color.slice(0, n);
+                        if (Array.isArray(t.marker.line.width)) t.marker.line.width = t.marker.line.width.slice(0, n);
+                    }
+                }
+                return t;
+            });
+
+            return new Promise(resolve => {
+                const layout = Object.assign({}, div.layout);
+                const config = {displayModeBar: false, responsive: true};
+
+                // newPlot() tears down and recreates the WebGL context from scratch
+                // with only N points — true cold render, not a diff/mask over 30K.
+                const t0 = performance.now();
+                Plotly.newPlot(div, sliced, layout, config).then(() => {
+                    // gl.readPixels() is a synchronous GPU fence — blocks until
+                    // all pending draw calls are flushed to the framebuffer.
+                    const canvas = div.querySelector('canvas.gl-canvas');
+                    if (canvas) {
+                        const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+                        if (gl) {
+                            const px = new Uint8Array(4);
+                            gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+                        }
+                    }
+                    resolve(performance.now() - t0);
+                });
+            });
+        }""",
+        n,
+    )
+    return elapsed_ms / 1000.0  # convert ms → seconds
+
+
 # ---------------------------------------------------------------------------
 # CSV writer
 # ---------------------------------------------------------------------------
 
 def _write_row(operation, times, args):
+    _write_row_n(operation, times, N_POINTS, args)
+
+
+def _write_row_n(operation, times, n, args):
     from benchmarks.stage_timer import write_csv_row
 
     mean_t = statistics.mean(times)
     std_t = statistics.stdev(times) if len(times) > 1 else 0.0
-    throughput = round(N_POINTS / mean_t, 1) if mean_t > 0 else None
+    throughput = round(n / mean_t, 1) if mean_t > 0 else None
 
     write_csv_row(
         {
             "operation": operation,
             "device": "cpu",
             "dataset": args.dataset,
-            "N": N_POINTS,
+            "N": n,
             "repeats": args.repeats,
             "time_mean_s": round(mean_t, 4),
             "time_std_s": round(std_t, 4),
@@ -172,7 +238,7 @@ def _write_row(operation, times, args):
         },
         extra_fields=_BENCH_FIELDS,
     )
-    print(f"  → {operation}: mean={mean_t:.3f}s  std={std_t:.4f}s  ({throughput:,.0f} pts/s)")
+    print(f"  → {operation} N={n:,}: mean={mean_t:.3f}s  std={std_t:.4f}s  ({throughput:,.0f} pts/s)")
 
 
 # ---------------------------------------------------------------------------
@@ -185,16 +251,17 @@ def main():
     from playwright.sync_api import sync_playwright
 
     annotate_url = f"{args.url}/annotate?mode=al&dataset_id={args.dataset_id}"
+    render_sizes = [int(s) for s in args.render_sizes.split(",")]
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=args.headless)
 
         # --- Step 1: Login once, save session ---
-        print("\n[1/3] Logging in...")
+        print("\n[1/4] Logging in...")
         _login(pw, args)
 
         # --- Step 2: Cold page load (PCA is default) ---
-        print(f"\n[2/3] Benchmarking fpv_page_load ({args.repeats} reps, cold context each)...")
+        print(f"\n[2/4] Benchmarking fpv_page_load ({args.repeats} reps, cold context each)...")
         load_times = []
         for rep in range(args.repeats):
             t = _time_page_load(browser, args.auth_state, annotate_url, args)
@@ -203,9 +270,8 @@ def main():
         _write_row("fpv_page_load", load_times, args)
 
         # --- Step 3: Method switch (warm cache) ---
-        print(f"\n[3/3] Benchmarking fpv_switch (warm cache, {args.repeats} reps each)...")
+        print(f"\n[3/4] Benchmarking fpv_switch (warm cache, {args.repeats} reps each)...")
 
-        # Load once and wait for all 4 methods to background-fetch
         ctx = browser.new_context(
             storage_state=args.auth_state,
             viewport={"width": 1440, "height": 900},
@@ -219,18 +285,25 @@ def main():
         for method in _SWITCH_METHODS:
             times = []
             for rep in range(args.repeats):
-                # Reset to PCA between reps so each switch starts from the same state
                 page.click(f"button:has-text('PCA')")
                 page.evaluate(
                     "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
                 )
                 time.sleep(0.3)
-
                 t = _time_method_switch(page, method)
                 times.append(t)
                 print(f"  fpv_switch_{method} rep {rep + 1}/{args.repeats}: {t:.3f}s")
-
             _write_row(f"fpv_switch_{method}", times, args)
+
+        # --- Step 4: Render sweep (slice traces to N, measure WebGL redraw) ---
+        print(f"\n[4/4] Benchmarking fpv_render sweep {render_sizes} ({args.repeats} reps each)...")
+        for n in render_sizes:
+            times = []
+            for rep in range(args.repeats):
+                t = _time_render_n(page, n)
+                times.append(t)
+                print(f"  fpv_render N={n:>6,} rep {rep + 1}/{args.repeats}: {t:.3f}s")
+            _write_row_n("fpv_render", times, n, args)
 
         ctx.close()
         browser.close()

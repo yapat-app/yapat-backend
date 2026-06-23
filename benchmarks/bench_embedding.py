@@ -47,15 +47,20 @@ def main():
     rng = np.random.default_rng(42)
 
     def setup(N):
-        # Generate per-N to avoid OOM (30K × 144K × 4B = ~17 GB if pre-allocated)
-        return rng.uniform(-0.1, 0.1, size=(N, BirdNetEmbedder.WINDOW_SAMPLES)).astype(np.float32)
+        # Just pass N — audio is generated chunk-by-chunk in run() to avoid OOM.
+        # Pre-allocating N=20K would need 20K × 144K × 4B = 11.5 GB.
+        return N
 
-    def run(audio_batch):
-        N = audio_batch.shape[0]
+    def run(N):
         with tf.device(tf_device):
             for start in range(0, N, args.batch_size):
-                chunk = audio_batch[start:start + args.batch_size]
+                end = min(start + args.batch_size, N)
+                chunk = rng.uniform(
+                    -0.1, 0.1,
+                    size=(end - start, BirdNetEmbedder.WINDOW_SAMPLES)
+                ).astype(np.float32)
                 model(chunk)
+                del chunk  # free immediately, peak mem = one batch × 144K × 4B ≈ 147 MB
 
     print(f"\nBenchmarking embedding on {args.device}, dataset={args.dataset}")
     run_benchmark(
