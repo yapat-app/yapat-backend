@@ -44,12 +44,11 @@ def main():
     print("BirdNET model loaded.")
 
     sizes = [int(s.strip()) for s in args.sizes.split(",")]
-    N_max = max(sizes)
     rng = np.random.default_rng(42)
-    audio_full = rng.uniform(-0.1, 0.1, size=(N_max, BirdNetEmbedder.WINDOW_SAMPLES)).astype(np.float32)
 
     def setup(N):
-        return audio_full[:N]
+        # Generate per-N to avoid OOM (30K × 144K × 4B = ~17 GB if pre-allocated)
+        return rng.uniform(-0.1, 0.1, size=(N, BirdNetEmbedder.WINDOW_SAMPLES)).astype(np.float32)
 
     def run(audio_batch):
         N = audio_batch.shape[0]
