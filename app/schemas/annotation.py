@@ -62,6 +62,7 @@ class Annotation(AnnotationBase):
     id: int
     snippet_id: int
     user_id: int
+    username: Optional[str] = None
     taxon_id: str = Field(
         ...,
         description="Namespaced taxon identifier (always present in response)"

@@ -173,7 +173,10 @@ def create_annotation(
     db.refresh(annotation)
     _mirror_to_al(db, annotation)
     db.commit()
-    return annotation
+    from app.schemas.annotation import Annotation as AnnotationSchema
+    result = AnnotationSchema.model_validate(annotation)
+    result.username = current_user.username
+    return result
 
 
 @router.post("/batch", response_model=List[Annotation], status_code=status.HTTP_201_CREATED)
@@ -285,7 +288,13 @@ def create_annotations_batch(
     for annotation in created_annotations:
         _mirror_to_al(db, annotation)
     db.commit()
-    return created_annotations
+    from app.schemas.annotation import Annotation as AnnotationSchema
+    result = []
+    for ann in created_annotations:
+        obj = AnnotationSchema.model_validate(ann)
+        obj.username = current_user.username
+        result.append(obj)
+    return result
 
 
 @router.get("/", response_model=List[Annotation])
@@ -319,8 +328,8 @@ def read_annotations(
     max_limit = 2000 if parsed_id_list else 500
     eff_limit = min(limit, max_limit)
 
-    query = db.query(AnnotationModel)
-    
+    query = db.query(AnnotationModel).join(User, AnnotationModel.user_id == User.id)
+
     if parsed_id_list:
         query = query.filter(AnnotationModel.snippet_id.in_(parsed_id_list))
     elif snippet_id:
@@ -331,10 +340,17 @@ def read_annotations(
         query = query.filter(AnnotationModel.user_id == user_id)
     if dataset_id:
         # Join through Snippet -> Recording -> Dataset to filter by dataset_id
-        query = query.join(Snippet).join(Recording).filter(Recording.dataset_id == dataset_id)
-    
-    annotations = query.offset(skip).limit(eff_limit).all()
-    return annotations
+        query = query.join(Snippet, AnnotationModel.snippet_id == Snippet.id).join(Recording).filter(Recording.dataset_id == dataset_id)
+
+    rows = query.offset(skip).limit(eff_limit).all()
+
+    from app.schemas.annotation import Annotation as AnnotationSchema
+    result = []
+    for ann in rows:
+        obj = AnnotationSchema.model_validate(ann)
+        obj.username = ann.user.username if ann.user else None
+        result.append(obj)
+    return result
 
 
 @router.get("/{annotation_id}", response_model=Annotation)
@@ -347,7 +363,10 @@ def read_annotation(
     annotation = db.query(AnnotationModel).filter(AnnotationModel.id == annotation_id).first()
     if not annotation:
         raise HTTPException(status_code=404, detail="Annotation not found")
-    return annotation
+    from app.schemas.annotation import Annotation as AnnotationSchema
+    result = AnnotationSchema.model_validate(annotation)
+    result.username = annotation.user.username if annotation.user else None
+    return result
 
 
 @router.delete("/{annotation_id}", status_code=status.HTTP_204_NO_CONTENT)
