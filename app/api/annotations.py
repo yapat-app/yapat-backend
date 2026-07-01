@@ -385,13 +385,6 @@ def delete_annotation(
     if not annotation:
         raise HTTPException(status_code=404, detail="Annotation not found")
     
-    # Check ownership - users can only delete their own annotations
-    if annotation.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only delete your own annotations"
-        )
-
     _unmirror_from_al(db, annotation)
     db.delete(annotation)
     db.commit()
