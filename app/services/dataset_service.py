@@ -4,8 +4,10 @@ No snippet generation yet.
 """
 
 import hashlib
+import logging
 import os
-from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple
 
 import soundfile as sf
 from sqlalchemy import exists, and_, or_
@@ -26,6 +28,8 @@ from app.utils.recording_filename_metadata import (
     parse_location_from_filename,
     parse_datetime_from_filename,
 )
+
+logger = logging.getLogger(__name__)
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
 
@@ -400,6 +404,16 @@ class DatasetService:
     # Recording discovery
     # ---------------------------------------------------------
 
+    # Number of records to accumulate before issuing a commit. Bounds how
+    # much hashing/work would need to be redone if the task dies mid-scan,
+    # while still cutting per-file commit overhead by ~batch-size-fold.
+    SCAN_COMMIT_BATCH_SIZE = 250
+
+    # Audio header reads + checksum hashing are I/O-bound (and hashlib
+    # releases the GIL during update()), so a thread pool speeds this up
+    # substantially without touching the DB from worker threads.
+    SCAN_HASH_WORKERS = 8
+
     def scan_recordings(self, dataset: DatasetModel) -> List[RecordingModel]:
         """
         Walk dataset.source_uri (relative to DATA_ROOT),
@@ -414,12 +428,53 @@ class DatasetService:
             raise ValueError(f"Invalid dataset path: {dataset_path}")
 
         audio_files = self._scan_audio_files(dataset_path)
-        new_recordings: List[RecordingModel] = []
+        if not audio_files:
+            return []
 
-        for fpath in audio_files:
-            rec = self._get_or_create_recording(dataset, fpath)
-            if rec is not None:
-                new_recordings.append(rec)
+        # Resolve relative (DB-stored) paths up front, then filter out files
+        # we already have in a single query instead of one SELECT per file.
+        candidates = [
+            (fpath, self._relative_to_data_root(fpath, DATA_ROOT))
+            for fpath in audio_files
+        ]
+        existing_paths = self._existing_file_paths(dataset.id)
+        to_process = [
+            (fpath, rel) for fpath, rel in candidates if rel not in existing_paths
+        ]
+        if not to_process:
+            return []
+
+        # Read audio headers + compute checksums concurrently. Threads only
+        # do file I/O/CPU work and return plain data — the DB session stays
+        # single-threaded on the main thread below.
+        file_infos = self._read_file_infos_parallel([fpath for fpath, _ in to_process])
+
+        new_recordings: List[RecordingModel] = []
+        batch: List[RecordingModel] = []
+
+        for fpath, relative_path in to_process:
+            info = file_infos.get(fpath)
+            if info is None:
+                continue  # unreadable/failed file; already logged, skip it
+
+            duration, sample_rate, checksum = info
+            file_name = os.path.basename(fpath)
+            rec = RecordingModel(
+                dataset_id=dataset.id,
+                file_path=relative_path,
+                file_name=file_name,
+                duration=duration,
+                sample_rate=sample_rate,
+                extra_metadata=self._location_metadata_from_filename(file_name),
+                audio_sha256=checksum,
+            )
+            batch.append(rec)
+            new_recordings.append(rec)
+
+            if len(batch) >= self.SCAN_COMMIT_BATCH_SIZE:
+                self._flush_batch(batch)
+
+        self._flush_batch(batch)
 
         return new_recordings
 
@@ -548,55 +603,72 @@ class DatasetService:
                 h.update(chunk)
         return h.hexdigest()
 
-    def _get_or_create_recording(
-            self, dataset: DatasetModel, filepath: str
-    ) -> Optional[RecordingModel]:
-        # Store relative path (relative to DATA_ROOT) for portability
-        DATA_ROOT = settings.DATA_ROOT or "/data"
-        if filepath.startswith(DATA_ROOT):
-            relative_path = os.path.relpath(filepath, DATA_ROOT)
-        else:
-            relative_path = filepath
-        
-        existing = (
-            self.db.query(RecordingModel)
-            .filter(
-                RecordingModel.dataset_id == dataset.id,
-                RecordingModel.file_path == relative_path,
-            )
-            .first()
-        )
-        if existing:
-            return None
+    @staticmethod
+    def _relative_to_data_root(filepath: str, data_root: str) -> str:
+        """Store paths relative to DATA_ROOT for portability, where possible."""
+        if filepath.startswith(data_root):
+            return os.path.relpath(filepath, data_root)
+        return filepath
 
-        # Extract duration & sample rate from audio
+    def _existing_file_paths(self, dataset_id: int) -> set:
+        """
+        Fetch every file_path already recorded for this dataset in one query,
+        so per-file existence checks become in-memory set lookups instead of
+        one SELECT per file.
+        """
+        rows = (
+            self.db.query(RecordingModel.file_path)
+            .filter(RecordingModel.dataset_id == dataset_id)
+            .all()
+        )
+        return {row[0] for row in rows}
+
+    def _read_file_info(self, filepath: str) -> Optional[Tuple[float, int, str]]:
+        """
+        Read audio header (duration/sample rate) and compute the checksum for
+        one file. Pure file I/O + CPU work — safe to run off the main thread;
+        does not touch the DB session.
+        """
         try:
             info = sf.info(filepath)
             duration = float(info.frames) / float(info.samplerate)
             sample_rate = int(info.samplerate)
         except Exception as e:
-            # Log error but skip unreadable audio files
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(f"Failed to read audio file {filepath}: {e}")
             return None
 
         checksum = self._compute_checksum(filepath)
-        file_name = os.path.basename(filepath)
-        extra_metadata = self._location_metadata_from_filename(file_name)
+        return duration, sample_rate, checksum
 
-        rec = RecordingModel(
-            dataset_id=dataset.id,
-            file_path=relative_path,  # Store relative path
-            file_name=file_name,
-            duration=duration,
-            sample_rate=sample_rate,
-            extra_metadata=extra_metadata,
-            audio_sha256=checksum,
-        )
-        self.db.add(rec)
+    def _read_file_infos_parallel(
+            self, filepaths: List[str]
+    ) -> Dict[str, Optional[Tuple[float, int, str]]]:
+        results: Dict[str, Optional[Tuple[float, int, str]]] = {}
+        if not filepaths:
+            return results
+
+        with ThreadPoolExecutor(max_workers=self.SCAN_HASH_WORKERS) as executor:
+            future_to_path = {
+                executor.submit(self._read_file_info, fpath): fpath
+                for fpath in filepaths
+            }
+            for future in as_completed(future_to_path):
+                fpath = future_to_path[future]
+                try:
+                    results[fpath] = future.result()
+                except Exception as e:
+                    logger.warning(f"Unexpected error reading {fpath}: {e}")
+                    results[fpath] = None
+
+        return results
+
+    def _flush_batch(self, batch: List[RecordingModel]) -> None:
+        """Commit accumulated Recording rows as one batch and clear it in place."""
+        if not batch:
+            return
+        self.db.add_all(batch)
         self.db.commit()
-        self.db.refresh(rec)
+        batch.clear()
         return rec
 
     # ---------------------------------------------------------
