@@ -35,17 +35,16 @@ def session_scope():
 # scan_dataset walks and hashes every file in dataset.source_uri. On very
 # large datasets (hundreds of GB, tens of thousands of files) this can run
 # for hours even with batched writes and parallel hashing, well past the
-# app-wide Celery default (CELERY_TASK_SOFT_TIME_LIMIT=3300s). Give it its
-# own generous budget instead of raising the default for every task queue.
-_SCAN_TIME_LIMIT_SECONDS = 90000        # 25 h hard kill
-_SCAN_SOFT_TIME_LIMIT_SECONDS = 86400   # 24 h soft limit
-
-
+# app-wide Celery default (CELERY_TASK_SOFT_TIME_LIMIT). Give it its own,
+# separately configurable budget (SCAN_TASK_TIME_LIMIT / _SOFT_) instead of
+# raising the default for every task queue. Read from settings at task
+# registration time, so changing .env requires a worker restart to take
+# effect — same as the app-wide CELERY_TASK_TIME_LIMIT.
 @celery_app.task(
     bind=True,
     name="app.tasks.processing_tasks.scan_dataset",
-    time_limit=_SCAN_TIME_LIMIT_SECONDS,
-    soft_time_limit=_SCAN_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=settings.SCAN_TASK_TIME_LIMIT,
+    soft_time_limit=settings.SCAN_TASK_SOFT_TIME_LIMIT,
 )
 def scan_dataset(self, dataset_id: int):
     """

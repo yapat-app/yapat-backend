@@ -125,6 +125,11 @@ services:
       - CELERY_TASK_SOFT_TIME_LIMIT=${CELERY_TASK_SOFT_TIME_LIMIT:-3300}
       # run_embedding's chord fan-out chunk size (see app/tasks/embedding_tasks.py).
       - EMBEDDING_CHORD_CHUNK_SIZE=${EMBEDDING_CHORD_CHUNK_SIZE:-25}
+      # scan_dataset's own, longer time budget (see app/tasks/processing_tasks.py).
+      # Only celery-worker runs the `processing` queue, so this only needs to
+      # be set here. Defaults match the previous hardcoded values.
+      - SCAN_TASK_TIME_LIMIT=${SCAN_TASK_TIME_LIMIT:-90000}
+      - SCAN_TASK_SOFT_TIME_LIMIT=${SCAN_TASK_SOFT_TIME_LIMIT:-86400}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
       # Read-write so Celery worker can save checkpoints when retraining
