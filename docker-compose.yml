@@ -115,6 +115,8 @@ services:
       # be set here. Defaults match the previous hardcoded values.
       - SCAN_TASK_TIME_LIMIT=${SCAN_TASK_TIME_LIMIT:-90000}
       - SCAN_TASK_SOFT_TIME_LIMIT=${SCAN_TASK_SOFT_TIME_LIMIT:-86400}
+      # run_embedding's chord fan-out chunk size (see app/tasks/embedding_tasks.py).
+      - EMBEDDING_CHORD_CHUNK_SIZE=${EMBEDDING_CHORD_CHUNK_SIZE:-25}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
       # Read-write so Celery worker can save checkpoints when retraining
