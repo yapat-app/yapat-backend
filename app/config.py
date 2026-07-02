@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     CELERY_TASK_TIME_LIMIT: int = 3600  # 1 hour max per task
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes limit
 
+    # scan_dataset gets its own, longer time budget instead of the app-wide
+    # default above — it can legitimately run for hours on very large
+    # datasets (hundreds of GB, tens of thousands of files).
+    SCAN_TASK_TIME_LIMIT: int = 90000       # 25 h hard kill
+    SCAN_TASK_SOFT_TIME_LIMIT: int = 86400  # 24 h soft limit
+
     # OE_YAPAT Service (Custom Taxonomy Generation)
     OE_YAPAT_SERVICE_URL: str = "http://localhost:8002"  
     OE_YAPAT_API_KEY: Optional[str] = None
