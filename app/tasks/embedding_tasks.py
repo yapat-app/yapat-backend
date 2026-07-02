@@ -3,11 +3,12 @@ Celery tasks for the embedding pipeline (SnippetSet architecture).
 """
 import os
 import time
-from typing import List
+from typing import Dict, List, Union
 
-from celery import chord, group
+from celery import chord
 
 from app.celery_app import celery_app
+from app.config import settings
 from app.database import SessionLocal
 from app.models.embedding import (
     EmbeddingJob,
@@ -205,18 +206,22 @@ def run_embedding(self, embedding_job_id: int):
         window = snippet_set.window_size
         step = snippet_set.step_size
 
-        # --- Fetch dataset recordings ---
-        recordings = db.query(Recording).filter(
+        # --- Fetch dataset recordings (only the columns segmentation needs) ---
+        recordings = db.query(
+            Recording.id, Recording.duration
+        ).filter(
             Recording.dataset_id == job.dataset_id
         ).all()
 
         # --- Check if snippets already exist for this snippet_set ---
         existing_snippets = (
-            db.query(Snippet)
+            db.query(
+                Snippet.id, Snippet.recording_id, Snippet.start_time, Snippet.end_time
+            )
             .filter(Snippet.snippet_set_id == snippet_set.id)
             .all()
         )
-        
+
         # Create a dictionary mapping (recording_id, start_time, end_time) -> snippet_id for O(1) lookup
         existing_snippet_map = {
             (s.recording_id, s.start_time, s.end_time): s.id
@@ -224,22 +229,28 @@ def run_embedding(self, embedding_job_id: int):
         }
 
         # --- Segmentation: Create snippets grouped by recording (only if they don't exist) ---
-        recording_snippet_map = {}  # recording_id -> list of snippet_ids
+        # Snippet objects for keys not already in existing_snippet_map are collected and
+        # flushed once at the end (instead of once per snippet) so a dataset with tens of
+        # thousands of recordings doesn't pay for a DB round-trip per snippet. Slots hold
+        # either an existing snippet_id (int) or the pending Snippet object itself, which is
+        # resolved to a real id right after the single flush below.
+        recording_snippet_map: Dict[int, List[Union[int, Snippet]]] = {}
+        new_snippets: List[Snippet] = []
         total_snippets = 0
 
         with stage_timer("snippet_gen", "cpu", str(job.dataset_id)) as _snip_timer:
             for rec in recordings:
                 duration = rec.duration or 0.0
                 t = 0.0
-                recording_snippets = []
+                recording_slots: List[Union[int, Snippet]] = []
 
                 while t + window <= duration:
                     snippet_key = (rec.id, t, t + window)
 
-                    # Check if snippet already exists
-                    if snippet_key in existing_snippet_map:
+                    existing_id = existing_snippet_map.get(snippet_key)
+                    if existing_id is not None:
                         # Reuse existing snippet
-                        recording_snippets.append(existing_snippet_map[snippet_key])
+                        recording_slots.append(existing_id)
                     else:
                         # Create new snippet only if it doesn't exist
                         snippet = Snippet(
@@ -249,17 +260,28 @@ def run_embedding(self, embedding_job_id: int):
                             end_time=t + window,
                             duration=window,
                         )
-                        db.add(snippet)
-                        db.flush()
-                        recording_snippets.append(snippet.id)
-                        # Add to map to avoid duplicates in same run
-                        existing_snippet_map[snippet_key] = snippet.id
+                        new_snippets.append(snippet)
+                        recording_slots.append(snippet)
+                        # Avoid creating duplicates for the same key within this run
+                        existing_snippet_map[snippet_key] = snippet
 
                     t += step
 
-                if recording_snippets:
-                    recording_snippet_map[rec.id] = recording_snippets
-                    total_snippets += len(recording_snippets)
+                if recording_slots:
+                    recording_snippet_map[rec.id] = recording_slots
+                    total_snippets += len(recording_slots)
+
+            # Single batched round-trip for every new snippet in this run instead of
+            # one flush per snippet.
+            if new_snippets:
+                db.add_all(new_snippets)
+                db.flush()
+
+            # Resolve pending Snippet objects to their now-populated ids.
+            for rec_id, slots in recording_snippet_map.items():
+                recording_snippet_map[rec_id] = [
+                    slot.id if isinstance(slot, Snippet) else slot for slot in slots
+                ]
 
             _snip_timer.n = total_snippets
 
@@ -275,22 +297,25 @@ def run_embedding(self, embedding_job_id: int):
             dataset.default_snippet_set_id = snippet_set.id
             db.commit()
 
-        # --- OPTIMIZED: One task per RECORDING instead of per snippet ---
-       
-        task_group = group(
-            generate_embeddings_for_recording.s(
-                recording_id=recording_id,
-                snippet_ids=snippet_ids,
-                model_id=model.id,
-                job_id=job.id
-            )
-            for recording_id, snippet_ids in recording_snippet_map.items()
-        )
+        # --- One chord child per CHUNK of recordings instead of per recording ---
+        # A dataset with tens of thousands of recordings would otherwise dispatch tens of
+        # thousands of individual chord entries, which is dominated by Redis chord-counter
+        # and broker overhead rather than actual worker concurrency (celery-worker runs a
+        # small fixed --concurrency). generate_embeddings_for_recording.chunks(...) batches
+        # several recordings into each task message; each chunk task still calls the same
+        # per-recording function once per recording, in-process.
+        chunked_group = generate_embeddings_for_recording.chunks(
+            (
+                (recording_id, snippet_ids, model.id, job.id)
+                for recording_id, snippet_ids in recording_snippet_map.items()
+            ),
+            settings.EMBEDDING_CHORD_CHUNK_SIZE,
+        ).group()
 
         # Use a chord to finalize after all recording tasks complete
         finalize = finalize_embedding_job.s(job.id)
 
-        chord(task_group)(finalize)
+        chord(chunked_group)(finalize)
 
         return {
             "status": "scheduled",
@@ -317,7 +342,17 @@ def finalize_embedding_job(self, results, embedding_job_id):
     service = EmbeddingService(db)
 
     try:
-        failures = [r for r in results if r.get("status") != "success"]
+        # Each chord child is now a chunk of several recordings (see run_embedding), so
+        # `results` is a list of per-chunk result lists rather than a flat list of
+        # per-recording dicts. Flatten before inspecting status.
+        flat_results = []
+        for r in results:
+            if isinstance(r, list):
+                flat_results.extend(r)
+            else:
+                flat_results.append(r)
+
+        failures = [r for r in flat_results if r.get("status") != "success"]
 
         if failures:
             service.update_job_status(
