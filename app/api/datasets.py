@@ -345,10 +345,7 @@ def delete_dataset(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    is_admin = current_user.role == UserRole.ADMIN
-    is_owner = True
-
-    if not (is_admin or is_owner):
+    if not svc.user_can_manage_dataset(current_user, dataset):
         raise HTTPException(status_code=403, detail="Not authorized to delete dataset")
 
     svc.delete_dataset(dataset)
