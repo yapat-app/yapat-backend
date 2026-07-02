@@ -2,6 +2,7 @@ from pathlib import Path
 
 import librosa
 import numpy as np
+import tensorflow as tf
 from tensorflow.keras.layers import TFSMLayer
 
 
@@ -15,6 +16,7 @@ class BirdNetEmbedder:
     """
 
     _instance = None
+    _gpu_memory_growth_configured = False
     _model_path = (
             Path(__file__).resolve().parent
             / ".." / "assets" / "models" / "birdnet"
@@ -24,9 +26,36 @@ class BirdNetEmbedder:
     WINDOW_SAMPLES = 144000  # 3 seconds
 
     @classmethod
+    def _configure_gpu_memory_growth(cls):
+        """
+        Without this, TensorFlow claims nearly all memory on the first visible
+        GPU as soon as it runs its first op — for every process that touches
+        it. Celery's prefork pool (--concurrency) forks multiple worker
+        processes, each independently loading this model; the first one to
+        initialize can grab the entire GPU, starving sibling processes of
+        memory for cuFFT scratch buffers ("Failed to create cuFFT batched
+        plan"). Memory growth makes each process allocate incrementally
+        instead, so multiple worker processes can actually share one GPU.
+        Must run before any GPU op executes, so it's called first thing in
+        instance(), not lazily at inference time.
+        """
+        if cls._gpu_memory_growth_configured:
+            return
+        cls._gpu_memory_growth_configured = True
+        try:
+            gpus = tf.config.experimental.list_physical_devices("GPU")
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError:
+            # Only settable before GPUs are initialized; if something already
+            # triggered initialization first, there's nothing more to do here.
+            pass
+
+    @classmethod
     def instance(cls):
         """Load BirdNET SavedModel endpoint once per worker."""
         if cls._instance is None:
+            cls._configure_gpu_memory_growth()
             cls._instance = TFSMLayer(
                 str(cls._model_path),
                 call_endpoint="embeddings"  # Your endpoint name
