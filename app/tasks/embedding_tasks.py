@@ -287,9 +287,14 @@ def run_embedding(self, embedding_job_id: int):
 
         db.commit()
 
-        # --- Mark SnippetSet as READY after snippet materialization ---
-        snippet_set.status = SnippetSetStatus.READY
-        db.commit()
+        # --- SnippetSet stays PENDING here on purpose ---
+        # Segmentation completing does not mean embeddings exist yet — the actual
+        # per-recording embedding generation happens asynchronously below via the
+        # chunked chord, and can fail/be killed partway through. Marking READY this
+        # early made `is_ready_for_feed` (and the "Generate Embeddings" UI) lie about
+        # datasets whose embedding job never actually finished. The real READY/FAILED
+        # transition now happens in finalize_embedding_job, once every chunk's result
+        # is actually known.
 
         # --- Set as default if no default exists ---
         dataset = db.query(Dataset).filter_by(id=job.dataset_id).first()
@@ -354,18 +359,30 @@ def finalize_embedding_job(self, results, embedding_job_id):
 
         failures = [r for r in flat_results if r.get("status") != "success"]
 
+        job = db.query(EmbeddingJob).filter_by(id=embedding_job_id).first()
+        snippet_set = job.snippet_set if job is not None else None
+
         if failures:
             service.update_job_status(
                 embedding_job_id,
                 EmbeddingJobStatus.FAILED,
                 message=f"{len(failures)} snippet failures",
             )
+            # Embeddings didn't actually finish — don't let the SnippetSet claim
+            # READY regardless of how far segmentation got in run_embedding.
+            if snippet_set is not None:
+                snippet_set.status = SnippetSetStatus.FAILED
+                db.commit()
         else:
             service.update_job_status(
                 embedding_job_id,
                 EmbeddingJobStatus.COMPLETED
             )
-            job = db.query(EmbeddingJob).filter_by(id=embedding_job_id).first()
+            # Only now, with every chunk confirmed successful, is the SnippetSet
+            # genuinely ready for feed generation.
+            if snippet_set is not None:
+                snippet_set.status = SnippetSetStatus.READY
+                db.commit()
             if job is not None:
                 if job.started_at and job.completed_at:
                     elapsed = (job.completed_at - job.started_at).total_seconds()
