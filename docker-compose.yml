@@ -101,6 +101,15 @@ services:
       - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
       - PAM_CHECKPOINTS_DIR=/app/models_AL/pam/checkpoints
       - PAM_DEFAULT_DEVICE=${PAM_DEFAULT_DEVICE:-cpu}
+      # App-wide Celery task time limits. Was previously not passed through at
+      # all, so .env overrides on the server were silently ignored and every
+      # task got config.py's hardcoded defaults (3600s/3300s) regardless of
+      # what the operator set. Defaults here match those, so this is a no-op
+      # unless explicitly overridden. Note: scan_dataset has its own longer,
+      # per-task limit (see app/tasks/processing_tasks.py) since it can run
+      # for hours on very large datasets — this pair governs every other task.
+      - CELERY_TASK_TIME_LIMIT=${CELERY_TASK_TIME_LIMIT:-3600}
+      - CELERY_TASK_SOFT_TIME_LIMIT=${CELERY_TASK_SOFT_TIME_LIMIT:-3300}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
       # Read-write so Celery worker can save checkpoints when retraining
