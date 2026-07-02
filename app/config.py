@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     CELERY_TASK_TIME_LIMIT: int = 3600  # 1 hour max per task
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes limit
 
+    # run_embedding dispatches one chord child per this many recordings,
+    # instead of one per recording. Keeps chord/broker bookkeeping (Redis
+    # counters, task messages) proportional to worker concurrency rather
+    # than dataset size — a dataset with tens of thousands of recordings
+    # would otherwise create tens of thousands of chord entries.
+    EMBEDDING_CHORD_CHUNK_SIZE: int = 25
+
+
     # OE_YAPAT Service (Custom Taxonomy Generation)
     OE_YAPAT_SERVICE_URL: str = "http://localhost:8002"  
     OE_YAPAT_API_KEY: Optional[str] = None
