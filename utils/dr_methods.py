@@ -42,16 +42,27 @@ def build_knn_graph(
     embeddings: np.ndarray,
     n_neighbors: int = 30,
 ) -> tuple[np.ndarray, np.ndarray, object]:
-    """Compute kNN graph with pynndescent (UMAP's own backend).
+    """Compute kNN graph via the shared FAISS-backed ANN abstraction
+    (utils/ann_backend.py), replacing the previous pynndescent backend.
+
+    Self-search (embeddings queried against themselves), so each row
+    includes itself as neighbour 0 at distance 0 -- same convention
+    pynndescent used, required by UMAP's precomputed_knn and openTSNE's
+    PerplexityBasedNN. Auto-selects exact (Flat) vs approximate (HNSW)
+    search based on embeddings.shape[0] via ann_backend.DEFAULT_HNSW_MIN_N;
+    below that size (the common case for this codebase's dataset sizes
+    today) this is exact, i.e. equivalent to the old pynndescent output for
+    correctness purposes.
 
     Returns (indices, distances, index) where indices and distances are each
-    of shape (n, n_neighbors). The NNDescent index is included as the third
-    element so UMAP can receive the full 3-tuple via precomputed_knn.
+    of shape (n, n_neighbors). The FAISS index is included as the third
+    element so UMAP can receive the full 3-tuple via precomputed_knn (it is
+    not currently used for out-of-sample transform).
     """
-    from pynndescent import NNDescent
-    index = NNDescent(embeddings, n_neighbors=n_neighbors)
-    indices, distances = index.neighbor_graph
-    return indices, distances, index
+    from utils.ann_backend import nearest_neighbors
+    embeddings = np.asarray(embeddings, dtype="float32")
+    k = min(n_neighbors, embeddings.shape[0])
+    return nearest_neighbors(embeddings, embeddings, k=k)
 
 
 class _PrecomputedKNNIndex:
@@ -112,10 +123,28 @@ def run_dr_umap(
     embeddings,
     dimensions: int,
     n_neighbors: Optional[int] = 30,
-    min_dist: Optional[float] = 0.25,
+    min_dist: Optional[float] = 0.6,
     low_memory: bool = False,
     precomputed_knn: Optional[tuple] = None,
 ):
+    """
+    min_dist default raised from umap-learn's own library default (0.25) to
+    0.6. Both UMAP and t-SNE already use non-random, structure-aware
+    initialization here (UMAP's own "spectral" default, openTSNE's own "pca"
+    default) -- per Kobak & Linderman (Nat. Biotechnol. 2021), initialization
+    matters more than algorithm choice for preserving global structure, so
+    that part was already right. What was missing is contrast: at
+    library-default settings, UMAP and t-SNE sit close together on the
+    attraction/repulsion spectrum (Bohm, Berens & Kobak, JMLR 2022) and tend
+    to produce visibly similar layouts. A low min_dist packs points into
+    tight, well-separated local clumps (favoring local/cluster structure,
+    t-SNE's niche); raising it spreads points out, favoring preservation of
+    relative global distances instead. t-SNE's perplexity is left as-is (its
+    role here is local neighbourhood fidelity), so the pair now sits at
+    genuinely different points on the spectrum rather than two similar-
+    looking views. This is a parameter choice, not a proof -- worth an eyeball
+    check against real data (e.g. dataset 9) once run, not just the theory.
+    """
     from umap import UMAP
     kwargs = dict(n_components=dimensions, n_neighbors=n_neighbors, min_dist=min_dist)
     if precomputed_knn is not None:
