@@ -78,7 +78,17 @@ services:
       args:
         DEVICE: ${DEVICE:-cpu}
     container_name: yapat-celery-worker
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=default,embeddings,processing,exports
+    # --max-tasks-per-child: without this, a fork-pool child process lives
+    # forever and its memory footprint only ever grows (model loads, audio
+    # decoding, TF/CUDA caching, etc. never get released). We've observed
+    # this container's memory climbing to the 32G cgroup limit and getting
+    # SIGKILL'd by the kernel OOM killer roughly every 15-20 minutes, all
+    # day, killing whatever task happened to be running at that instant
+    # (visible in Flower as a task silently getting redelivered with fresh
+    # Received/Started timestamps and no error). Recycling a child after N
+    # tasks bounds its memory growth and replaces it at a clean task
+    # boundary instead of letting the kernel kill it mid-task.
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=default,embeddings,processing,exports --max-tasks-per-child=${CELERY_WORKER_MAX_TASKS_PER_CHILD:-100}
     depends_on:
       db:
         condition: service_healthy
