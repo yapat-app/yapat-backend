@@ -348,39 +348,80 @@ class VISService:
     # Dataset-level projections (computed from EmbeddingVector once)
     # ------------------------------------------------------------------
     def generate_fpv_for_dataset_embeddings(self, body: FPVDatasetRequest) -> FPVResponse:
-        # Column-only query (not full EmbeddingVector/Snippet ORM entities): at
-        # dataset sizes in the hundreds of thousands to low millions of
-        # snippets, hydrating two full ORM object graphs per row costs far
-        # more time/memory than the vectors themselves. We only ever use
-        # Snippet.id and EmbeddingVector.vector, so select just those.
-        query = (
-            self.db.query(EmbeddingVector.vector, Snippet.id)
-            .join(Snippet, Snippet.id == EmbeddingVector.snippet_id)
-            .join(SnippetSet, SnippetSet.id == Snippet.snippet_set_id)
+        # DR is keyed by dataset_id and can span *all* SnippetSets under that
+        # dataset for the given embedding_model_id, whereas AL's embedding
+        # cache (app/services/pam_al/_embedding_cache.py) is keyed by a single
+        # snippet_set_id. A dataset normally has exactly one SnippetSet per
+        # embedding_model_id (SnippetSet models "dataset x embedding_model"),
+        # but the schema doesn't enforce that -- re-segmentation can leave a
+        # second row behind. Reusing the cache is only safe to do silently in
+        # the common single-snippet-set case; if we find zero or more than
+        # one, fall back to the direct query rather than risk silently
+        # dropping snippets that belong to a second, non-default SnippetSet.
+        snippet_set_ids = [
+            row[0]
+            for row in self.db.query(SnippetSet.id)
             .filter(SnippetSet.dataset_id == body.dataset_id)
-            .filter(EmbeddingVector.embedding_model_id == body.embedding_model_id)
-            .order_by(Snippet.id.asc())
-        )
+            .filter(SnippetSet.embedding_model_id == body.embedding_model_id)
+            .all()
+        ]
 
-        # Stream via a server-side cursor so the driver doesn't buffer the
-        # entire result set client-side before we can start building X. Only
-        # safe/supported on Postgres (tests run against sqlite in-memory).
-        if self.db.get_bind().dialect.name == "postgresql":
-            query = query.execution_options(stream_results=True)
+        vectors: list
+        snippet_ids: list[int]
 
-        vectors: list = []
-        snippet_ids: list[int] = []
-        for vector, snippet_id in query.yield_per(5000):
-            vectors.append(vector)
-            snippet_ids.append(snippet_id)
+        if len(snippet_set_ids) == 1:
+            from app.services.pam_al._embedding_cache import load_embeddings_cached
 
-        if not vectors:
-            raise ValueError(
-                f"No embeddings found for dataset_id={body.dataset_id}, "
-                f"embedding_model_id={body.embedding_model_id}."
+            logger.info(
+                "generate_fpv_for_dataset_embeddings: reusing AL embedding cache "
+                "(snippet_set_id=%s, embedding_model_id=%s) for dataset_id=%s",
+                snippet_set_ids[0], body.embedding_model_id, body.dataset_id,
+            )
+            X_cached, snippet_rows = load_embeddings_cached(
+                self.db, snippet_set_ids[0], body.embedding_model_id,
+            )
+            X = np.asarray(X_cached, dtype=np.float32)
+            snippet_ids = [row["snippet_id"] for row in snippet_rows]
+        else:
+            logger.info(
+                "generate_fpv_for_dataset_embeddings: %d SnippetSet(s) found for "
+                "dataset_id=%s, embedding_model_id=%s (expected exactly 1) -- "
+                "skipping embedding cache, querying directly",
+                len(snippet_set_ids), body.dataset_id, body.embedding_model_id,
+            )
+            # Column-only query (not full EmbeddingVector/Snippet ORM entities): at
+            # dataset sizes in the hundreds of thousands to low millions of
+            # snippets, hydrating two full ORM object graphs per row costs far
+            # more time/memory than the vectors themselves. We only ever use
+            # Snippet.id and EmbeddingVector.vector, so select just those.
+            query = (
+                self.db.query(EmbeddingVector.vector, Snippet.id)
+                .join(Snippet, Snippet.id == EmbeddingVector.snippet_id)
+                .join(SnippetSet, SnippetSet.id == Snippet.snippet_set_id)
+                .filter(SnippetSet.dataset_id == body.dataset_id)
+                .filter(EmbeddingVector.embedding_model_id == body.embedding_model_id)
+                .order_by(Snippet.id.asc())
             )
 
-        X = np.array(vectors, dtype=np.float32)
+            # Stream via a server-side cursor so the driver doesn't buffer the
+            # entire result set client-side before we can start building X. Only
+            # safe/supported on Postgres (tests run against sqlite in-memory).
+            if self.db.get_bind().dialect.name == "postgresql":
+                query = query.execution_options(stream_results=True)
+
+            vectors = []
+            snippet_ids = []
+            for vector, snippet_id in query.yield_per(5000):
+                vectors.append(vector)
+                snippet_ids.append(snippet_id)
+
+            if not vectors:
+                raise ValueError(
+                    f"No embeddings found for dataset_id={body.dataset_id}, "
+                    f"embedding_model_id={body.embedding_model_id}."
+                )
+
+            X = np.array(vectors, dtype=np.float32)
 
         # Close the read transaction before long-running DR (PCA/UMAP/t-SNE).
         self.db.commit()
