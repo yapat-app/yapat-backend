@@ -348,24 +348,39 @@ class VISService:
     # Dataset-level projections (computed from EmbeddingVector once)
     # ------------------------------------------------------------------
     def generate_fpv_for_dataset_embeddings(self, body: FPVDatasetRequest) -> FPVResponse:
-        rows = (
-            self.db.query(EmbeddingVector, Snippet)
+        # Column-only query (not full EmbeddingVector/Snippet ORM entities): at
+        # dataset sizes in the hundreds of thousands to low millions of
+        # snippets, hydrating two full ORM object graphs per row costs far
+        # more time/memory than the vectors themselves. We only ever use
+        # Snippet.id and EmbeddingVector.vector, so select just those.
+        query = (
+            self.db.query(EmbeddingVector.vector, Snippet.id)
             .join(Snippet, Snippet.id == EmbeddingVector.snippet_id)
             .join(SnippetSet, SnippetSet.id == Snippet.snippet_set_id)
             .filter(SnippetSet.dataset_id == body.dataset_id)
             .filter(EmbeddingVector.embedding_model_id == body.embedding_model_id)
             .order_by(Snippet.id.asc())
-            .all()
         )
 
-        if not rows:
+        # Stream via a server-side cursor so the driver doesn't buffer the
+        # entire result set client-side before we can start building X. Only
+        # safe/supported on Postgres (tests run against sqlite in-memory).
+        if self.db.get_bind().dialect.name == "postgresql":
+            query = query.execution_options(stream_results=True)
+
+        vectors: list = []
+        snippet_ids: list[int] = []
+        for vector, snippet_id in query.yield_per(5000):
+            vectors.append(vector)
+            snippet_ids.append(snippet_id)
+
+        if not vectors:
             raise ValueError(
                 f"No embeddings found for dataset_id={body.dataset_id}, "
                 f"embedding_model_id={body.embedding_model_id}."
             )
 
-        snippet_ids = [s.id for (_, s) in rows]
-        X = np.array([ev.vector for (ev, _) in rows], dtype=np.float32)
+        X = np.array(vectors, dtype=np.float32)
 
         # Close the read transaction before long-running DR (PCA/UMAP/t-SNE).
         self.db.commit()
