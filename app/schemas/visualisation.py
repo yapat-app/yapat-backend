@@ -58,6 +58,21 @@ class FPVDatasetRequest(BaseModel):
     run_3d: bool = False
     method: Optional[FPVMethod] = None
 
+
+class FPVGenerateAck(BaseModel):
+    """
+    Response for POST /fpv-dataset. Generation runs on a Celery worker (PCA/
+    UMAP/t-SNE/Isomap over the full embedding matrix can take minutes on large
+    datasets), so this endpoint only enqueues the job and returns immediately
+    -- it does not return projection data. Callers should poll
+    GET /fpv-dataset until it stops returning the "generate projections
+    first" error.
+    """
+    status: Literal["queued"]
+    task_id: str
+    dataset_id: int
+    embedding_model_id: int
+
 class FPVPointMetadata(BaseModel):
     snippet_id: int
     predicted_labels: List[str]

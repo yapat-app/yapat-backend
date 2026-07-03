@@ -402,10 +402,14 @@ def finalize_embedding_job(self, results, embedding_job_id):
 
 
 @celery_app.task(bind=True, name="app.tasks.embedding.generate_fpv_for_dataset")
-def generate_fpv_for_dataset(self, dataset_id: int, embedding_model_id: int):
+def generate_fpv_for_dataset(self, dataset_id: int, embedding_model_id: int, run_3d: bool = False):
     """
     Compute and cache dataset-level FPV projections from EmbeddingVector.
     Stored in fpv_vis with model_checkpoint_id = NULL and embedding_model_id set.
+
+    run_3d defaults to False to match the historical auto-trigger behavior
+    (called from finalize_embedding_job above); the manual-generation API
+    endpoint passes through whatever the caller actually requested.
     """
     db = SessionLocal()
     try:
@@ -415,7 +419,7 @@ def generate_fpv_for_dataset(self, dataset_id: int, embedding_model_id: int):
         body = FPVDatasetRequest(
             dataset_id=dataset_id,
             embedding_model_id=embedding_model_id,
-            run_3d=False,
+            run_3d=run_3d,
         )
         service.generate_fpv_for_dataset_embeddings(body)
         return {"status": "success", "dataset_id": dataset_id, "embedding_model_id": embedding_model_id}
