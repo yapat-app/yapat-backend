@@ -12,4 +12,18 @@ DEFAULT_COMPOSITE_WU : 0.5
 DEFAULT_COMPOSITE_WD : 0.25
 DEFAULT_COMPOSITE_WR : 0.25
 
-RETRAIN_AFTER : 10
+# diversity() switches from exact brute-force (Flat) search to approximate
+# HNSW search once the labelled set (Nl) exceeds this size. Below it, HNSW's
+# graph-build overhead isn't worth it -- Flat is already fast at small Nl.
+# Placeholder pending a benchmark rerun (see paper Fig. 5d / Section 2.6);
+# not yet tuned against measured error rate or timing.
+DIVERSITY_HNSW_MIN_NL : 500
+
+# diversity() switches from exact brute-force (Flat) search to approximate
+# HNSW search once the labelled set (Nl) exceeds this size. Below it, HNSW's
+# graph-build overhead isn't worth it -- Flat is already fast at small Nl.
+# Placeholder pending a benchmark rerun (see paper Fig. 5d / Section 2.6);
+# not yet tuned against measured error rate or timing.
+DIVERSITY_HNSW_MIN_NL : 500
+
+RETRAIN_AFTER : 100
