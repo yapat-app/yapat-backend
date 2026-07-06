@@ -5,10 +5,10 @@ Custom Taxonomy models
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from sqlalchemy.dialects.postgresql import JSONB
 import enum
 
 from app.database import Base
+from app.models.types import PortableJSONB
 
 
 class TaxonomyStatus(str, enum.Enum):
@@ -31,7 +31,7 @@ class CustomTaxonomy(Base):
     created_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    taxonomy_data = Column(JSONB, nullable=False)
+    taxonomy_data = Column(PortableJSONB, nullable=False)
     status = Column(String(50), nullable=False, default=TaxonomyStatus.ACTIVE)
     is_global = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
