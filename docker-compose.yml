@@ -2,6 +2,11 @@ services:
   db:
     image: pgvector/pgvector:pg15
     container_name: yapat-postgres
+    # Docker's default /dev/shm is 64MB, which Postgres uses for parallel-worker
+    # DSM segments during sorts/hash joins. Large similarity-search queries over
+    # bigger datasets exceed that and fail with "could not resize shared memory
+    # segment ... No space left on device" (psycopg2.errors.DiskFull).
+    shm_size: '1gb'
     environment:
       POSTGRES_USER: yapat_user
       POSTGRES_PASSWORD: yapat_password
