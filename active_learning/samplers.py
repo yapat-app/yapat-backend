@@ -1,3 +1,4 @@
+import logging
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -5,8 +6,9 @@ import faiss
 
 
 from app.schemas.pam_active_learning import ALSingleSampleScore
-from active_learning.config import DIVERSITY_HNSW_MIN_NL
+from active_learning.config import DIVERSITY_HNSW_MIN_NL, DIVERSITY_POOL_SIZE
 
+logger = logging.getLogger(__name__)
 
 def normalize_diversity(d: torch.Tensor) -> torch.Tensor:
     # diversity already in [0, 1], clamp makes sure no outliers.
@@ -104,35 +106,62 @@ def diversity(
     Z_u: torch.Tensor,
     Z_l: torch.Tensor,
     hnsw_min_nl: int | None = None,
+    pool_size: int | None = None # Limits how many candidates actually go through expensive greedy coreset selection"
 ) -> torch.Tensor:
     """
-    Diversity / novelty normalized to [0, 1].
-
-    Uses distance to nearest labeled embedding.
-    Since your observed L2-normalized distances are usually <= 1,
-    we clip values to [0, 1].
+    Diversity normalized to [0, 1], with intra-batch redundancy
+    correction via greedy farthest-point (core-set) traversal.
+    Simulates greedy farthest-point picks
 
     hnsw_min_nl: labelled-set size threshold above which the nearest-labelled
     search switches from exact (Flat) to approximate (HNSW). Defaults to
     DIVERSITY_HNSW_MIN_NL from active_learning/config.yaml.
     """
+
+    stats = diversity_coreset_stats(Z_u, Z_l)
+    logger.info("Diversity stats: %s", stats)
+
     if Z_u.numel() == 0:
         return torch.empty(0, device=Z_u.device)
 
-    if Z_l.numel() == 0:
-        return torch.zeros(Z_u.shape[0], device=Z_u.device)
-
     device = Z_u.device
-
+    n_u = Z_u.shape[0]
     z_u_np = _to_np(Z_u)
-    z_l_np = _to_np(Z_l)
 
-    threshold = hnsw_min_nl if hnsw_min_nl is not None else DIVERSITY_HNSW_MIN_NL
-    distances = _nearest_labeled_distances(z_u_np, z_l_np, threshold)
+    if Z_l.numel() == 0:
+        # nothing labeled yet
+        #return torch.zeros(Z_u.shape[0], device=Z_u.device)
+        nearest_ref_dist = np.full(n_u, 1.0, dtype="float32")
+    else:
+        z_l_np = _to_np(Z_l)
+        threshold = hnsw_min_nl if hnsw_min_nl is not None else DIVERSITY_HNSW_MIN_NL
+        nearest_ref_dist = _nearest_labeled_distances(z_u_np, z_l_np, threshold)
 
-    scores = torch.tensor(distances, dtype=torch.float32, device=device)
+    scores = nearest_ref_dist.copy()
 
-    return torch.clamp(scores, 0.0, 1.0)
+    pool_n = min(pool_size, n_u) if pool_size is not None else min(DIVERSITY_POOL_SIZE, n_u)
+    pool_idx = np.argsort(-nearest_ref_dist)[:pool_n]
+    pool_dist = nearest_ref_dist[pool_idx].copy()
+    remaining = np.ones(pool_n, dtype=bool)
+
+    for _ in range(pool_n):
+        masked = np.where(remaining, pool_dist, -np.inf)
+        local_pick = int(np.argmax(masked))
+        if masked[local_pick] == -np.inf:
+            break
+
+        global_pick = pool_idx[local_pick]
+        remaining[local_pick] = False
+        scores[global_pick] = pool_dist[local_pick]  # value at time of pick
+
+        # fold the pick into the reference set; redundant neighbors in the
+        # pool immediately lose score on the next iteration
+        picked_vec = z_u_np[global_pick]
+        d_to_pick = np.linalg.norm(z_u_np[pool_idx] - picked_vec, axis=1)
+        pool_dist = np.minimum(pool_dist, d_to_pick)
+
+    scores_t = torch.tensor(scores, dtype=torch.float32, device=device)
+    return torch.clamp(scores_t, 0.0, 1.0)
 
 
 def diversity_approx_error(Z_u: torch.Tensor, Z_l: torch.Tensor) -> dict:
@@ -183,6 +212,30 @@ def diversity_approx_error(Z_u: torch.Tensor, Z_l: torch.Tensor) -> dict:
         "mean_abs_distance_error": float(abs_error.mean()),
         "max_abs_distance_error": float(abs_error.max()) if abs_error.size else 0.0,
         "n": int(z_u_np.shape[0]),
+    }
+
+def diversity_coreset_stats(Z_u: torch.Tensor, Z_l: torch.Tensor) -> dict:
+    """
+    Diagnostic only -- reports the actual empirical range of nearest-labeled
+    distances on real data, to determine the correct normalization divisor
+    (or whether quantile normalization is needed instead of a fixed constant).
+    Not used in the production scoring path.
+    """
+    if Z_u.numel() == 0 or Z_l.numel() == 0:
+        return {"min": None, "max": None, "mean": None, "p50": None, "p95": None, "p99": None, "n": 0}
+
+    z_u_np = _to_np(Z_u)
+    z_l_np = _to_np(Z_l)
+    dists = _nearest_labeled_distances(z_u_np, z_l_np, DIVERSITY_HNSW_MIN_NL)
+
+    return {
+        "min": float(dists.min()),
+        "max": float(dists.max()),
+        "mean": float(dists.mean()),
+        "p50": float(np.percentile(dists, 50)),
+        "p95": float(np.percentile(dists, 95)),
+        "p99": float(np.percentile(dists, 99)),
+        "n": int(dists.shape[0]),
     }
 
 
