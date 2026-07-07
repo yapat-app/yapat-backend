@@ -24,6 +24,7 @@ from app.config import settings
 from app.utils.recording_filename_metadata import (
     location_source_for_filename,
     parse_location_from_filename,
+    parse_datetime_from_filename,
 )
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
@@ -428,48 +429,73 @@ class DatasetService:
 
     @staticmethod
     def _location_metadata_from_filename(file_name: str) -> Optional[dict]:
+        """
+        Extract every piece of extra_metadata derivable from a filename in one
+        pass — location (PAM site / FNJV locality) and, independently,
+        recorded_date/recorded_time (PAM convention only). Each key is present
+        only when its own parser matched; a filename can yield location alone,
+        date/time alone, both, or neither.
+        """
+        meta: dict = {}
+
         location = parse_location_from_filename(file_name)
-        if not location:
-            return None
-        source = location_source_for_filename(file_name)
-        meta = {"location": location}
-        if source:
-            meta["location_source"] = source
-        return meta
+        if location:
+            meta["location"] = location
+            source = location_source_for_filename(file_name)
+            if source:
+                meta["location_source"] = source
+
+        datetime_parsed = parse_datetime_from_filename(file_name)
+        if datetime_parsed:
+            recorded_date, recorded_time_seconds = datetime_parsed
+            meta["recorded_date"] = recorded_date
+            meta["recorded_time"] = recorded_time_seconds
+
+        return meta or None
 
     def backfill_recording_locations(self, dataset_id: int) -> int:
         """
-        Parse locations from file names for recordings missing extra_metadata.location.
-        Returns the number of rows updated.
-        Only queries recordings that actually lack a location to avoid a full table
-        scan on every filter-feed request for datasets already backfilled.
+        Parse location and recorded date/time from file names for recordings
+        missing either in extra_metadata. Returns the number of rows updated.
+        Only queries recordings actually missing a value, to avoid a full
+        table scan on every filter-feed request for datasets already backfilled.
         """
         from sqlalchemy import cast, String as SAString
 
         bind = self.db.get_bind()
         dialect = bind.dialect.name
 
-        # Filter to only rows that are missing a location value.
+        # Filter to rows missing location OR recorded_date — either means
+        # this row hasn't been through the current parser yet.
         base_q = self.db.query(RecordingModel).filter(
             RecordingModel.dataset_id == dataset_id
         )
         if dialect == "postgresql":
             base_q = base_q.filter(
-                RecordingModel.extra_metadata.op("->>")(
-                    "location"
-                ).is_(None)
+                or_(
+                    RecordingModel.extra_metadata.op("->>")("location").is_(None),
+                    RecordingModel.extra_metadata.op("->>")("recorded_date").is_(None),
+                )
             )
         elif dialect == "sqlite":
             from sqlalchemy import func as sa_func
 
             base_q = base_q.filter(
-                sa_func.json_extract(
-                    RecordingModel.extra_metadata, "$.location"
-                ).is_(None)
+                or_(
+                    sa_func.json_extract(
+                        RecordingModel.extra_metadata, "$.location"
+                    ).is_(None),
+                    sa_func.json_extract(
+                        RecordingModel.extra_metadata, "$.recorded_date"
+                    ).is_(None),
+                )
             )
         else:
             base_q = base_q.filter(
-                cast(RecordingModel.extra_metadata["location"], SAString).is_(None)
+                or_(
+                    cast(RecordingModel.extra_metadata["location"], SAString).is_(None),
+                    cast(RecordingModel.extra_metadata["recorded_date"], SAString).is_(None),
+                )
             )
 
         recs = base_q.all()

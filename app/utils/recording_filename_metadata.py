@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime
 from typing import Optional
 
 # SITE_YYYYMMDD_HHMMSS — optional extra suffix segments (e.g. lat/lon fragments)
@@ -40,6 +41,42 @@ def parse_location_from_filename(file_name: str) -> Optional[str]:
         return pam
 
     return None
+
+
+def parse_datetime_from_filename(file_name: str) -> Optional[tuple[str, int]]:
+    """
+    Extract (recorded_date, recorded_time_seconds) from a PAM-convention
+    filename (``SITE_YYYYMMDD_HHMMSS``, e.g. ``CIPAP02_20240515_080000``).
+
+    recorded_date: "YYYY-MM-DD" (calendar date; no timezone conversion —
+    these are field-recorder timestamps local to the recording site, not UTC).
+    recorded_time_seconds: seconds since midnight (0-86399).
+
+    Returns None for any filename that doesn't match the PAM convention
+    (e.g. FNJV, or anything else) — there is no fallback parser, matching
+    parse_location_from_filename's behavior of returning None rather than
+    guessing at an unrecognized format.
+    """
+    stem, _ext = os.path.splitext(file_name or "")
+    stem = stem.strip()
+    if not stem:
+        return None
+
+    m = _PAM_SITE_DATETIME_RE.match(stem)
+    if not m:
+        return None
+
+    date_part = m.group(2)
+    time_part = m.group(3)
+    try:
+        date_obj = datetime.strptime(date_part, "%Y%m%d")
+        time_obj = datetime.strptime(time_part, "%H%M%S")
+    except ValueError:
+        return None
+
+    recorded_date = date_obj.strftime("%Y-%m-%d")
+    recorded_time_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
+    return recorded_date, recorded_time_seconds
 
 
 def location_source_for_filename(file_name: str) -> Optional[str]:
