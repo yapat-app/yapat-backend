@@ -19,6 +19,8 @@ from app.models.pam_active_learning import (
 
 from app.services.pam_al._annotation_helpers import replace_user_labels_for_snippet
 
+from active_learning.config import NO_EVENT_LABEL
+
 # Trigger values that represent actual model-retrain jobs.
 # "inference" jobs use the same ALRetrainJob table but are NOT retrains and
 # must never block or influence retrain-gating logic.
@@ -228,3 +230,10 @@ def resolve_feedback_labels(
         return incoming_labels
     return []
 
+
+
+
+def is_no_event_feedback(labels: list[str] | None) -> bool:
+
+    if not labels or labels == [NO_EVENT_LABEL]:
+        return True

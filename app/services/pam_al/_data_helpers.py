@@ -116,6 +116,7 @@ def align_embeddings_and_labels(
     matched_by_file_path = 0
     no_gt_key_match = 0
     positive_aligned = 0
+    negative_aligned = 0
 
     logger.info("========== CHUNK-LEVEL ALIGNMENT START ==========")
     logger.info("X shape: %s", getattr(X, "shape", None))
@@ -172,17 +173,20 @@ def align_embeddings_and_labels(
                     event_labels.astype(int).tolist(),
                 )
 
+        keep_indices.append(i)
+        y_rows.append(y)
+        used_snippet_ids.append(snippet_id)
         if y.sum() > 0:
-            keep_indices.append(i)
-            y_rows.append(y)
-            used_snippet_ids.append(snippet_id)
             positive_aligned += 1
+        else:
+            negative_aligned += 1
 
     logger.info("========== CHUNK-LEVEL ALIGNMENT SUMMARY ==========")
     logger.info("Matched by file_name: %d", matched_by_file_name)
     logger.info("Matched by file_path: %d", matched_by_file_path)
     logger.info("No GT key match: %d", no_gt_key_match)
     logger.info("Positive aligned samples: %d", positive_aligned)
+    logger.info("Negative aligned samples: %d", negative_aligned)
 
     if not keep_indices:
         raise ValueError(
@@ -211,8 +215,17 @@ def load_ground_truth_metadata(
     species_to_idx = {species: i for i, species in enumerate(species_list)}
     gt_index: Dict[str, List[Dict[str, Any]]] = {}
 
-    with open(metadata_path, "r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
+    with open(metadata_path, "r", encoding="utf-8-sig", newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        except csv.Error:
+            # Sniffer can't always confidently detect (e.g. very short files,
+            # single-column files) -- fall back to the standard comma dialect.
+            dialect = csv.excel
+
+        reader = csv.DictReader(f, dialect=dialect)
         fieldnames = reader.fieldnames or []
 
         subset_col = "subset" if "subset" in fieldnames else None
@@ -300,8 +313,6 @@ def load_ground_truth_metadata(
                 if species_value in species_to_idx:
                     y[species_to_idx[species_value]] = 1.0
 
-            if y.sum() == 0:
-                continue
 
             gt_index.setdefault(recording_key, []).append(
                 {
@@ -315,3 +326,62 @@ def load_ground_truth_metadata(
         raise ValueError(f"No usable ground-truth rows found in metadata file: {metadata_path}")
 
     return gt_index
+
+def split_filter_reattach_negatives(
+    X: np.ndarray,
+    y_full: np.ndarray,
+    snippet_ids: List[int],
+    species_candidates: List[str],
+    model,
+    min_samples_per_class: int,
+    max_samples_per_class: Optional[int],
+    is_negative_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, List[int], List[str], List[str], Dict[str, int]]:
+    """
+    Run filter_and_balance_classes on positive rows only, then reattach
+    negative rows as explicit all-zero targets sized to the final label_order.
+
+    filter_and_balance_classes drops all-zero rows internally
+    (`y.sum(axis=1) > 0`), which would otherwise discard confirmed negatives
+    as if they were noise. This function splits negatives out first, filters
+    only the positive rows, then adds the negatives back in as true-negative
+    training examples once num_classes/label_order is finalized.
+
+    `is_negative_mask` defines what counts as a negative row for the caller:
+    - metadata-CSV cold start: rows where every species column is 0
+      (structural, no sentinel involved -- a CSV has no NO_EVENT_LABEL concept)
+    - annotation/feedback-derived training: rows whose only label is the
+      reserved NO_EVENT_LABEL sentinel
+
+    Returns the same 6-tuple shape as model.filter_and_balance_classes.
+    """
+    is_negative_mask = np.asarray(is_negative_mask, dtype=bool)
+    pos_mask = ~is_negative_mask
+
+    X_pos = X[pos_mask]
+    y_pos = y_full[pos_mask]
+    pos_sids = [sid for sid, m in zip(snippet_ids, pos_mask) if m]
+
+    X_neg = X[is_negative_mask]
+    neg_sids = [sid for sid, m in zip(snippet_ids, is_negative_mask) if m]
+
+    X_train, y_train, labeled_sids, used_species, excluded_species, class_counts = (
+        model.filter_and_balance_classes(
+            X=X_pos, y=y_pos, snippet_ids=pos_sids,
+            species_list=species_candidates,
+            min_samples_per_class=min_samples_per_class,
+            max_samples_per_class=max_samples_per_class,
+        )
+    )
+
+    if neg_sids and len(used_species) > 0:
+        y_neg = np.zeros((len(neg_sids), len(used_species)), dtype=np.float32)
+        X_train = np.concatenate([X_train, X_neg], axis=0)
+        y_train = np.concatenate([y_train, y_neg], axis=0)
+        labeled_sids = list(labeled_sids) + neg_sids
+        logger.info(
+            "split_filter_reattach_negatives: reattached %d confirmed-negative rows",
+            len(neg_sids),
+        )
+
+    return X_train, y_train, labeled_sids, used_species, excluded_species, class_counts

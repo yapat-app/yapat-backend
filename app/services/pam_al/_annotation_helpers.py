@@ -15,6 +15,7 @@ from app.models.pam_active_learning import (
     ALSnippetAnnotation,
     ALAnnotationSource,
 )
+from active_learning.config import NO_EVENT_LABEL
 
 
 def store_snippet_annotations(
@@ -27,7 +28,7 @@ def store_snippet_annotations(
     model_checkpoint_id: int | None = None,
     user_id: int | None = None,
 ) -> None:
-    """Store one annotation row per positive label per snippet."""
+    """Store one row per sample; all-zero rows are stored as NO_EVENT_LABEL."""
     if len(snippet_ids) != y.shape[0]:
         raise ValueError(f"Mismatch: {len(snippet_ids)=} but y has {y.shape[0]} rows.")
     if len(label_order) != y.shape[1]:
@@ -35,33 +36,22 @@ def store_snippet_annotations(
 
     for row_idx, snippet_id in enumerate(snippet_ids):
         positive_indices = np.where(y[row_idx] > 0)[0]
+        labels = [label_order[i] for i in positive_indices] if len(positive_indices) > 0 else [NO_EVENT_LABEL]
 
-        for class_idx in positive_indices:
-            label = label_order[class_idx]
+        existing = db.query(ALSnippetAnnotation).filter(
+            ALSnippetAnnotation.snippet_id == snippet_id,
+            ALSnippetAnnotation.source == source,
+            ALSnippetAnnotation.user_id == user_id,
+            ALSnippetAnnotation.model_checkpoint_id == model_checkpoint_id,
+        ).one_or_none()
 
-            exists = (
-                db.query(ALSnippetAnnotation)
-                .filter(
-                    ALSnippetAnnotation.snippet_id == snippet_id,
-                    ALSnippetAnnotation.label == label,
-                    ALSnippetAnnotation.source == source,
-                    ALSnippetAnnotation.user_id == user_id,
-                    ALSnippetAnnotation.model_checkpoint_id == model_checkpoint_id,
-                )
-                .first()
-            )
-
-            if exists is None:
-                db.add(
-                    ALSnippetAnnotation(
-                        dataset_id=dataset_id,
-                        snippet_id=snippet_id,
-                        label=label,
-                        source=source,
-                        user_id=user_id,
-                        model_checkpoint_id=model_checkpoint_id,
-                    )
-                )
+        if existing:
+            existing.labels = labels
+        else:
+            db.add(ALSnippetAnnotation(
+                dataset_id=dataset_id, snippet_id=snippet_id, labels=labels,
+                source=source, user_id=user_id, model_checkpoint_id=model_checkpoint_id,
+            ))
 
 
 def replace_user_labels_for_snippet(
@@ -99,31 +89,32 @@ def store_user_labels_for_snippet(
     model_checkpoint_id: int | None,
     user_id: int | None = None,
 ) -> None:
-    for label in labels:
-        exists = (
-            db.query(ALSnippetAnnotation)
-            .filter(
-                ALSnippetAnnotation.dataset_id == dataset_id,
-                ALSnippetAnnotation.snippet_id == snippet_id,
-                ALSnippetAnnotation.label == label,
-                ALSnippetAnnotation.source == ALAnnotationSource.USER,
-                ALSnippetAnnotation.user_id == user_id,
-                ALSnippetAnnotation.model_checkpoint_id == model_checkpoint_id,
-            )
-            .one_or_none()
+    """Store (or overwrite) the single USER-source row for this snippet."""
+    existing = (
+        db.query(ALSnippetAnnotation)
+        .filter(
+            ALSnippetAnnotation.dataset_id == dataset_id,
+            ALSnippetAnnotation.snippet_id == snippet_id,
+            ALSnippetAnnotation.source == ALAnnotationSource.USER,
+            ALSnippetAnnotation.user_id == user_id,
+            ALSnippetAnnotation.model_checkpoint_id == model_checkpoint_id,
         )
+        .one_or_none()
+    )
 
-        if exists is None:
-            db.add(
-                ALSnippetAnnotation(
-                    dataset_id=dataset_id,
-                    snippet_id=snippet_id,
-                    label=label,
-                    source=ALAnnotationSource.USER,
-                    user_id=user_id,
-                    model_checkpoint_id=model_checkpoint_id,
-                )
+    if existing:
+        existing.labels = labels
+    else:
+        db.add(
+            ALSnippetAnnotation(
+                dataset_id=dataset_id,
+                snippet_id=snippet_id,
+                labels=labels,
+                source=ALAnnotationSource.USER,
+                user_id=user_id,
+                model_checkpoint_id=model_checkpoint_id,
             )
+        )
 
 
 def delete_user_labels_for_snippet(
@@ -156,7 +147,7 @@ def get_trusted_annotations(
     dataset_id: int,
 ) -> dict[int, set[str]]:
     rows = (
-        db.query(ALSnippetAnnotation.snippet_id, ALSnippetAnnotation.label)
+        db.query(ALSnippetAnnotation.snippet_id, ALSnippetAnnotation.labels)
         .filter(
             ALSnippetAnnotation.dataset_id == dataset_id,
             ALSnippetAnnotation.source.in_([
@@ -168,8 +159,8 @@ def get_trusted_annotations(
     )
 
     out: dict[int, set[str]] = {}
-    for snippet_id, label in rows:
-        out.setdefault(snippet_id, set()).add(label)
+    for snippet_id, labels in rows:
+        out.setdefault(snippet_id, set()).update(labels or [])
     return out
 
 
@@ -253,7 +244,7 @@ def get_labels_by_snippet(
     when used to colour an FPV by `actual_label`.
     """
     query = (
-        db.query(ALSnippetAnnotation.snippet_id, ALSnippetAnnotation.label)
+        db.query(ALSnippetAnnotation.snippet_id, ALSnippetAnnotation.labels)
         .filter(
             ALSnippetAnnotation.dataset_id == dataset_id,
             ALSnippetAnnotation.source.in_([
@@ -269,8 +260,8 @@ def get_labels_by_snippet(
         )
 
     grouped: dict[int, set[str]] = {}
-    for snippet_id, label in query.all():
-        grouped.setdefault(snippet_id, set()).add(label)
+    for snippet_id, labels in query.all():
+        grouped.setdefault(snippet_id, set()).update(labels or [])
     return {sid: sorted(labels) for sid, labels in grouped.items()}
 
 

@@ -176,7 +176,7 @@ class ALSnippetAnnotation(Base):
     id = Column(Integer, primary_key=True)
     dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True)
     snippet_id = Column(Integer, ForeignKey("snippets.id", ondelete="CASCADE"), nullable=False, index=True)
-    label = Column(String, nullable=False, index=True)
+    labels = Column(JSON, nullable=False, index=True)
     source = Column(
         SQLEnum(ALAnnotationSource, name="al_annotation_source_enum", create_type=True),
         nullable=False,
@@ -197,7 +197,6 @@ class ALSnippetAnnotation(Base):
     __table_args__ = (
         UniqueConstraint(
             "snippet_id",
-            "label",
             "source",
             "user_id",
             "model_checkpoint_id",
