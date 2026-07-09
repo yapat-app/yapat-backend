@@ -19,7 +19,7 @@ from app.models.pam_active_learning import ALPrediction, ALSnippetAnnotation
 from app.schemas.pam_active_learning import ALInferenceRow
 from benchmarks.stage_timer import stage_timer
 
-from active_learning.samplers import uncertainty, density, diversity, composite
+from active_learning.samplers import uncertainty, density, diversity, composite, zscore
 from active_learning.config import (
     DEFAULT_INFERENCE_THRESHOLD,
     DEFAULT_DENSITY_K,
@@ -90,9 +90,9 @@ def build_inference_rows(
         end - start,
     )
     composite_scores_u = composite(
-        uncertainty_scores=uncertainty_scores_u,
-        diversity_scores=diversity_scores_u,
-        density_scores=density_scores_u,
+        uncertainty_scores=zscore(uncertainty_scores_u),
+        diversity_scores=zscore(diversity_scores_u),
+        density_scores=zscore(density_scores_u),
         wu=wu,
         wd=wd,
         wr=wr,
