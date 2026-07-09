@@ -11,6 +11,7 @@ from app.models.annotation import Annotation
 from app.models.recording import Recording
 from app.models.embedding import SnippetSet, SnippetSetStatus
 from app.models.dataset import Dataset
+from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
 
 
 class SnippetService:
@@ -294,6 +295,7 @@ class SnippetService:
         recording_id: Optional[int] = None,
         annotation_status: Optional[str] = "any",
         location: Optional[str] = None,
+        species: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> List[Snippet]:
@@ -303,6 +305,8 @@ class SnippetService:
         Args:
             annotation_status: 'any' (default), 'annotated' (has >=1 annotation),
                 or 'unannotated' (has no annotations).
+            species: Comma-separated list of annotated species labels. Only
+                snippets with at least one matching label are returned.
 
         Returns:
             List of Snippet objects in random order.
@@ -365,6 +369,27 @@ class SnippetService:
                     query = query.filter(Snippet.recording_id.in_(matching_ids))
                 else:
                     return []
+
+        # Species filter: comma-separated list of annotated species labels.
+        # Matches ALSnippetAnnotation (a superset of canonical Annotation --
+        # it also captures AL-mode feedback and ground-truth imports),
+        # restricted to trusted sources. One row per (snippet, label), so
+        # this naturally matches a snippet if ANY of its labels is selected.
+        if species:
+            wanted_species = {s.strip() for s in species.split(",") if s.strip()}
+            if wanted_species:
+                species_match = (
+                    self.db.query(ALSnippetAnnotation.id)
+                    .filter(
+                        ALSnippetAnnotation.snippet_id == Snippet.id,
+                        ALSnippetAnnotation.source.in_(
+                            [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
+                        ),
+                        ALSnippetAnnotation.label.in_(wanted_species),
+                    )
+                    .exists()
+                )
+                query = query.filter(species_match)
 
         all_snippets = query.all()
         random.shuffle(all_snippets)
