@@ -45,14 +45,12 @@ from app.schemas.pam_active_learning import (
 from app.utils.pam_training_paths import resolve_pam_training_paths
 from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
 from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
-from active_learning.config import RETRAIN_AFTER
 from active_learning.config import (
     DEFAULT_INFERENCE_THRESHOLD,
     DEFAULT_DENSITY_K,
     DEFAULT_COMPOSITE_WU,
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
-    RETRAIN_AFTER,
     DEFAULT_EPOCHS,
     DEFAULT_LEARNING_RATE,
     DEFAULT_BATCH_SIZE,
@@ -411,6 +409,7 @@ class PAMActiveLearningService:
         self.db.refresh(feedback)
 
         feedback_count = fb_h.feedback_count_since_retrain(self.db, model_ckpt.id)
+        retrain_after = ckpt_h.get_retrain_threshold(self.db, body.dataset_id)
         retrain_triggered = False
         auto_retrain_checkpoint_id = None
         auto_retrain_job_id = None
@@ -421,7 +420,7 @@ class PAMActiveLearningService:
         # already failed — that would create an infinite auto-retry loop and the
         # user should investigate and trigger manually instead.
         if (
-            feedback_count >= RETRAIN_AFTER
+            feedback_count >= retrain_after
             and not fb_h.has_active_retrain_job(self.db, model_ckpt.id)
             and not fb_h.has_pending_child_retrain(self.db, model_ckpt.id)
             and not last_retrain_failed
@@ -454,6 +453,7 @@ class PAMActiveLearningService:
         Counts distinct snippets with feedback since the last completed retrain.
         Returns 0 while a retrain is already pending/running for this model family.
         """
+        retrain_after = ckpt_h.get_retrain_threshold(self.db, dataset_id)
         model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(self.db, dataset_id, model_family_name)
         if model_ckpt is None:
             feedback_count = fb_h.feedback_count_since_retrain(self.db, checkpoint_id=None, dataset_id=dataset_id)
@@ -462,7 +462,7 @@ class PAMActiveLearningService:
                 "model_family_name": model_family_name,
                 "active_checkpoint_id": None,
                 "feedback_count_since_retrain": feedback_count,
-                "retrain_after": RETRAIN_AFTER,
+                "retrain_after": retrain_after,
                 "retrain_pending": False,
             }
 
@@ -473,7 +473,7 @@ class PAMActiveLearningService:
                 "model_family_name": model_family_name,
                 "active_checkpoint_id": model_ckpt.id,
                 "feedback_count_since_retrain": 0,
-                "retrain_after": RETRAIN_AFTER,
+                "retrain_after": retrain_after,
                 "retrain_pending": True,
             }
 
@@ -483,7 +483,7 @@ class PAMActiveLearningService:
             "model_family_name": model_family_name,
             "active_checkpoint_id": model_ckpt.id,
             "feedback_count_since_retrain": feedback_count,
-            "retrain_after": RETRAIN_AFTER,
+            "retrain_after": retrain_after,
             "retrain_pending": False,
         }
 
@@ -749,6 +749,15 @@ class PAMActiveLearningService:
 
         if not predictions_exist or body.force_refresh:
             X, snippet_rows = data_h.load_embeddings(self.db, body.snippet_set_id, embedding_model_id)
+
+            # End the read transaction now: load_model_from_checkpoint below is a
+            # disk-bound torch.load with no DB activity, and label_order resolution
+            # (unless it hits the label_config_path branch, which commits itself) is
+            # in-memory. Without this, the session sits idle-in-transaction across
+            # that gap and Postgres kills it (idle_in_transaction_session_timeout)
+            # before the later write in run_and_store_inference can land — same
+            # class of bug as the commit() in _inference_helpers.run_and_store_inference.
+            self.db.commit()
 
             # Resolve label order *before* loading the model so we can fall back to
             # rebuilding the classifier when legacy checkpoint metadata is missing.
@@ -1665,7 +1674,7 @@ class PAMActiveLearningService:
         retrain_triggered = False
         active_checkpoint_id = None
 
-        if feedback_count >= RETRAIN_AFTER:
+        if feedback_count >= ckpt_h.get_retrain_threshold(self.db, body.dataset_id):
             retrain_triggered = True
 
             train_body = ALTrainFromScratchRequest(

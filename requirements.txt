@@ -13,6 +13,12 @@ email-validator>=2.0.0
 requests==2.31.0
 numpy>=1.26.2
 torch>=2.0.0
+# Dockerfile installs the CPU torch build with --no-deps (skips ~900MB of CUDA
+# libs), which also drops these pure-Python transitive deps that torch still
+# needs at runtime (e.g. torch.optim triggers torch._dynamo -> sympy). List
+# them explicitly so both CPU and GPU builds get them.
+filelock
+fsspec
 sympy
 jinja2
 networkx>=2.5.1

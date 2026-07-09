@@ -21,6 +21,7 @@ def dataset_to_dict(
         "default_snippet_set_id": dataset.default_snippet_set_id,
         "spectrogram_f_min_hz": dataset.spectrogram_f_min_hz,
         "spectrogram_f_max_hz": dataset.spectrogram_f_max_hz,
+        "retrain_after_threshold": dataset.retrain_after_threshold,
         "created_at": dataset.created_at,
         "updated_at": dataset.updated_at,
         "recording_count": recording_count,

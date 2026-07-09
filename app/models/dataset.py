@@ -51,6 +51,9 @@ class Dataset(Base):
     spectrogram_f_min_hz = Column(Float, nullable=True)
     spectrogram_f_max_hz = Column(Float, nullable=True)
     quick_labels = Column(JSON, nullable=True)
+    # PAM active-learning auto-retrain threshold override. Null = use the global
+    # RETRAIN_AFTER default from active_learning/config.yaml.
+    retrain_after_threshold = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
