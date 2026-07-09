@@ -246,6 +246,23 @@ def random(n: int, device: str = "cpu") -> torch.Tensor:
     return torch.rand(n, device=device)
 
 
+def zscore(x: torch.Tensor) -> torch.Tensor:
+    """
+    Standardize x to zero mean, unit variance.
+
+    Edge cases:
+    - Empty tensor (numel == 0): returned unchanged.
+    - Near-zero std (all values identical or near-identical): returns
+      zeros rather than NaN/inf.
+    """
+    if x.numel() == 0:
+        return x
+    std = x.std()
+    if std < 1e-8:
+        return torch.zeros_like(x)
+    return (x - x.mean()) / std
+
+
 def composite(
     uncertainty_scores: torch.Tensor,
     diversity_scores: torch.Tensor,
@@ -255,9 +272,11 @@ def composite(
     wr: float = 0.25,
 ) -> torch.Tensor:
     """
-    Composite score from already-normalized component scores.
+    Composite score from component acquisition scores.
 
-    Assumes all inputs are already in [0, 1].
+    Inputs are expected to be z-scored (mean 0, std 1) before calling this
+    function. The output is therefore unbounded and should be interpreted
+    only as a ranking signal, not as a probability.
     """
 
     total = wu + wd + wr
