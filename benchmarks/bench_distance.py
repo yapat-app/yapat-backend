@@ -29,6 +29,11 @@ def _parse_args():
                    help="Absolute number of labeled snippets (overrides --labeled-fraction)")
     p.add_argument("--num-classes", type=int, default=10)
     p.add_argument("--density-k", type=int, default=10)
+    p.add_argument("--diversity-hnsw-min-nl", type=int, default=None,
+                   help="Override DIVERSITY_HNSW_MIN_NL (active_learning/config.yaml). "
+                        "Pass a very large number (e.g. 10_000_000) to force the old "
+                        "exact Flat-only behavior for a before/after comparison; omit "
+                        "to use the current config default.")
     return p.parse_args()
 
 
@@ -58,7 +63,7 @@ def main():
     for operation, run_fn_factory in [
         ("uncertainty", lambda N_l: lambda inp: uncertainty(inp[0])),
         ("density",     lambda N_l: lambda inp: density(inp[1], k=args.density_k)),
-        ("diversity",   lambda N_l: lambda inp: diversity(inp[1], inp[2])),
+        ("diversity",   lambda N_l: lambda inp: diversity(inp[1], inp[2], hnsw_min_nl=args.diversity_hnsw_min_nl)),
     ]:
         def setup(N, op=operation):
             idx = rng.choice(N_full, size=N, replace=False) if N < N_full else np.arange(N_full)

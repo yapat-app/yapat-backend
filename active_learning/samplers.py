@@ -5,6 +5,7 @@ import faiss
 
 
 from app.schemas.pam_active_learning import ALSingleSampleScore
+from active_learning.config import DIVERSITY_HNSW_MIN_NL
 
 
 def normalize_diversity(d: torch.Tensor) -> torch.Tensor:
@@ -63,13 +64,57 @@ def uncertainty(P: torch.Tensor) -> torch.Tensor:
 
     return torch.clamp(entropy / np.log(2), 0.0, 1.0)
 
-def diversity(Z_u: torch.Tensor, Z_l: torch.Tensor) -> torch.Tensor:
+def _nearest_labeled_distances(
+    z_u_np: np.ndarray,
+    z_l_np: np.ndarray,
+    hnsw_min_nl: int,
+) -> np.ndarray:
+    """
+    1-NN distance from each row of z_u_np to the nearest row of z_l_np.
+
+    Below hnsw_min_nl labelled points, brute-force (Flat) search: building an
+    HNSW graph has more per-point overhead than a flat scan is worth at small
+    Nl, and O(N * Nl) is cheap when Nl is small regardless.
+
+    At or above hnsw_min_nl, uses an approximate HNSW index instead: exact
+    search here is O(N * Nl) and was measured as the dominant per-cycle AL
+    scoring cost (see paper Section 2.6 / Fig. 5d), dwarfing density's
+    O(N log N) HNSW-based search. HNSW brings this to ~O(N log Nl), same
+    complexity class as density(), at the cost of being approximate (may
+    occasionally return the second-nearest labelled point instead of the
+    true nearest). Since this score only feeds a ranking/composite acquisition
+    score -- not an exact measurement -- that's an acceptable trade, the same
+    one already made for density().
+    """
+    dim = z_l_np.shape[1]
+    n_l = z_l_np.shape[0]
+
+    if n_l < hnsw_min_nl:
+        index = faiss.IndexFlatL2(dim)
+        index.add(z_l_np)
+    else:
+        # _make_hnsw_index() already adds the vectors internally.
+        index = _make_hnsw_index(z_l_np)
+
+    distances, _ = index.search(z_u_np, k=1)
+    return np.sqrt(np.maximum(distances[:, 0], 0.0))
+
+
+def diversity(
+    Z_u: torch.Tensor,
+    Z_l: torch.Tensor,
+    hnsw_min_nl: int | None = None,
+) -> torch.Tensor:
     """
     Diversity / novelty normalized to [0, 1].
 
     Uses distance to nearest labeled embedding.
     Since your observed L2-normalized distances are usually <= 1,
     we clip values to [0, 1].
+
+    hnsw_min_nl: labelled-set size threshold above which the nearest-labelled
+    search switches from exact (Flat) to approximate (HNSW). Defaults to
+    DIVERSITY_HNSW_MIN_NL from active_learning/config.yaml.
     """
     if Z_u.numel() == 0:
         return torch.empty(0, device=Z_u.device)
@@ -82,16 +127,64 @@ def diversity(Z_u: torch.Tensor, Z_l: torch.Tensor) -> torch.Tensor:
     z_u_np = _to_np(Z_u)
     z_l_np = _to_np(Z_l)
 
-    dim = z_l_np.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(z_l_np)
-
-    distances, _ = index.search(z_u_np, k=1)
-    distances = np.sqrt(distances[:, 0])
+    threshold = hnsw_min_nl if hnsw_min_nl is not None else DIVERSITY_HNSW_MIN_NL
+    distances = _nearest_labeled_distances(z_u_np, z_l_np, threshold)
 
     scores = torch.tensor(distances, dtype=torch.float32, device=device)
 
     return torch.clamp(scores, 0.0, 1.0)
+
+
+def diversity_approx_error(Z_u: torch.Tensor, Z_l: torch.Tensor) -> dict:
+    """
+    Benchmarking/diagnostic helper: quantify how much the HNSW approximation
+    in diversity() actually costs in accuracy, by comparing it against exact
+    (Flat) search on the same inputs.
+
+    Not used in the production scoring path -- computing both exact and
+    approximate results defeats the point of the optimization. Intended for
+    the benchmark suite (see docs/benchmark-handoff.md) when re-measuring
+    Fig. 5d / Section 2.6 with the HNSW path, to report an actual error rate
+    alongside the timing improvement rather than assuming the approximation
+    is harmless.
+
+    Returns
+    -------
+    dict with:
+        recall_at_1: fraction of Z_u rows where HNSW's nearest labelled
+            neighbour is the *same point* Flat found (exact match rate).
+        mean_abs_distance_error / max_abs_distance_error: |approx - exact|
+            over the (Euclidean, post-L2-normalization) 1-NN distances,
+            for rows where HNSW picked a different (necessarily farther,
+            since Flat is exact) neighbour.
+        n: number of Z_u rows compared.
+    """
+    if Z_u.numel() == 0 or Z_l.numel() == 0:
+        return {"recall_at_1": None, "mean_abs_distance_error": None, "max_abs_distance_error": None, "n": 0}
+
+    z_u_np = _to_np(Z_u)
+    z_l_np = _to_np(Z_l)
+    dim = z_l_np.shape[1]
+
+    exact_index = faiss.IndexFlatL2(dim)
+    exact_index.add(z_l_np)
+    exact_distances, exact_indices = exact_index.search(z_u_np, k=1)
+    exact_distances = np.sqrt(np.maximum(exact_distances[:, 0], 0.0))
+
+    approx_index = _make_hnsw_index(z_l_np)
+    approx_distances, approx_indices = approx_index.search(z_u_np, k=1)
+    approx_distances = np.sqrt(np.maximum(approx_distances[:, 0], 0.0))
+
+    matches = exact_indices[:, 0] == approx_indices[:, 0]
+    abs_error = np.abs(approx_distances - exact_distances)
+
+    return {
+        "recall_at_1": float(matches.mean()),
+        "mean_abs_distance_error": float(abs_error.mean()),
+        "max_abs_distance_error": float(abs_error.max()) if abs_error.size else 0.0,
+        "n": int(z_u_np.shape[0]),
+    }
+
 
 def density(
     Z_u: torch.Tensor,
