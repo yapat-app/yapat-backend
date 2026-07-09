@@ -5,9 +5,10 @@ Authentication endpoints
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
+from typing import List
 
-from app.api.deps import get_db, get_current_active_user
-from app.schemas.user import User, UserCreate, LoginRequest, LoginResponse
+from app.api.deps import get_db, get_current_active_user, get_current_admin_user
+from app.schemas.user import User, UserCreate, LoginRequest, LoginResponse, AdminExistsResponse
 from app.models.user import User as UserModel, UserRole
 from app.models.invitation import InvitationLink as InvitationLinkModel
 from app.models.team import (
@@ -20,6 +21,19 @@ from app.core.security import get_password_hash, verify_password, create_access_
 router = APIRouter()
 
 
+@router.get("/admin-exists", response_model=AdminExistsResponse)
+def admin_exists(db: Session = Depends(get_db)):
+    """
+    Public, unauthenticated check for whether an admin account already
+    exists -- used by the frontend to decide whether to offer self-service
+    admin registration (only meaningful before the very first admin has
+    been created) versus pointing people at an existing admin for an
+    invitation.
+    """
+    exists = db.query(UserModel.id).filter(UserModel.role == UserRole.ADMIN).first() is not None
+    return AdminExistsResponse(admin_exists=exists)
+
+
 @router.post("/register", response_model=User, status_code=status.HTTP_201_CREATED)
 def register(user_in: UserCreate, db: Session = Depends(get_db)):
     """Register a new user"""
@@ -30,7 +44,20 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username already registered"
         )
-    
+
+    # Self-service admin registration is only allowed to bootstrap the very
+    # first admin on a fresh instance. Once one exists, further admin
+    # accounts must come from an existing admin (there's no
+    # invitation-based path for ADMIN today, unlike TEAM_OWNER below --
+    # this is a deliberate hard stop, not a gap to fill later).
+    if user_in.role == UserRole.ADMIN:
+        existing_admin = db.query(UserModel.id).filter(UserModel.role == UserRole.ADMIN).first()
+        if existing_admin is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="An admin account already exists. Ask an existing admin for access.",
+            )
+
     # Handle invitation tokens if provided
     invitation = None
     team_invitation = None
@@ -183,6 +210,54 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
             
             db.commit()
     
+    return db_user
+
+
+@router.get("/admin/users", response_model=List[User])
+def admin_list_users(
+    db: Session = Depends(get_db),
+    _admin: UserModel = Depends(get_current_admin_user),
+):
+    """
+    Admin-only listing of all user accounts, ordered by username. Backs the
+    "manage users" screen so an admin can see who already exists before
+    creating another account (there's no other way to enumerate users today).
+    """
+    return db.query(UserModel).order_by(UserModel.username).all()
+
+
+@router.post("/admin/create-user", response_model=User, status_code=status.HTTP_201_CREATED)
+def admin_create_user(
+    user_in: UserCreate,
+    db: Session = Depends(get_db),
+    _admin: UserModel = Depends(get_current_admin_user),
+):
+    """
+    Admin-only user creation, including creating additional admin accounts.
+
+    Unlike /register, this is not gated by the single-admin bootstrap check
+    -- an authenticated admin is exactly the trusted party that check exists
+    to require. Invitation tokens are ignored here: an admin creating a user
+    directly assigns the role themselves rather than going through the
+    invitation flow.
+    """
+    db_user = db.query(UserModel).filter(UserModel.username == user_in.username).first()
+    if db_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already registered"
+        )
+
+    hashed_password = get_password_hash(user_in.password)
+    db_user = UserModel(
+        username=user_in.username,
+        hashed_password=hashed_password,
+        full_name=user_in.full_name,
+        role=user_in.role,
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
     return db_user
 
 
