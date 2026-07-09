@@ -34,6 +34,7 @@ class DatasetUpdate(BaseModel):
     dataset_type: Optional[DatasetType] = None
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
+    retrain_after_threshold: Optional[int] = None
 
     @field_validator("spectrogram_f_min_hz", "spectrogram_f_max_hz")
     @classmethod
@@ -42,6 +43,15 @@ class DatasetUpdate(BaseModel):
             return None
         if v < 0:
             raise ValueError(f"{info.field_name} must be non-negative")
+        return v
+
+    @field_validator("retrain_after_threshold")
+    @classmethod
+    def validate_retrain_threshold(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return None
+        if v < 1:
+            raise ValueError("retrain_after_threshold must be at least 1")
         return v
 
 
@@ -53,6 +63,7 @@ class Dataset(DatasetBase):
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
     quick_labels: Optional[List[Dict[str, Any]]] = None
+    retrain_after_threshold: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     recording_count: Optional[int] = None  # Number of recordings in this dataset

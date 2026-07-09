@@ -28,6 +28,7 @@ from app.schemas.pam_active_learning import ALModelType
 from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
 from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
 from app.models.wssed_pytorch_models import SimpleLinearClassifier
+from active_learning.config import RETRAIN_AFTER
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,20 @@ def get_pam_dataset(db: Session, dataset_id: int) -> Dataset:
             f"expected one of {[t.value for t in _AL_ELIGIBLE_DATASET_TYPES]}"
         )
     return ds
+
+
+def get_retrain_threshold(db: Session, dataset_id: int) -> int:
+    """Effective feedback-count threshold that triggers auto-retrain for a dataset.
+
+    Uses the dataset's ``retrain_after_threshold`` override when set, otherwise
+    falls back to the global ``RETRAIN_AFTER`` default.
+    """
+    override = (
+        db.query(Dataset.retrain_after_threshold)
+        .filter(Dataset.id == dataset_id)
+        .scalar()
+    )
+    return override if override is not None else RETRAIN_AFTER
 
 
 def get_checkpoint(db: Session, checkpoint_id: int) -> Optional[ALModelCheckpoint]:
