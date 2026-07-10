@@ -85,6 +85,7 @@ def get_feed(
         status: Optional[str] = Query(default=None, description="Filter by snippet status (for 'random' method)"),
         annotation_status: Optional[str] = Query(default="any", description="For 'filter' method: 'any' | 'annotated' | 'unannotated'"),
         location: Optional[str] = Query(default=None, description="For 'filter' method: comma-separated location values to filter by"),
+        species: Optional[str] = Query(default=None, description="For 'filter' method: comma-separated annotated species labels to filter by"),
         embedding_model_id: Optional[int] = Query(default=None, description="Embedding model ID (for 'similarity' method)"),
         query_snippet_id: Optional[int] = Query(default=None, description="Snippet ID to use as query (for 'similarity' method)"),
         crop_start_sec: Optional[float] = Query(default=None, description="Crop start time in seconds (for 'similarity' method)"),
@@ -165,6 +166,7 @@ def get_feed(
                 recording_id=recording_id,
                 annotation_status=annotation_status,
                 location=location,
+                species=species,
                 skip=skip,
                 limit=limit,
             )

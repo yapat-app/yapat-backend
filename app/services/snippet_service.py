@@ -303,8 +303,12 @@ class SnippetService:
         Filter snippets by annotation status.
 
         Args:
-            annotation_status: 'any' (default), 'annotated' (has >=1 annotation),
-                or 'unannotated' (has no annotations).
+            annotation_status: 'any' (default), 'annotated' (has >=1 label),
+                or 'unannotated' (has no label). Matches ALSnippetAnnotation
+                (GROUND_TRUTH + USER sources) -- the same superset of
+                canonical Annotation that the species filter matches against
+                -- so a snippet counts as "annotated" whether it was labeled
+                via the classic hub, AL-mode feedback, or ground-truth import.
             species: Comma-separated list of annotated species labels. Only
                 snippets with at least one matching label are returned.
 
@@ -330,8 +334,13 @@ class SnippetService:
 
         status = (annotation_status or "any").lower()
         has_annotation = (
-            self.db.query(Annotation.id)
-            .filter(Annotation.snippet_id == Snippet.id)
+            self.db.query(ALSnippetAnnotation.id)
+            .filter(
+                ALSnippetAnnotation.snippet_id == Snippet.id,
+                ALSnippetAnnotation.source.in_(
+                    [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
+                ),
+            )
             .exists()
         )
         if status == "annotated":
