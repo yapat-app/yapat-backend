@@ -17,12 +17,37 @@ from app.models.recording import Recording
 from app.models.dataset import Dataset
 from app.models.user import User
 from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
+from app.services.dataset_service import DatasetService
 from app.core import taxonomy
 from sqlalchemy import func
 
 _MAX_ANNOTATION_SNIPPET_IDS_FILTER = 400
 
 router = APIRouter()
+
+
+def _require_snippet_annotation_access(db: Session, snippet_id: int, user: User) -> None:
+    snippet = (
+        db.query(Snippet)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(Snippet.id == snippet_id)
+        .first()
+    )
+    if snippet is None or snippet.recording is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Snippet not found")
+
+    dataset_id = snippet.recording.dataset_id
+    if not DatasetService(db).user_can_access_dataset(user, dataset_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to annotate this dataset",
+        )
+
+
+def _require_annotation_delete_access(db: Session, annotation: AnnotationModel, user: User) -> None:
+    if annotation.user_id == user.id:
+        return
+    _require_snippet_annotation_access(db, annotation.snippet_id, user)
 
 
 def _mirror_to_al(db: Session, annotation: AnnotationModel) -> None:
@@ -90,6 +115,8 @@ def create_annotation(
     If `species_name` is provided, it will be automatically resolved to a taxon_id via the taxonomy service.
     The scientific name is automatically resolved and snapshotted.
     """
+    _require_snippet_annotation_access(db, annotation_in.snippet_id, current_user)
+
     taxon_id = annotation_in.taxon_id
     resolved = None
     
@@ -192,6 +219,8 @@ def create_annotations_batch(
     in the same audio snippet. Duplicate taxon_id for the same snippet are not allowed.
     """
     snippet_id = batch_in.snippet_id
+    _require_snippet_annotation_access(db, snippet_id, current_user)
+
     # Existing taxon_ids on this snippet (no duplicates allowed)
     existing_taxon_ids = {
         a.taxon_id
@@ -378,12 +407,14 @@ def delete_annotation(
     """
     Delete an annotation.
     
-    Users can only delete their own annotations.
-    Team owners can delete any annotation in their teams (future enhancement).
+    Users can delete their own annotations.
+    Team members can delete annotations on datasets they can access.
     """
     annotation = db.query(AnnotationModel).filter(AnnotationModel.id == annotation_id).first()
     if not annotation:
         raise HTTPException(status_code=404, detail="Annotation not found")
+
+    _require_annotation_delete_access(db, annotation, current_user)
     
     _unmirror_from_al(db, annotation)
     db.delete(annotation)
@@ -462,4 +493,3 @@ def get_all_datasets_annotation_stats(
         datasets=dataset_stats_list,
         total_datasets=len(datasets)
     )
-

@@ -35,6 +35,7 @@ from app.schemas.pam_active_learning import (
     ALSnippetLabelsResponse,
     ALSnippetLabel,
 )
+from app.services.dataset_service import DatasetService
 from app.services.pam_al.service import PAMActiveLearningService
 
 logger = logging.getLogger(__name__)
@@ -319,11 +320,18 @@ def submit_feedback(
     retrain_triggered=true and auto_retrain_job_id so the caller can poll job
     status via GET /retrain/jobs/{auto_retrain_job_id}.
     """
+    if not DatasetService(db).user_can_access_dataset(current_user, body.dataset_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to submit feedback for this dataset",
+        )
+
+    # Feedback is always attributable to the authenticated caller. Team members
+    # can collaborate on shared datasets without impersonating each other.
+    body.user_id = current_user.id
+
     service = PAMActiveLearningService(db)
     try:
-        # Ensure feedback is attributable; also used when persisting confirmed labels.
-        if body.user_id is None:
-            body.user_id = current_user.id
         result = service.submit_feedback(body)
 
         if result.get("auto_retrain_job_id"):
