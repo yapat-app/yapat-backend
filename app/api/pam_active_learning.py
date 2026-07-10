@@ -17,6 +17,8 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from app.api.deps import get_db, get_current_active_user
+from app.models.annotation import Annotation as AnnotationModel
+from app.models.pam_active_learning import ALAnnotationSource, ALSnippetAnnotation
 from app.models.user import User
 from app.schemas.pam_active_learning import (
     ALCheckpointCreate,
@@ -671,3 +673,66 @@ def list_snippet_labels(
         snippet_set_id=snippet_set_id,
         items=[ALSnippetLabel(**item) for item in items],
     )
+
+
+@router.delete("/snippet-labels", status_code=status.HTTP_204_NO_CONTENT)
+def delete_snippet_label(
+    dataset_id: int = Query(..., description="Dataset ID"),
+    snippet_id: int = Query(..., description="Snippet ID"),
+    label: str = Query(..., description="Exact label to remove"),
+    source: str = Query("user", description="'user' or 'ground_truth'"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Remove a persisted snippet label from the AL label table.
+
+    USER labels are collaborative within a dataset. GROUND_TRUTH labels are
+    protected and can only be changed by admins or dataset team owners.
+    """
+    label = label.strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="label is required")
+
+    dataset_svc = DatasetService(db)
+    dataset = dataset_svc.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if not dataset_svc.user_can_access_dataset(current_user, dataset_id):
+        raise HTTPException(status_code=403, detail="Not authorized to edit this dataset")
+
+    if source == ALAnnotationSource.GROUND_TRUTH.value:
+        if not dataset_svc.user_can_manage_dataset(current_user, dataset):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admins and team owners can edit ground-truth labels",
+            )
+        source_enum = ALAnnotationSource.GROUND_TRUTH
+    elif source == ALAnnotationSource.USER.value:
+        source_enum = ALAnnotationSource.USER
+    else:
+        raise HTTPException(status_code=400, detail="source must be 'user' or 'ground_truth'")
+
+    (
+        db.query(ALSnippetAnnotation)
+        .filter(
+            ALSnippetAnnotation.dataset_id == dataset_id,
+            ALSnippetAnnotation.snippet_id == snippet_id,
+            ALSnippetAnnotation.label == label,
+            ALSnippetAnnotation.source == source_enum,
+        )
+        .delete(synchronize_session=False)
+    )
+
+    if source_enum == ALAnnotationSource.USER:
+        (
+            db.query(AnnotationModel)
+            .filter(
+                AnnotationModel.snippet_id == snippet_id,
+                AnnotationModel.resolved_name_snapshot == label,
+            )
+            .delete(synchronize_session=False)
+        )
+
+    db.commit()
+    return None
