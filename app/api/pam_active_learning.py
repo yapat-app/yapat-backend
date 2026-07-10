@@ -481,6 +481,16 @@ def train_from_scratch(
     dispatches the work to the pam_al Celery queue, and returns the job_id
     for polling.  Poll GET /retrain/jobs/{job_id} to track progress.
     """
+    dataset_svc = DatasetService(db)
+    dataset = dataset_svc.get_dataset(body.dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if not dataset_svc.user_can_manage_dataset(current_user, dataset):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins and team owners can create ground-truth training labels",
+        )
+
     svc = PAMActiveLearningService(db)
     try:
         ckpt, job = svc.setup_train_from_scratch(body)
@@ -640,9 +650,20 @@ def list_snippet_labels(
     Per-snippet ground-truth / user labels — feeds the `actual_label` color
     filter on the projection view.
     """
+    dataset_svc = DatasetService(db)
+    dataset = dataset_svc.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if not dataset_svc.user_can_access_dataset(current_user, dataset_id):
+        raise HTTPException(status_code=403, detail="Not authorized to access this dataset")
+
     svc = PAMActiveLearningService(db)
     try:
-        items = svc.list_snippet_labels(dataset_id, snippet_set_id)
+        items = svc.list_snippet_labels(
+            dataset_id,
+            snippet_set_id,
+            ground_truth_can_edit=dataset_svc.user_can_manage_dataset(current_user, dataset),
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load snippet labels: {e}")
     return ALSnippetLabelsResponse(

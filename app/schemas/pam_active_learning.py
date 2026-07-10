@@ -453,9 +453,19 @@ class ALLabeledSnippetsResponse(BaseModel):
     snippet_ids: List[int]
 
 
+class ALSnippetLabelDetail(BaseModel):
+    label: str
+    source: str
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    labeled_by: str
+    can_edit: bool = False
+
+
 class ALSnippetLabel(BaseModel):
     snippet_id: int
     labels: List[str]
+    label_details: List[ALSnippetLabelDetail] = Field(default_factory=list)
 
 
 class ALSnippetLabelsResponse(BaseModel):
