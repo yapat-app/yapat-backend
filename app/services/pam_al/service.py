@@ -866,11 +866,22 @@ class PAMActiveLearningService:
         self,
         dataset_id: int,
         snippet_set_id: Optional[int] = None,
+        ground_truth_can_edit: bool = False,
     ) -> List[Dict[str, Any]]:
         """Per-snippet ground-truth / user labels — feeds the `actual_label` color filter."""
         labels_by_snippet = ann_h.get_labels_by_snippet(self.db, dataset_id, snippet_set_id)
+        details_by_snippet = ann_h.get_label_details_by_snippet(
+            self.db,
+            dataset_id,
+            snippet_set_id,
+            ground_truth_can_edit=ground_truth_can_edit,
+        )
         return [
-            {"snippet_id": sid, "labels": labels}
+            {
+                "snippet_id": sid,
+                "labels": labels,
+                "label_details": details_by_snippet.get(sid, []),
+            }
             for sid, labels in sorted(labels_by_snippet.items())
         ]
 
@@ -1626,4 +1637,3 @@ class PAMActiveLearningService:
             "feedback_count_since_retrain": feedback_count,
             "retrain_triggered": retrain_triggered,
         }
-
