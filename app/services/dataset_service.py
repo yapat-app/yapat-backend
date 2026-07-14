@@ -669,7 +669,6 @@ class DatasetService:
         self.db.add_all(batch)
         self.db.commit()
         batch.clear()
-        return rec
 
     # ---------------------------------------------------------
     # Dataset explorer - scan physical directory structure
