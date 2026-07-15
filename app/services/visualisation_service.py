@@ -1,5 +1,4 @@
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -595,15 +594,20 @@ class VISService:
             dr_tasks["tsne_3d"] = lambda: run_dr_tsne(X_r, dimensions=3, precomputed_knn=knn)
             dr_tasks["isomap_3d"] = lambda: run_dr_isomap(X_r, dimensions=3, n_neighbors=_knn_neighbors, precomputed_knn=knn)
 
-        with ThreadPoolExecutor(max_workers=len(dr_tasks)) as executor:
-            futures = {executor.submit(fn): name for name, fn in dr_tasks.items()}
-            for future in as_completed(futures):
-                name = futures[future]
-                try:
-                    coords[name] = future.result()
-                    logger.info("fpv dataset: %s done n=%s", name, n)
-                except Exception:
-                    logger.exception("fpv dataset: %s failed n=%s, skipping", name, n)
+        # Run sequentially on the calling thread, not via ThreadPoolExecutor.
+        # This service runs inside a Celery prefork worker child; numba-jitted
+        # DR libraries (umap-learn/pynndescent) executing on a background
+        # thread of an already-forked process are prone to SIGSEGV.
+        # ProcessPoolExecutor isn't a fix either: prefork worker children are
+        # daemonic, and Python's multiprocessing forbids daemonic processes
+        # from spawning children. Above the t-SNE/Isomap size cutoff, only
+        # umap_2d runs, so the thread pool bought no real parallelism anyway.
+        for name, fn in dr_tasks.items():
+            try:
+                coords[name] = fn()
+                logger.info("fpv dataset: %s done n=%s", name, n)
+            except Exception:
+                logger.exception("fpv dataset: %s failed n=%s, skipping", name, n)
 
         logger.info("fpv dataset: DR finished n=%s methods=%s", n, list(coords.keys()))
         return coords
