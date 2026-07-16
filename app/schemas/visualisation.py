@@ -97,6 +97,15 @@ class FPVColorMetadata(BaseModel):
     values: List[Optional[str | float]]
     mode: str  # "continuous", "categorical", "none"
 
+class FPVMethodAvailability(BaseModel):
+    """Whether a DR method is expected to ever produce coordinates for this
+    dataset, distinct from "not computed yet". Lets the frontend stop polling
+    and show an accurate message for methods that are permanently skipped
+    (dataset too large) instead of implying a retry/wait would help."""
+    available: bool
+    reason: Optional[str] = None
+
+
 class FPVResponse(BaseModel):
     dataset_id: int
     model_family_name: Optional[str] = None
@@ -108,3 +117,7 @@ class FPVResponse(BaseModel):
     points: List[FPVPointMetadata]
     projections_2d: Dict[str, FPVProjection2D]
     projections_3d: Optional[Dict[str, FPVProjection3D]] = None
+    # Keyed by method name (pca/umap/tsne/isomap). Only present for methods
+    # that are structurally unavailable at this dataset's size -- absence of
+    # a key means "available or not yet known", not "definitely available".
+    method_availability: Optional[Dict[str, FPVMethodAvailability]] = None

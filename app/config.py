@@ -89,6 +89,23 @@ class Settings(BaseSettings):
     ACTIVE_LEARNING_MODELS_DIR: Optional[str] = None  # Directory containing pre-trained species models
     AUTO_REGISTER_SPECIES_MODELS: bool = True  # Automatically register species models for FOCAL_RECORDINGS datasets
 
+    # Feature Projection View (dataset-level dimensionality reduction)
+    # Per-method point caps -- methods are gated independently rather than
+    # rejecting the whole FPV run, since PCA stays cheap/fast at any n.
+    # PCA has no cap.
+    # UMAP runs on the main thread rather than a ThreadPoolExecutor thread
+    # (see _compute_visualizations), so it has no fork-safety issue, but it
+    # is single-threaded and therefore slow at large n: a multi-million-point
+    # fit can exceed the Celery task time limit before finishing. Capped here
+    # pending profiling against real task time limits.
+    FPV_UMAP_MAX_POINTS: int = 100_000
+    # t-SNE via openTSNE (FIt-SNE) is FFT-accelerated and memory-light
+    # (~1.3GB at 20k), so it gets a high cap. Isomap builds a dense O(n^2)
+    # geodesic-distance matrix and eigendecomposition; measured to OOM-kill a
+    # 16GB worker at ~20k points, so it stays conservative.
+    FPV_TSNE_MAX_POINTS: int = 50_000
+    FPV_ISOMAP_MAX_POINTS: int = 15_000
+
     # PAM Active Learning
     PAM_AUTO_RETRAIN_THRESHOLD: int = 5  # Auto-retrain after N feedback events
     PAM_DEFAULT_DEVICE: str = "cpu"      # Override with PAM_DEFAULT_DEVICE=cuda on GPU deployments
