@@ -387,23 +387,12 @@ def finalize_embedding_job(self, results, embedding_job_id):
                 invalidate_embedding_cache(job.snippet_set_id, job.embedding_model_id)
                 # Trigger dataset-level FPV generation asynchronously. This makes projections
                 # available instantly on the Active Learning page and decouples them from inference.
-                # Skip datasets too large for the current no-subsampling pipeline so we don't
-                # auto-queue a job that would OOM the worker right after embedding completes.
-                from app.services.visualisation_service import count_fpv_points
-
-                n_fpv = count_fpv_points(db, job.dataset_id, job.embedding_model_id)
-                if n_fpv > settings.FPV_MAX_POINTS:
-                    logger.warning(
-                        "Skipping auto FPV generation for dataset_id=%s: %s snippets "
-                        "exceeds FPV_MAX_POINTS=%s (projections over very large datasets "
-                        "are not yet supported).",
-                        job.dataset_id, n_fpv, settings.FPV_MAX_POINTS,
-                    )
-                else:
-                    generate_fpv_for_dataset.delay(
-                        dataset_id=job.dataset_id,
-                        embedding_model_id=job.embedding_model_id,
-                    )
+                # Per-method point caps (see _compute_visualizations) skip the methods that
+                # don't fit at this dataset size; the response reports their availability.
+                generate_fpv_for_dataset.delay(
+                    dataset_id=job.dataset_id,
+                    embedding_model_id=job.embedding_model_id,
+                )
 
     except Exception as e:
         service.update_job_status(
