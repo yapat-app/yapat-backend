@@ -1,6 +1,7 @@
 """
 Celery tasks for the embedding pipeline (SnippetSet architecture).
 """
+import logging
 import os
 import time
 from typing import Dict, List, Union
@@ -23,6 +24,8 @@ from app.models.snippet import Snippet
 from app.services.embedding_service import EmbeddingService, VectorStore
 from app.schemas.visualisation import FPVDatasetRequest
 from benchmarks.stage_timer import stage_timer, write_csv_row
+
+logger = logging.getLogger(__name__)
 
 
 # from sqlalchemy.orm import Session
@@ -401,10 +404,23 @@ def finalize_embedding_job(self, results, embedding_job_id):
                 invalidate_embedding_cache(job.snippet_set_id, job.embedding_model_id)
                 # Trigger dataset-level FPV generation asynchronously. This makes projections
                 # available instantly on the Active Learning page and decouples them from inference.
-                generate_fpv_for_dataset.delay(
-                    dataset_id=job.dataset_id,
-                    embedding_model_id=job.embedding_model_id,
-                )
+                # Skip datasets too large for the current no-subsampling pipeline so we don't
+                # auto-queue a job that would OOM the worker right after embedding completes.
+                from app.services.visualisation_service import count_fpv_points
+
+                n_fpv = count_fpv_points(db, job.dataset_id, job.embedding_model_id)
+                if n_fpv > settings.FPV_MAX_POINTS:
+                    logger.warning(
+                        "Skipping auto FPV generation for dataset_id=%s: %s snippets "
+                        "exceeds FPV_MAX_POINTS=%s (projections over very large datasets "
+                        "are not yet supported).",
+                        job.dataset_id, n_fpv, settings.FPV_MAX_POINTS,
+                    )
+                else:
+                    generate_fpv_for_dataset.delay(
+                        dataset_id=job.dataset_id,
+                        embedding_model_id=job.embedding_model_id,
+                    )
 
     except Exception as e:
         service.update_job_status(

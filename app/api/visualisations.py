@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 from app.api.deps import get_db
+from app.config import settings
 from app.services.visualisation_service import VISService
 from app.services.fpv_cache import get_cached_fpv, set_cached_fpv
 from app.models.embedding import EmbeddingVector, SnippetSet
@@ -69,22 +70,29 @@ def generate_fpv_dataset(body: FPVDatasetRequest, db: Session = Depends(get_db))
     GET /fpv-dataset afterward; it 400s with "generate projections first"
     until the job completes.
     """
-    # Cheap existence check so we still fail fast (400) instead of silently
-    # queuing a job that's guaranteed to fail with "no embeddings found".
-    exists = (
-        db.query(EmbeddingVector.id)
-        .join(Snippet, Snippet.id == EmbeddingVector.snippet_id)
-        .join(SnippetSet, SnippetSet.id == Snippet.snippet_set_id)
-        .filter(SnippetSet.dataset_id == body.dataset_id)
-        .filter(EmbeddingVector.embedding_model_id == body.embedding_model_id)
-        .first()
-    )
-    if exists is None:
+    # Count embeddings up front. This lets us (a) fail fast with 400 instead of
+    # queuing a job guaranteed to fail with "no embeddings found", and (b)
+    # reject datasets too large for the current no-subsampling pipeline before
+    # they get queued and OOM/crash the worker.
+    from app.services.visualisation_service import count_fpv_points
+
+    n_points = count_fpv_points(db, body.dataset_id, body.embedding_model_id)
+    if n_points == 0:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"No embeddings found for dataset_id={body.dataset_id}, "
                 f"embedding_model_id={body.embedding_model_id}."
+            ),
+        )
+    if n_points > settings.FPV_MAX_POINTS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Dataset too large for feature-projection generation: "
+                f"{n_points} snippets exceeds the current limit of "
+                f"{settings.FPV_MAX_POINTS}. Projections over very large "
+                f"datasets are not yet supported."
             ),
         )
 

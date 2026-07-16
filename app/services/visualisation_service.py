@@ -4,6 +4,7 @@ import numpy as np
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import SessionLocal
 
 from app.models.pam_active_learning import ALPrediction, ALModelFamilyState, ALModelCheckpoint
@@ -15,6 +16,7 @@ from app.schemas.visualisation import (
     FPVRequest,
     FPVDatasetRequest,
     FPVResponse,
+    FPVMethodAvailability,
     FPVPointMetadata,
     FPVProjection2D,
     FPVProjection3D,
@@ -29,6 +31,35 @@ from utils.dr_methods import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _fpv_method_availability(n: int) -> dict[str, FPVMethodAvailability] | None:
+    """Per-method availability for a dataset-level FPV response.
+
+    Only includes entries for methods that are permanently skipped at this
+    dataset size (n over the method's point cap in _compute_visualizations),
+    so the frontend can tell "will never be computed" apart from "not
+    computed yet" and stop polling/offering a retry for the former. PCA has
+    no cap and is never included. Returns None if nothing is capped out.
+    """
+    caps = {
+        "umap": settings.FPV_UMAP_MAX_POINTS,
+        "tsne": settings.FPV_TSNE_MAX_POINTS,
+        "isomap": settings.FPV_ISOMAP_MAX_POINTS,
+    }
+    unavailable = {
+        method: FPVMethodAvailability(
+            available=False,
+            reason=(
+                f"Dataset has {n:,} points, exceeding the {cap:,}-point limit for "
+                f"{method.upper() if method != 'tsne' else 't-SNE'}."
+            ),
+        )
+        for method, cap in caps.items()
+        if n > cap
+    }
+    return unavailable or None
+
 
 _FPV_COORD_COLUMNS = (
     "pca_2d_x", "pca_2d_y", "pca_3d_x", "pca_3d_y", "pca_3d_z",
@@ -485,6 +516,7 @@ class VISService:
             points=points,
             projections_2d=projections_2d,
             projections_3d=projections_3d if has_any_3d else None,
+            method_availability=_fpv_method_availability(len(rows)),
         )
 
     @staticmethod
@@ -527,23 +559,49 @@ class VISService:
         if n < 2:
             raise ValueError("Need at least 2 samples to compute visualization coordinates.")
 
-        # t-SNE / Isomap are very slow for large n and often OOM on limited workers.
-        # UMAP uses PCA pre-reduction (1024→50 dims) so it's fine at any n.
-        full_dr_max_points = 15_000
-        run_tsne_isomap = n <= full_dr_max_points
+        # UMAP, t-SNE, and Isomap scale very differently, so each is gated by
+        # its own point cap rather than one shared cutoff.
+        #
+        # t-SNE (openTSNE / FIt-SNE) is FFT-accelerated and memory-light:
+        # ~20k points run in ~50s using ~1.3GB, so it's safe well past the old
+        # shared 15k cap.
+        #
+        # Isomap builds a dense O(n^2) geodesic-distance matrix plus a dense
+        # eigendecomposition; measured to OOM-kill a 16GB worker at ~20k points,
+        # so it keeps the conservative cap.
+        umap_max_points = settings.FPV_UMAP_MAX_POINTS
+        tsne_max_points = settings.FPV_TSNE_MAX_POINTS
+        isomap_max_points = settings.FPV_ISOMAP_MAX_POINTS
+        run_umap = n <= umap_max_points
+        run_tsne = n <= tsne_max_points
+        run_isomap = n <= isomap_max_points
 
         logger.info(
-            "fpv dataset: DR start n=%s run_3d=%s tsne_isomap=%s",
+            "fpv dataset: DR start n=%s run_3d=%s umap=%s tsne=%s isomap=%s",
             n,
             run_3d,
-            run_tsne_isomap,
+            run_umap,
+            run_tsne,
+            run_isomap,
         )
 
-        if not run_tsne_isomap:
+        if not run_umap:
             logger.warning(
-                "fpv dataset: skipping t-SNE and Isomap for n=%s (limit %s)",
+                "fpv dataset: skipping UMAP for n=%s (limit %s)",
                 n,
-                full_dr_max_points,
+                umap_max_points,
+            )
+        if not run_tsne:
+            logger.warning(
+                "fpv dataset: skipping t-SNE for n=%s (limit %s)",
+                n,
+                tsne_max_points,
+            )
+        if not run_isomap:
+            logger.warning(
+                "fpv dataset: skipping Isomap for n=%s (limit %s)",
+                n,
+                isomap_max_points,
             )
 
         # Single PCA: covers pca_2d/3d slices AND pre-reduces for kNN methods.
@@ -553,32 +611,40 @@ class VISService:
         coords["pca_2d"] = X_r[:, :2]
         logger.info("fpv dataset: PCA 2D done n=%s", n)
 
-        # Build shared kNN graph once on the already-reduced space.
-        # k=90 satisfies all three methods:
-        #   UMAP      needs k ≥ n_neighbors (90)
-        #   t-SNE     needs k ≥ 3 × perplexity (3 × 30 = 90)
-        #   Isomap    needs k ≥ n_neighbors (90), dense enough to avoid disconnected geodesic graph
-        # This is cheaper than the original code which built three separate graphs
-        # totalling ~151 neighbours (91 for t-SNE + 30 for UMAP + 30 for Isomap).
-        _knn_neighbors = min(90, n - 1)
-        knn = build_knn_graph(X_r, n_neighbors=_knn_neighbors)
-        logger.info("fpv dataset: kNN graph built n=%s k=%s", n, _knn_neighbors)
-
         # PCA coords are free slices; the remaining methods run in parallel.
         if run_3d and n >= 3 and X.shape[1] >= 3:
             coords["pca_3d"] = X_r[:, :3]
 
-        dr_tasks: dict[str, object] = {
-            "umap_2d": lambda: run_dr_umap(X_r, dimensions=2, n_neighbors=_knn_neighbors, low_memory=True, precomputed_knn=knn),
-        }
-        if run_tsne_isomap:
-            dr_tasks["tsne_2d"] = lambda: run_dr_tsne(X_r, dimensions=2, precomputed_knn=knn)
-            dr_tasks["isomap_2d"] = lambda: run_dr_isomap(X_r, dimensions=2, n_neighbors=_knn_neighbors, precomputed_knn=knn)
-        if run_3d and n >= 3:
-            dr_tasks["umap_3d"] = lambda: run_dr_umap(X_r, dimensions=3, n_neighbors=_knn_neighbors, low_memory=True, precomputed_knn=knn)
-        if run_3d and run_tsne_isomap and n >= 4:
-            dr_tasks["tsne_3d"] = lambda: run_dr_tsne(X_r, dimensions=3, precomputed_knn=knn)
-            dr_tasks["isomap_3d"] = lambda: run_dr_isomap(X_r, dimensions=3, n_neighbors=_knn_neighbors, precomputed_knn=knn)
+        dr_tasks: dict[str, object] = {}
+        needs_knn = run_umap or run_tsne or run_isomap
+
+        if needs_knn:
+            # Build shared kNN graph once on the already-reduced space.
+            # k=90 satisfies all three methods:
+            #   UMAP      needs k ≥ n_neighbors (90)
+            #   t-SNE     needs k ≥ 3 × perplexity (3 × 30 = 90)
+            #   Isomap    needs k ≥ n_neighbors (90), dense enough to avoid disconnected geodesic graph
+            # This is cheaper than the original code which built three separate graphs
+            # totalling ~151 neighbours (91 for t-SNE + 30 for UMAP + 30 for Isomap).
+            # Skipped entirely when every kNN-based method is over its point cap:
+            # building it is expensive at large n, and wasted work if
+            # UMAP/t-SNE/Isomap all end up skipped anyway.
+            _knn_neighbors = min(90, n - 1)
+            knn = build_knn_graph(X_r, n_neighbors=_knn_neighbors)
+            logger.info("fpv dataset: kNN graph built n=%s k=%s", n, _knn_neighbors)
+
+            if run_umap:
+                dr_tasks["umap_2d"] = lambda: run_dr_umap(X_r, dimensions=2, n_neighbors=_knn_neighbors, low_memory=True, precomputed_knn=knn)
+            if run_tsne:
+                dr_tasks["tsne_2d"] = lambda: run_dr_tsne(X_r, dimensions=2, precomputed_knn=knn)
+            if run_isomap:
+                dr_tasks["isomap_2d"] = lambda: run_dr_isomap(X_r, dimensions=2, n_neighbors=_knn_neighbors, precomputed_knn=knn)
+            if run_3d and run_umap and n >= 3:
+                dr_tasks["umap_3d"] = lambda: run_dr_umap(X_r, dimensions=3, n_neighbors=_knn_neighbors, low_memory=True, precomputed_knn=knn)
+            if run_3d and run_tsne and n >= 4:
+                dr_tasks["tsne_3d"] = lambda: run_dr_tsne(X_r, dimensions=3, precomputed_knn=knn)
+            if run_3d and run_isomap and n >= 4:
+                dr_tasks["isomap_3d"] = lambda: run_dr_isomap(X_r, dimensions=3, n_neighbors=_knn_neighbors, precomputed_knn=knn)
 
         # Run sequentially on the calling thread, not via ThreadPoolExecutor.
         # This service runs inside a Celery prefork worker child; numba-jitted
@@ -586,8 +652,9 @@ class VISService:
         # thread of an already-forked process are prone to SIGSEGV.
         # ProcessPoolExecutor isn't a fix either: prefork worker children are
         # daemonic, and Python's multiprocessing forbids daemonic processes
-        # from spawning children. Above the t-SNE/Isomap size cutoff, only
-        # umap_2d runs, so the thread pool bought no real parallelism anyway.
+        # from spawning children. Above the per-method size cutoffs only a
+        # subset of methods run, so the thread pool bought no real parallelism
+        # anyway.
         for name, fn in dr_tasks.items():
             try:
                 coords[name] = fn()
