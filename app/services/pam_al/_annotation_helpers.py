@@ -11,6 +11,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from app.models.snippet import Snippet
+from app.models.user import User
 from app.models.pam_active_learning import (
     ALSnippetAnnotation,
     ALAnnotationSource,
@@ -280,6 +281,63 @@ def get_labels_by_snippet(
     for snippet_id, label in query.all():
         grouped.setdefault(snippet_id, set()).add(label)
     return {sid: sorted(labels) for sid, labels in grouped.items()}
+
+
+def get_label_details_by_snippet(
+    db: Session,
+    dataset_id: int,
+    snippet_set_id: int | None = None,
+    ground_truth_can_edit: bool = False,
+    user_label_can_edit: bool = True,
+) -> dict[int, list[dict]]:
+    """
+    Map snippet_id -> trusted labels with source and attribution metadata.
+
+    Ground-truth labels are imported data and intentionally have no user row,
+    so expose a stable display name instead of leaving clients to show Unknown.
+    """
+    query = (
+        db.query(
+            ALSnippetAnnotation.snippet_id,
+            ALSnippetAnnotation.label,
+            ALSnippetAnnotation.source,
+            ALSnippetAnnotation.user_id,
+            User.username,
+        )
+        .outerjoin(User, User.id == ALSnippetAnnotation.user_id)
+        .filter(
+            ALSnippetAnnotation.dataset_id == dataset_id,
+            ALSnippetAnnotation.source.in_([
+                ALAnnotationSource.GROUND_TRUTH,
+                ALAnnotationSource.USER,
+            ]),
+        )
+    )
+    if snippet_set_id is not None:
+        query = (
+            query.join(Snippet, Snippet.id == ALSnippetAnnotation.snippet_id)
+            .filter(Snippet.snippet_set_id == snippet_set_id)
+        )
+
+    grouped: dict[int, dict[tuple[str, str, int | None], dict]] = {}
+    for snippet_id, label, source, user_id, username in query.all():
+        source_value = source.value if hasattr(source, "value") else str(source)
+        is_ground_truth = source_value == ALAnnotationSource.GROUND_TRUTH.value
+        labeled_by = "Ground truth" if is_ground_truth else username
+        key = (label, source_value, user_id)
+        grouped.setdefault(snippet_id, {})[key] = {
+            "label": label,
+            "source": source_value,
+            "user_id": user_id,
+            "username": username,
+            "labeled_by": labeled_by or "Unknown",
+            "can_edit": ground_truth_can_edit if is_ground_truth else user_label_can_edit,
+        }
+
+    return {
+        sid: sorted(details.values(), key=lambda item: (item["label"], item["source"], item["user_id"] or 0))
+        for sid, details in grouped.items()
+    }
 
 
 def get_annotated_snippet_ids_for_snippet_set(

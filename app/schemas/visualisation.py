@@ -58,6 +58,21 @@ class FPVDatasetRequest(BaseModel):
     run_3d: bool = False
     method: Optional[FPVMethod] = None
 
+
+class FPVGenerateAck(BaseModel):
+    """
+    Response for POST /fpv-dataset. Generation runs on a Celery worker (PCA/
+    UMAP/t-SNE/Isomap over the full embedding matrix can take minutes on large
+    datasets), so this endpoint only enqueues the job and returns immediately
+    -- it does not return projection data. Callers should poll
+    GET /fpv-dataset until it stops returning the "generate projections
+    first" error.
+    """
+    status: Literal["queued"]
+    task_id: str
+    dataset_id: int
+    embedding_model_id: int
+
 class FPVPointMetadata(BaseModel):
     snippet_id: int
     predicted_labels: List[str]
@@ -82,6 +97,15 @@ class FPVColorMetadata(BaseModel):
     values: List[Optional[str | float]]
     mode: str  # "continuous", "categorical", "none"
 
+class FPVMethodAvailability(BaseModel):
+    """Whether a DR method is expected to ever produce coordinates for this
+    dataset, distinct from "not computed yet". Lets the frontend stop polling
+    and show an accurate message for methods that are permanently skipped
+    (dataset too large) instead of implying a retry/wait would help."""
+    available: bool
+    reason: Optional[str] = None
+
+
 class FPVResponse(BaseModel):
     dataset_id: int
     model_family_name: Optional[str] = None
@@ -93,3 +117,7 @@ class FPVResponse(BaseModel):
     points: List[FPVPointMetadata]
     projections_2d: Dict[str, FPVProjection2D]
     projections_3d: Optional[Dict[str, FPVProjection3D]] = None
+    # Keyed by method name (pca/umap/tsne/isomap). Only present for methods
+    # that are structurally unavailable at this dataset's size -- absence of
+    # a key means "available or not yet known", not "definitely available".
+    method_availability: Optional[Dict[str, FPVMethodAvailability]] = None

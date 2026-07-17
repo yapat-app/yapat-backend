@@ -45,14 +45,12 @@ from app.schemas.pam_active_learning import (
 from app.utils.pam_training_paths import resolve_pam_training_paths
 from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
 from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
-from active_learning.config import RETRAIN_AFTER
 from active_learning.config import (
     DEFAULT_INFERENCE_THRESHOLD,
     DEFAULT_DENSITY_K,
     DEFAULT_COMPOSITE_WU,
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
-    RETRAIN_AFTER,
     DEFAULT_EPOCHS,
     DEFAULT_LEARNING_RATE,
     DEFAULT_BATCH_SIZE,
@@ -411,6 +409,7 @@ class PAMActiveLearningService:
         self.db.refresh(feedback)
 
         feedback_count = fb_h.feedback_count_since_retrain(self.db, model_ckpt.id)
+        retrain_after = ckpt_h.get_retrain_threshold(self.db, body.dataset_id)
         retrain_triggered = False
         auto_retrain_checkpoint_id = None
         auto_retrain_job_id = None
@@ -421,7 +420,7 @@ class PAMActiveLearningService:
         # already failed — that would create an infinite auto-retry loop and the
         # user should investigate and trigger manually instead.
         if (
-            feedback_count >= RETRAIN_AFTER
+            feedback_count >= retrain_after
             and not fb_h.has_active_retrain_job(self.db, model_ckpt.id)
             and not fb_h.has_pending_child_retrain(self.db, model_ckpt.id)
             and not last_retrain_failed
@@ -454,6 +453,7 @@ class PAMActiveLearningService:
         Counts distinct snippets with feedback since the last completed retrain.
         Returns 0 while a retrain is already pending/running for this model family.
         """
+        retrain_after = ckpt_h.get_retrain_threshold(self.db, dataset_id)
         model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(self.db, dataset_id, model_family_name)
         if model_ckpt is None:
             feedback_count = fb_h.feedback_count_since_retrain(self.db, checkpoint_id=None, dataset_id=dataset_id)
@@ -462,7 +462,7 @@ class PAMActiveLearningService:
                 "model_family_name": model_family_name,
                 "active_checkpoint_id": None,
                 "feedback_count_since_retrain": feedback_count,
-                "retrain_after": RETRAIN_AFTER,
+                "retrain_after": retrain_after,
                 "retrain_pending": False,
             }
 
@@ -473,7 +473,7 @@ class PAMActiveLearningService:
                 "model_family_name": model_family_name,
                 "active_checkpoint_id": model_ckpt.id,
                 "feedback_count_since_retrain": 0,
-                "retrain_after": RETRAIN_AFTER,
+                "retrain_after": retrain_after,
                 "retrain_pending": True,
             }
 
@@ -483,7 +483,7 @@ class PAMActiveLearningService:
             "model_family_name": model_family_name,
             "active_checkpoint_id": model_ckpt.id,
             "feedback_count_since_retrain": feedback_count,
-            "retrain_after": RETRAIN_AFTER,
+            "retrain_after": retrain_after,
             "retrain_pending": False,
         }
 
@@ -750,6 +750,15 @@ class PAMActiveLearningService:
         if not predictions_exist or body.force_refresh:
             X, snippet_rows = data_h.load_embeddings(self.db, body.snippet_set_id, embedding_model_id)
 
+            # End the read transaction now: load_model_from_checkpoint below is a
+            # disk-bound torch.load with no DB activity, and label_order resolution
+            # (unless it hits the label_config_path branch, which commits itself) is
+            # in-memory. Without this, the session sits idle-in-transaction across
+            # that gap and Postgres kills it (idle_in_transaction_session_timeout)
+            # before the later write in run_and_store_inference can land — same
+            # class of bug as the commit() in _inference_helpers.run_and_store_inference.
+            self.db.commit()
+
             # Resolve label order *before* loading the model so we can fall back to
             # rebuilding the classifier when legacy checkpoint metadata is missing.
             label_order = hyper.get("label_order")
@@ -938,11 +947,22 @@ class PAMActiveLearningService:
         self,
         dataset_id: int,
         snippet_set_id: Optional[int] = None,
+        ground_truth_can_edit: bool = False,
     ) -> List[Dict[str, Any]]:
         """Per-snippet ground-truth / user labels — feeds the `actual_label` color filter."""
         labels_by_snippet = ann_h.get_labels_by_snippet(self.db, dataset_id, snippet_set_id)
+        details_by_snippet = ann_h.get_label_details_by_snippet(
+            self.db,
+            dataset_id,
+            snippet_set_id,
+            ground_truth_can_edit=ground_truth_can_edit,
+        )
         return [
-            {"snippet_id": sid, "labels": labels}
+            {
+                "snippet_id": sid,
+                "labels": labels,
+                "label_details": details_by_snippet.get(sid, []),
+            }
             for sid, labels in sorted(labels_by_snippet.items())
         ]
 
@@ -1396,23 +1416,20 @@ class PAMActiveLearningService:
         dataset_id = new_ckpt.dataset_id
         snippet_set_id = hyper.get("resolved_snippet_set_id")
         embedding_model_id = hyper.get("embedding_model_id")
-        label_order = hyper.get("label_order")
         parent_checkpoint_id = hyper.get("parent_checkpoint_id")
+        # label_order is no longer inherited from the parent -- recomputed below
+        # from current trusted annotations, since the label set can grow (new
+        # species annotated) or shrink (labels drop below min_samples_per_class)
+        # between retrains.
 
         try:
             logger.info(
                 "Starting retrain execution checkpoint_id=%d job_id=%d dataset_id=%d sync_feedback=%s",
-                checkpoint_id,
-                job_id,
-                dataset_id,
-                sync_feedback,
+                checkpoint_id, job_id, dataset_id, sync_feedback,
             )
             job.status = ALRetrainStatus.RUNNING
             self.db.commit()
 
-            # Validate required hyperparameters — inside the try block so
-            # _cleanup_failed_training_checkpoint marks the checkpoint as ERROR
-            # and the job as FAILED rather than leaving them in LOADING/RUNNING.
             if snippet_set_id is None:
                 raise ValueError(
                     f"Checkpoint {checkpoint_id} missing resolved_snippet_set_id "
@@ -1423,25 +1440,18 @@ class PAMActiveLearningService:
                     f"Checkpoint {checkpoint_id} missing embedding_model_id "
                     f"(hyperparameters keys: {list(hyper.keys())})."
                 )
-            if not label_order:
-                raise ValueError(
-                    f"Checkpoint {checkpoint_id} missing label_order "
-                    f"(hyperparameters keys: {list(hyper.keys())})."
-                )
 
             if sync_feedback and parent_checkpoint_id:
                 fb_h.sync_feedback_events_to_annotations(self.db, parent_checkpoint_id)
                 logger.info(
                     "Synchronized feedback annotations for retrain checkpoint_id=%d parent_checkpoint_id=%d",
-                    checkpoint_id,
-                    parent_checkpoint_id,
+                    checkpoint_id, parent_checkpoint_id,
                 )
 
             annotations_by_snippet = ann_h.get_trusted_annotations(self.db, dataset_id)
             logger.info(
                 "Loaded trusted annotations for retrain checkpoint_id=%d annotated_snippets=%d",
-                checkpoint_id,
-                len(annotations_by_snippet),
+                checkpoint_id, len(annotations_by_snippet),
             )
             if not annotations_by_snippet:
                 raise ValueError(
@@ -1450,12 +1460,19 @@ class PAMActiveLearningService:
                     "Ensure ground-truth or user labels exist before retraining."
                 )
 
+            # Recompute the label candidate set fresh each retrain. This is the
+            # full candidate list before min_samples_per_class filtering;
+            # filter_and_balance_classes narrows it to `used_species` below,
+            # which becomes the final, persisted label_order.
+            species_candidates = sorted({lbl for labels in annotations_by_snippet.values() for lbl in labels})
+            if not species_candidates:
+                raise ValueError(f"No labels found in trusted annotations for dataset_id={dataset_id}.")
+
             X, snippet_rows = data_h.load_embeddings(self.db, snippet_set_id, embedding_model_id)
             snippet_ids = [r["snippet_id"] for r in snippet_rows]
             logger.info(
                 "Loaded embeddings for retrain checkpoint_id=%d rows=%d",
-                checkpoint_id,
-                len(snippet_rows),
+                checkpoint_id, len(snippet_rows),
             )
 
             keep = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
@@ -1468,35 +1485,43 @@ class PAMActiveLearningService:
 
             X_train = X[keep]
             train_sids = [snippet_ids[i] for i in keep]
-            y_train = ann_h.build_multihot_from_annotations(train_sids, label_order, annotations_by_snippet)
-
-            keep_rows = y_train.sum(axis=1) > 0
-            X_train, y_train = X_train[keep_rows], y_train[keep_rows]
-            if X_train.shape[0] == 0:
-                # Samples found but ALL have zero label vectors — most likely the
-                # stored annotation labels don't match label_order.
-                sample_labels = set()
-                for sid in train_sids[:5]:
-                    sample_labels.update(annotations_by_snippet.get(sid, set()))
-                raise ValueError(
-                    f"No training rows remain after filtering empty rows "
-                    f"(train_sids={len(train_sids)}, label_order={label_order}, "
-                    f"sample annotation labels={list(sample_labels)})."
-                )
-            logger.info(
-                "Prepared retrain dataset checkpoint_id=%d train_samples=%d num_classes=%d",
-                checkpoint_id,
-                int(X_train.shape[0]),
-                int(y_train.shape[1]),
-            )
+            y_train_full = ann_h.build_multihot_from_annotations(train_sids, species_candidates, annotations_by_snippet)
 
             is_mlp = new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
-
             hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
             do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
             dev = _resolve_device(hyper.get("device"))
 
             model = ckpt_h.make_model(new_ckpt.model_type)
+
+            X_train, y_train, labeled_sids, used_species, excluded_species, class_counts = (
+                model.filter_and_balance_classes(
+                    X=X_train, y=y_train_full, snippet_ids=train_sids,
+                    species_list=species_candidates,
+                    min_samples_per_class=int(hyper.get("min_samples_per_class", 1)),
+                    max_samples_per_class=hyper.get("max_samples_per_class"),
+                )
+            )
+
+            if X_train.shape[0] == 0:
+                sample_labels = set()
+                for sid in train_sids[:5]:
+                    sample_labels.update(annotations_by_snippet.get(sid, set()))
+                raise ValueError(
+                    f"No training rows remain after filtering "
+                    f"(train_sids={len(train_sids)}, species_candidates={species_candidates}, "
+                    f"sample annotation labels={list(sample_labels)})."
+                )
+            if y_train.shape[1] == 0:
+                raise ValueError("No species remain after min_samples_per_class filtering.")
+
+            label_order = used_species  # final, persisted label order for this checkpoint
+
+            logger.info(
+                "Prepared retrain dataset checkpoint_id=%d train_samples=%d num_classes=%d excluded_species=%s",
+                checkpoint_id, int(X_train.shape[0]), int(y_train.shape[1]), excluded_species,
+            )
+
             model.create_classifier(
                 n_dim=X_train.shape[1],
                 num_classes=y_train.shape[1],
@@ -1515,9 +1540,12 @@ class PAMActiveLearningService:
             new_ckpt.checkpoint_path = cp
             new_ckpt.status = ALModelStatus.AVAILABLE
             new_ckpt.hyperparameters = {**(new_ckpt.hyperparameters or {}),
-                "n_dim": int(X_train.shape[1]), "num_classes": int(y_train.shape[1]),
-                "train_samples": int(X_train.shape[0]), "label_order": label_order,
-                "resolved_snippet_set_id": snippet_set_id, "embedding_model_id": embedding_model_id}
+                                        "n_dim": int(X_train.shape[1]), "num_classes": int(y_train.shape[1]),
+                                        "train_samples": int(X_train.shape[0]), "label_order": label_order,
+                                        "used_species": used_species,
+                                        "excluded_species": excluded_species, "class_counts": class_counts,
+                                        "resolved_snippet_set_id": snippet_set_id,
+                                        "embedding_model_id": embedding_model_id}
 
             labeled_ids = ann_h.get_labeled_snippet_ids_for_dataset(self.db, dataset_id)
             inference_metrics = None
@@ -1531,8 +1559,9 @@ class PAMActiveLearningService:
             job.status = ALRetrainStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
             job.result_metrics = {"new_checkpoint_id": new_ckpt.id, "new_checkpoint_path": cp,
-                "train_samples": int(X_train.shape[0]), "num_classes": int(y_train.shape[1]),
-                "inference_metrics": inference_metrics, **train_metrics}
+                                  "train_samples": int(X_train.shape[0]), "num_classes": int(y_train.shape[1]),
+                                  "excluded_species": excluded_species, "class_counts": class_counts,
+                                  "inference_metrics": inference_metrics, **train_metrics}
 
             ckpt_h.set_active_family_checkpoint(self.db, dataset_id, new_ckpt.model_family_name, new_ckpt.id)
             self.db.commit()
@@ -1656,7 +1685,7 @@ class PAMActiveLearningService:
         retrain_triggered = False
         active_checkpoint_id = None
 
-        if feedback_count >= RETRAIN_AFTER:
+        if feedback_count >= ckpt_h.get_retrain_threshold(self.db, body.dataset_id):
             retrain_triggered = True
 
             train_body = ALTrainFromScratchRequest(
@@ -1698,4 +1727,3 @@ class PAMActiveLearningService:
             "feedback_count_since_retrain": feedback_count,
             "retrain_triggered": retrain_triggered,
         }
-

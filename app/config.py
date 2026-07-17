@@ -59,6 +59,19 @@ class Settings(BaseSettings):
     CELERY_TASK_TIME_LIMIT: int = 3600  # 1 hour max per task
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes limit
 
+    # run_embedding dispatches one chord child per this many recordings,
+    # instead of one per recording. Keeps chord/broker bookkeeping (Redis
+    # counters, task messages) proportional to worker concurrency rather
+    # than dataset size — a dataset with tens of thousands of recordings
+    # would otherwise create tens of thousands of chord entries.
+    EMBEDDING_CHORD_CHUNK_SIZE: int = 25
+
+    # scan_dataset gets its own, longer time budget instead of the app-wide
+    # default above — it can legitimately run for hours on very large
+    # datasets (hundreds of GB, tens of thousands of files).
+    SCAN_TASK_TIME_LIMIT: int = 90000       # 25 h hard kill
+    SCAN_TASK_SOFT_TIME_LIMIT: int = 86400  # 24 h soft limit
+
     # OE_YAPAT Service (Custom Taxonomy Generation)
     OE_YAPAT_SERVICE_URL: str = "http://localhost:8002"  
     OE_YAPAT_API_KEY: Optional[str] = None
@@ -75,6 +88,23 @@ class Settings(BaseSettings):
     # Active Learning - Species Models
     ACTIVE_LEARNING_MODELS_DIR: Optional[str] = None  # Directory containing pre-trained species models
     AUTO_REGISTER_SPECIES_MODELS: bool = True  # Automatically register species models for FOCAL_RECORDINGS datasets
+
+    # Feature Projection View (dataset-level dimensionality reduction)
+    # Per-method point caps -- methods are gated independently rather than
+    # rejecting the whole FPV run, since PCA stays cheap/fast at any n.
+    # PCA has no cap.
+    # UMAP runs on the main thread rather than a ThreadPoolExecutor thread
+    # (see _compute_visualizations), so it has no fork-safety issue, but it
+    # is single-threaded and therefore slow at large n: a multi-million-point
+    # fit can exceed the Celery task time limit before finishing. Capped here
+    # pending profiling against real task time limits.
+    FPV_UMAP_MAX_POINTS: int = 100_000
+    # t-SNE via openTSNE (FIt-SNE) is FFT-accelerated and memory-light
+    # (~1.3GB at 20k), so it gets a high cap. Isomap builds a dense O(n^2)
+    # geodesic-distance matrix and eigendecomposition; measured to OOM-kill a
+    # 16GB worker at ~20k points, so it stays conservative.
+    FPV_TSNE_MAX_POINTS: int = 50_000
+    FPV_ISOMAP_MAX_POINTS: int = 15_000
 
     # PAM Active Learning
     PAM_AUTO_RETRAIN_THRESHOLD: int = 5  # Auto-retrain after N feedback events

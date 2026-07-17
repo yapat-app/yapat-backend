@@ -17,12 +17,31 @@ from app.models.recording import Recording
 from app.models.dataset import Dataset
 from app.models.user import User
 from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
+from app.services.dataset_service import DatasetService
 from app.core import taxonomy
 from sqlalchemy import func
 
 _MAX_ANNOTATION_SNIPPET_IDS_FILTER = 400
 
 router = APIRouter()
+
+
+def _require_snippet_annotation_access(db: Session, snippet_id: int, user: User) -> None:
+    snippet = (
+        db.query(Snippet)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(Snippet.id == snippet_id)
+        .first()
+    )
+    if snippet is None or snippet.recording is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Snippet not found")
+
+    dataset_id = snippet.recording.dataset_id
+    if not DatasetService(db).user_can_access_dataset(user, dataset_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to annotate this dataset",
+        )
 
 
 def _mirror_to_al(db: Session, annotation: AnnotationModel) -> None:
@@ -90,6 +109,8 @@ def create_annotation(
     If `species_name` is provided, it will be automatically resolved to a taxon_id via the taxonomy service.
     The scientific name is automatically resolved and snapshotted.
     """
+    _require_snippet_annotation_access(db, annotation_in.snippet_id, current_user)
+
     taxon_id = annotation_in.taxon_id
     resolved = None
     
@@ -173,7 +194,10 @@ def create_annotation(
     db.refresh(annotation)
     _mirror_to_al(db, annotation)
     db.commit()
-    return annotation
+    from app.schemas.annotation import Annotation as AnnotationSchema
+    result = AnnotationSchema.model_validate(annotation)
+    result.username = current_user.username
+    return result
 
 
 @router.post("/batch", response_model=List[Annotation], status_code=status.HTTP_201_CREATED)
@@ -189,6 +213,8 @@ def create_annotations_batch(
     in the same audio snippet. Duplicate taxon_id for the same snippet are not allowed.
     """
     snippet_id = batch_in.snippet_id
+    _require_snippet_annotation_access(db, snippet_id, current_user)
+
     # Existing taxon_ids on this snippet (no duplicates allowed)
     existing_taxon_ids = {
         a.taxon_id
@@ -285,7 +311,13 @@ def create_annotations_batch(
     for annotation in created_annotations:
         _mirror_to_al(db, annotation)
     db.commit()
-    return created_annotations
+    from app.schemas.annotation import Annotation as AnnotationSchema
+    result = []
+    for ann in created_annotations:
+        obj = AnnotationSchema.model_validate(ann)
+        obj.username = current_user.username
+        result.append(obj)
+    return result
 
 
 @router.get("/", response_model=List[Annotation])
@@ -319,7 +351,7 @@ def read_annotations(
     max_limit = 2000 if parsed_id_list else 500
     eff_limit = min(limit, max_limit)
 
-    query = db.query(AnnotationModel).options(joinedload(AnnotationModel.user))
+    query = db.query(AnnotationModel).join(User, AnnotationModel.user_id == User.id)
 
     if parsed_id_list:
         query = query.filter(AnnotationModel.snippet_id.in_(parsed_id_list))
@@ -331,15 +363,17 @@ def read_annotations(
         query = query.filter(AnnotationModel.user_id == user_id)
     if dataset_id:
         # Join through Snippet -> Recording -> Dataset to filter by dataset_id
-        query = query.join(Snippet).join(Recording).filter(Recording.dataset_id == dataset_id)
+        query = query.join(Snippet, AnnotationModel.snippet_id == Snippet.id).join(Recording).filter(Recording.dataset_id == dataset_id)
 
-    annotations = query.offset(skip).limit(eff_limit).all()
-    for ann in annotations:
-        try:
-            ann.username = ann.user.username if ann.user else None
-        except Exception:
-            ann.username = None
-    return annotations
+    rows = query.offset(skip).limit(eff_limit).all()
+
+    from app.schemas.annotation import Annotation as AnnotationSchema
+    result = []
+    for ann in rows:
+        obj = AnnotationSchema.model_validate(ann)
+        obj.username = ann.user.username if ann.user else None
+        result.append(obj)
+    return result
 
 
 @router.get("/{annotation_id}", response_model=Annotation)
@@ -352,11 +386,10 @@ def read_annotation(
     annotation = db.query(AnnotationModel).filter(AnnotationModel.id == annotation_id).first()
     if not annotation:
         raise HTTPException(status_code=404, detail="Annotation not found")
-    try:
-        annotation.username = annotation.user.username if annotation.user else None
-    except Exception:
-        annotation.username = None
-    return annotation
+    from app.schemas.annotation import Annotation as AnnotationSchema
+    result = AnnotationSchema.model_validate(annotation)
+    result.username = annotation.user.username if annotation.user else None
+    return result
 
 
 @router.delete("/{annotation_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -367,12 +400,13 @@ def delete_annotation(
 ):
     """
     Delete an annotation.
-    
+
     Team members can delete annotations made by other users within the same team.
     """
     annotation = db.query(AnnotationModel).filter(AnnotationModel.id == annotation_id).first()
     if not annotation:
         raise HTTPException(status_code=404, detail="Annotation not found")
+
     # Determine the owning team for the snippet's recording dataset.
     # If dataset has no team (admin-created personal dataset), only allow self-deletes or admins.
     snippet_row = db.query(Snippet).filter(Snippet.id == annotation.snippet_id).first()
@@ -479,4 +513,3 @@ def get_all_datasets_annotation_stats(
         datasets=dataset_stats_list,
         total_datasets=len(datasets)
     )
-

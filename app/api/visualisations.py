@@ -3,10 +3,13 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.services.visualisation_service import VISService
 from app.services.fpv_cache import get_cached_fpv, set_cached_fpv
+from app.models.embedding import EmbeddingVector, SnippetSet
+from app.models.snippet import Snippet
 from app.schemas.visualisation import (
     FPVRequest,
     FPVDatasetRequest,
     FPVResponse,
+    FPVGenerateAck,
     FPVColorField,
     FPVMethod,
     FPVVisibilityField,
@@ -54,15 +57,52 @@ def get_fpv(
         raise HTTPException(status_code=500, detail=f"FPV fetch/generation failed: {str(e)}")
 
 
-@router.post("/fpv-dataset", response_model=FPVResponse)
+@router.post("/fpv-dataset", response_model=FPVGenerateAck, status_code=202)
 def generate_fpv_dataset(body: FPVDatasetRequest, db: Session = Depends(get_db)):
-    service = VISService(db)
-    try:
-        return service.generate_fpv_for_dataset_embeddings(body)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"FPV dataset generation failed: {str(e)}")
+    """
+    Enqueue dataset-level FPV generation on a Celery worker and return
+    immediately. PCA/UMAP/t-SNE/Isomap over the full embedding matrix can
+    take minutes on large datasets (hundreds of thousands+ snippets) --
+    running that synchronously in the request handler used to tie up a
+    FastAPI worker thread for the whole duration and risked the client/proxy
+    timing out well before the work actually finished. Poll
+    GET /fpv-dataset afterward; it 400s with "generate projections first"
+    until the job completes.
+    """
+    # Cheap existence check so we fail fast (400) instead of queuing a job
+    # guaranteed to fail with "no embeddings found". Per-method point caps
+    # (see _compute_visualizations) handle oversized datasets by skipping the
+    # methods that don't fit and reporting their availability in the response.
+    exists = (
+        db.query(EmbeddingVector.id)
+        .join(Snippet, Snippet.id == EmbeddingVector.snippet_id)
+        .join(SnippetSet, SnippetSet.id == Snippet.snippet_set_id)
+        .filter(SnippetSet.dataset_id == body.dataset_id)
+        .filter(EmbeddingVector.embedding_model_id == body.embedding_model_id)
+        .first()
+    )
+    if exists is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No embeddings found for dataset_id={body.dataset_id}, "
+                f"embedding_model_id={body.embedding_model_id}."
+            ),
+        )
+
+    from app.tasks.embedding_tasks import generate_fpv_for_dataset
+
+    task = generate_fpv_for_dataset.delay(
+        dataset_id=body.dataset_id,
+        embedding_model_id=body.embedding_model_id,
+        run_3d=body.run_3d,
+    )
+    return FPVGenerateAck(
+        status="queued",
+        task_id=task.id,
+        dataset_id=body.dataset_id,
+        embedding_model_id=body.embedding_model_id,
+    )
 
 
 @router.get("/fpv-dataset")
