@@ -27,6 +27,7 @@ from active_learning.config import (
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
 )
+from active_learning.config import NO_EVENT_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,10 @@ def build_inference_rows(
     for i, snippet_id in enumerate(snippet_ids):
         pred_indices = np.flatnonzero(preds_np[i] > 0)
         pred_labels = [label_order[j] for j in pred_indices]
+        if not pred_labels:
+            # Explicit marker: the model ran and confidently predicted no event,
+            # as opposed to an empty list meaning "no prediction exists yet."
+            pred_labels = [NO_EVENT_LABEL]
         prob_dict = dict(zip(label_order, map(float, probs_np[i])))
 
         rows.append(
