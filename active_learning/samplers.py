@@ -118,8 +118,8 @@ def diversity(
     DIVERSITY_HNSW_MIN_NL from active_learning/config.yaml.
     """
 
-    stats = diversity_coreset_stats(Z_u, Z_l)
-    logger.info("Diversity stats: %s", stats)
+    #stats = diversity_coreset_stats(Z_u, Z_l)
+    #logger.info("Diversity stats: %s", stats)
 
     if Z_u.numel() == 0:
         return torch.empty(0, device=Z_u.device)
@@ -139,19 +139,19 @@ def diversity(
 
     scores = nearest_ref_dist.copy()
 
-    pool_n = min(pool_size, n_u) if pool_size is not None else min(DIVERSITY_POOL_SIZE, n_u)
-    pool_idx = np.argsort(-nearest_ref_dist)[:pool_n]
+    pool_n = min(pool_size, n_u) if pool_size is not None else min(DIVERSITY_POOL_SIZE, n_u) # unlabeled pool
+    pool_idx = np.argsort(-nearest_ref_dist)[:pool_n] #decreased order of distances
     pool_dist = nearest_ref_dist[pool_idx].copy()
     remaining = np.ones(pool_n, dtype=bool)
 
     for _ in range(pool_n):
         masked = np.where(remaining, pool_dist, -np.inf)
-        local_pick = int(np.argmax(masked))
+        local_pick = int(np.argmax(masked)) # picks one with highest distance
         if masked[local_pick] == -np.inf:
             break
 
         global_pick = pool_idx[local_pick]
-        remaining[local_pick] = False
+        remaining[local_pick] = False # won't be picked again
         scores[global_pick] = pool_dist[local_pick]  # value at time of pick
 
         # fold the pick into the reference set; redundant neighbors in the
