@@ -1287,10 +1287,12 @@ class PAMActiveLearningService:
             )
         hyper = parent_ckpt.hyperparameters or {}
 
-        snippet_set_id = hyper.get("resolved_snippet_set_id")
-        if snippet_set_id is None:
-            ds = ckpt_h.get_pam_dataset(self.db, parent_ckpt.dataset_id)
-            snippet_set_id = ds.default_snippet_set_id
+        # Prefer the dataset's current default snippet set over the parent's
+        # cached value: re-segmentation/reprocessing can leave a checkpoint
+        # pointing at a stale snippet_set_id with no embeddings, which fails
+        # retrain with "No embeddings found" 
+        ds = ckpt_h.get_pam_dataset(self.db, parent_ckpt.dataset_id)
+        snippet_set_id = ds.default_snippet_set_id or hyper.get("resolved_snippet_set_id")
         if snippet_set_id is None:
             raise ValueError(
                 f"Parent checkpoint {parent_ckpt.id} missing resolved_snippet_set_id and "
@@ -1342,11 +1344,11 @@ class PAMActiveLearningService:
         hyper = parent_ckpt.hyperparameters or {}
     # Auto-retrain checkpoints must carry all required hyperparameters so
     # the worker can execute without additional lookups.
-        snippet_set_id = hyper.get("resolved_snippet_set_id")
-        if snippet_set_id is None:
-            # Fallback for older checkpoints that don't persist this field.
-            ds = ckpt_h.get_pam_dataset(self.db, parent_ckpt.dataset_id)
-            snippet_set_id = ds.default_snippet_set_id
+        # Prefer the dataset's current default snippet set over the parent's
+        # cached value -- see setup_manual_retrain for why (stale
+        # snippet_set_id after re-segmentation causes retrain failures).
+        ds = ckpt_h.get_pam_dataset(self.db, parent_ckpt.dataset_id)
+        snippet_set_id = ds.default_snippet_set_id or hyper.get("resolved_snippet_set_id")
         if snippet_set_id is None:
             raise ValueError(
                 f"Parent checkpoint {parent_checkpoint_id} missing resolved_snippet_set_id and "
