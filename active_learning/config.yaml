@@ -12,13 +12,27 @@ DEFAULT_COMPOSITE_WU : 0.5
 DEFAULT_COMPOSITE_WD : 0.25
 DEFAULT_COMPOSITE_WR : 0.25
 
-# diversity() switches from exact brute-force (Flat) search to approximate
-# HNSW search once the labelled set (Nl) exceeds this size. Below it, HNSW's
-# graph-build overhead isn't worth it -- Flat is already fast at small Nl.
-# Placeholder pending a benchmark rerun (see paper Fig. 5d / Section 2.6);
-# not yet tuned against measured error rate or timing.
+# Both thresholds switch their respective search from exact brute-force
+# (Flat) to approximate HNSW once the relevant point set exceeds the given
+# size -- below it, HNSW's graph-build overhead isn't worth it, Flat is
+# already fast and exact at small N. DIVERSITY_HNSW_MIN_NL gates the
+# distance-to-nearest-labeled-point search (search set = Z_l, labelled
+# points). DIVERSITY_HNSW_MIN_NU gates diversity()/density()'s search over
+# the unlabeled pool itself (search set = Z_u).
 DIVERSITY_HNSW_MIN_NL : 500
+DIVERSITY_HNSW_MIN_NU : 500
 
-DIVERSITY_POOL_SIZE : 100
+# Number of greedy farthest-point picks (batch centers) diversity() selects,
+# and how many nearest neighbors get their distance score corrected after
+# each pick when using the HNSW-accelerated path (n_u >= DIVERSITY_HNSW_MIN_NU).
+# NUM_CENTERS is an internal tuning constant, not a labeling budget. Points
+# just outside the UPDATE_K neighbor list keep a stale score for that pick --
+# see diversity_k_center_stats to size both empirically before trusting them
+# in production; not yet benchmarked.
+DIVERSITY_NUM_CENTERS : 100
+DIVERSITY_UPDATE_K : 200
+
+
+DENSITY_K : 30 # k must be comfortably smaller than ef_search of HNSW, not just smaller.
 
 RETRAIN_AFTER : 2
