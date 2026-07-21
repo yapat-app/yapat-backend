@@ -54,7 +54,7 @@ def build_inference_rows(
     snippet_ids: Sequence[int],
     labeled_snippet_ids: set[int],
     label_order: List[str],
-    density_k: int,
+    density_k: int, # TO BE DELETED LATER. WE KEEP ALL CONFIG IN CONFIG FILE
     wu: float,
     wd: float,
     wr: float,
@@ -74,14 +74,18 @@ def build_inference_rows(
         (0, embeddings.shape[1]), device=embeddings.device
     )
 
-    uncertainty_scores_u = uncertainty(probs[unlabeled_indices]) if unlabeled_indices else torch.empty(
+    # One scorer class per cycle: caches z_u_np and the shared Z_u HNSW index so diversity() and density()
+    # below don't each redo the same L2-normalize and index-build
+    scorer = ALScorer(z_u,z_l)
+
+    uncertainty_scores_u = scorer.uncertainty(probs[unlabeled_indices]) if unlabeled_indices else torch.empty(
         0, device=embeddings.device
     )
 
     start = time.perf_counter()
-    diversity_scores_u = diversity(z_u, z_l)
+    diversity_scores_u = scorer.diversity()
     mid = time.perf_counter()
-    density_scores_u = density(z_u, k=density_k)
+    density_scores_u = scorer.density()
     end = time.perf_counter()
     logger.info(
         "pam-al inference: acquisition scoring diversity=%.4fs density=%.4fs total=%.4fs",
