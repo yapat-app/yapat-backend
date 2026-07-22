@@ -32,6 +32,10 @@ class UserBase(BaseModel):
         return v
 
 
+class AdminExistsResponse(BaseModel):
+    admin_exists: bool
+
+
 class UserCreate(UserBase):
     password: str
     invitation_token: Optional[str] = None  # For admin-created dataset invitations
