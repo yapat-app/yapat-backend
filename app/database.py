@@ -11,10 +11,11 @@ from app.config import settings
 engine = create_engine(
     settings.DATABASE_URL,
     pool_pre_ping=True,
-    pool_size=10,  # Number of connections to maintain in pool
-    max_overflow=20,  # Additional connections that can be created on demand
+    pool_size=5,  # per process
+    max_overflow=5,  # per process
     pool_timeout=30,  # Seconds to wait before giving up on getting a connection
     pool_recycle=3600,  # Recycle connections after 1 hour
+    connect_args={"options": "-c idle_in_transaction_session_timeout=60000"},  # Postgres auto-terminates leaked idle-in-transaction sessions after 60s
     echo=False  # Set to True for SQL query logging
 )
 
