@@ -71,12 +71,14 @@ services:
       - "8000:8000"
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - /srv/demos/shared/datasets/AnuraSet:/srv/demos/shared/datasets/AnuraSet:ro
       - /data/bioacoustics:/data/monitora:ro
       # Mount host directory for species models (read-write so retraining can save checkpoints)
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
       - ${HOST_MODELS_AL:-./models_AL}:/app/assets/models/single_species_models:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
   # Celery worker for asynchronous task processing
   celery-worker:
     build:
@@ -138,6 +140,8 @@ services:
       - /data/bioacoustics:/data/monitora:ro
       # Read-write so Celery worker can save checkpoints when retraining
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # Dedicated Celery worker for PAM Active Learning (training is CPU/GPU-intensive)
@@ -201,6 +205,8 @@ services:
       - ${HOST_DATA_ROOT}:/data:ro
       - /data/bioacoustics:/data/monitora:ro
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # Flower monitoring dashboard for Celery
