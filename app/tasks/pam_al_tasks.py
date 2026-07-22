@@ -230,6 +230,16 @@ def pam_al_create_predictions(self, job_id: int, inference_body: dict):
         if job is None:
             raise ValueError(f"Inference job {job_id} not found")
 
+        # A broker redelivery can outlive operational cleanup. Never resurrect a
+        # job that was already completed or deliberately cancelled/failed.
+        if job.status in (ALRetrainStatus.COMPLETED, ALRetrainStatus.FAILED):
+            logger.warning(
+                "pam_al_create_predictions ignored terminal job: job_id=%d status=%s",
+                job_id,
+                job.status.value,
+            )
+            return {"status": "ignored", "job_id": job_id, "job_status": job.status.value}
+
         job.status = ALRetrainStatus.RUNNING
         job.started_at = datetime.now(timezone.utc)
         db.commit()
