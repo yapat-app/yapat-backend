@@ -8,27 +8,32 @@ from app.schemas.pam_active_learning import ALSingleSampleScore
 from active_learning.config import DIVERSITY_HNSW_MIN_NL
 
 
-def normalize_diversity(d: torch.Tensor) -> torch.Tensor:
-    # diversity already in [0, 1], clamp makes sure no outliers.
-    return torch.clamp(d, 0.0, 1.0)
-
-def normalize_density(
-    r: torch.Tensor,
-    q_low: float = 0.05,
-    q_high: float = 0.95,
-) -> torch.Tensor:
-    # density values will have no bounds e.g. 1/0.03 = 33.33
-    # therefore we use quantile-based normalization to mitigate outliers, and clamp to [0, 1].
-    if r.numel() == 0:
-        return r
-
-    lo = torch.quantile(r, q_low)
-    hi = torch.quantile(r, q_high)
-
-    if torch.isclose(lo, hi):
-        return torch.zeros_like(r)
-
-    return torch.clamp((r - lo) / (hi - lo), 0.0, 1.0)
+# TODO(delete): dead code -- superseded by the normalization inlined directly
+# in diversity()/density() below. Nothing in the codebase calls these two
+# functions (verified via repo-wide search). Kept commented instead of
+# removed outright so the zscore PR diff stays focused; delete in a
+# follow-up cleanup once confirmed nothing external depends on them.
+# def normalize_diversity(d: torch.Tensor) -> torch.Tensor:
+#     # diversity already in [0, 1], clamp makes sure no outliers.
+#     return torch.clamp(d, 0.0, 1.0)
+#
+# def normalize_density(
+#     r: torch.Tensor,
+#     q_low: float = 0.05,
+#     q_high: float = 0.95,
+# ) -> torch.Tensor:
+#     # density values will have no bounds e.g. 1/0.03 = 33.33
+#     # therefore we use quantile-based normalization to mitigate outliers, and clamp to [0, 1].
+#     if r.numel() == 0:
+#         return r
+#
+#     lo = torch.quantile(r, q_low)
+#     hi = torch.quantile(r, q_high)
+#
+#     if torch.isclose(lo, hi):
+#         return torch.zeros_like(r)
+#
+#     return torch.clamp((r - lo) / (hi - lo), 0.0, 1.0)
 
 
 def _to_np(x: torch.Tensor) -> np.ndarray:
