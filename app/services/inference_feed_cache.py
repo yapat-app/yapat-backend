@@ -1,17 +1,16 @@
 """
 Redis-backed cache for confidence-ranked feed results.
 
-The confidence strategy in get_top_prediction_suggestions must load all
-unannotated predictions into Python and sort by noisy-OR score — O(n) work
-over 100k+ records. This module caches the sorted (pred_id, snippet_id, score)
-list so that only the first call after new inference is slow; all subsequent
-calls (any user, any label_scope variant) are served in milliseconds.
+The confidence strategy in get_top_prediction_suggestions ranks predictions by
+noisy-OR score. PostgreSQL builds the cold ranking from the JSON probabilities,
+and this module caches the resulting compact (pred_id, snippet_id, score) list
+so subsequent calls avoid repeating that scan and sort.
 
 Invalidation: call invalidate_inference_feed() whenever run_and_store_inference
 writes new predictions for a checkpoint.
 
-All operations fail soft: if Redis is unavailable the caller falls back to the
-full Python sort.
+All operations fail soft: if Redis is unavailable PostgreSQL rebuilds the
+ranking for that request (or non-PostgreSQL environments use the Python path).
 """
 
 from __future__ import annotations

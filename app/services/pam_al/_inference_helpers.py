@@ -10,7 +10,7 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 import torch
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, selectinload
 
@@ -519,6 +519,62 @@ def _noisy_or_confidence(
     return 1.0 - result
 
 
+def _get_postgres_confidence_ranking(
+    db: Session,
+    model_checkpoint_id: int,
+    snippet_set_id: int,
+    label_scope: list[str] | None,
+) -> list[tuple[int, int, float]]:
+    """Build the reusable confidence ranking directly in PostgreSQL.
+
+    ``predicted_probabilities`` is JSON, so the old cold-cache path loaded every
+    prediction and its snippet into Python before computing noisy-OR and sorting.
+    For large datasets that dominates Validate-mode latency and memory.  PostgreSQL
+    can scan and sort the same JSON values while returning only three scalars per
+    prediction.  The compact ranking is then cached in Redis; annotation filtering
+    and full ORM hydration still happen only for the requested top K.
+    """
+    scope_filter = ""
+    params: dict[str, object] = {
+        "model_checkpoint_id": model_checkpoint_id,
+        "snippet_set_id": snippet_set_id,
+    }
+    if label_scope:
+        scope_filter = "WHERE probability.key = ANY(CAST(:label_scope AS text[]))"
+        params["label_scope"] = label_scope
+
+    # Clamp probabilities to [0, 1], and keep the logarithm finite for p=1.
+    # EXP(SUM(LN(1-p))) is the product term in noisy-OR.
+    statement = text(
+        f"""
+        SELECT
+            prediction.id,
+            prediction.snippet_id,
+            (
+                SELECT COALESCE(
+                    1.0 - EXP(SUM(LN(GREATEST(
+                        1e-15,
+                        1.0 - LEAST(1.0, GREATEST(0.0, probability.value::double precision))
+                    )))),
+                    0.0
+                )
+                FROM json_each_text(COALESCE(prediction.predicted_probabilities, '{{}}'::json))
+                    AS probability
+                {scope_filter}
+            ) AS confidence
+        FROM al_predictions AS prediction
+        JOIN snippets AS snippet ON snippet.id = prediction.snippet_id
+        WHERE prediction.model_checkpoint_id = :model_checkpoint_id
+          AND snippet.snippet_set_id = :snippet_set_id
+        ORDER BY confidence DESC, prediction.id ASC
+        """
+    )
+    return [
+        (int(row.id), int(row.snippet_id), float(row.confidence))
+        for row in db.execute(statement, params)
+    ]
+
+
 def get_top_prediction_suggestions(
     db: Session,
     dataset_id: int,
@@ -559,12 +615,13 @@ def get_top_prediction_suggestions(
             .all()
         )
 
-    # confidence: noisy-OR over label_scope — must be computed in Python since
-    # predicted_probabilities is a JSON column.
+    # confidence: noisy-OR over label_scope. PostgreSQL computes the cold
+    # ranking directly from the JSON column; non-PostgreSQL environments use
+    # the portable Python fallback below.
     #
     # Cache the full ranked list (ignoring per-request annotation filter) so
-    # repeat calls (e.g. every mode-switch to validate) are served in <50ms
-    # instead of loading 100k+ rows into Python on every request.
+    # repeat calls (e.g. mode switches to Validate) avoid reranking instead of
+    # loading 100k+ rows into Python on every request.
     if strategy == "confidence":
         from app.services.inference_feed_cache import (
             get_cached_confidence_ranking,
@@ -576,40 +633,61 @@ def get_top_prediction_suggestions(
         )
 
         if ranked_triples is None:
-            # Cache miss: load all predictions for this checkpoint+snippet_set (no
-            # annotation filter — the filter is applied cheaply after sorting).
-            all_preds = (
-                db.query(ALPrediction)
-                .join(Snippet, Snippet.id == ALPrediction.snippet_id)
-                .filter(
-                    ALPrediction.model_checkpoint_id == model_checkpoint_id,
-                    Snippet.snippet_set_id == snippet_set_id,
+            # Production uses PostgreSQL. Let it compute noisy-OR and retain only
+            # compact ranking scalars, avoiding full ORM materialization on every
+            # new label scope. Cache that ranking for subsequent mode switches.
+            # Keep the Python implementation below as a portable fallback for
+            # SQLite-based tests and non-PostgreSQL development environments.
+            if db.get_bind().dialect.name == "postgresql":
+                ranked_triples = _get_postgres_confidence_ranking(
+                    db,
+                    model_checkpoint_id,
+                    snippet_set_id,
+                    label_scope,
                 )
-                .options(
-                    selectinload(ALPrediction.snippet).load_only(
-                        Snippet.start_time, Snippet.end_time, Snippet.recording_id
-                    )
+                set_cached_confidence_ranking(
+                    model_checkpoint_id,
+                    snippet_set_id,
+                    label_scope,
+                    ranked_triples,
                 )
-                .all()
-            )
-            scored = [
-                (p, _noisy_or_confidence(p.predicted_probabilities, label_scope))
-                for p in all_preds
-            ]
-            scored.sort(key=lambda x: x[1], reverse=True)
-            all_preds = [p for p, _ in scored]
-            ranked_triples = [(p.id, p.snippet_id, s) for p, s in scored]
-            set_cached_confidence_ranking(model_checkpoint_id, snippet_set_id, label_scope, ranked_triples)
 
-            # Filter out already-annotated snippets using the pre-sorted objects.
-            annotated_exists_set = {
-                row[0]
-                for row in db.query(ALSnippetAnnotation.snippet_id).filter(
-                    ALSnippetAnnotation.dataset_id == dataset_id,
-                ).all()
-            }
-            candidates = [p for p in all_preds if p.snippet_id not in annotated_exists_set]
-            return candidates[:k]
+            # Non-PostgreSQL fallback: load all predictions for this
+            # checkpoint+snippet_set. The annotation filter is applied after
+            # sorting so the cached ranking remains reusable by every user.
+            if ranked_triples is None:
+                all_preds = (
+                    db.query(ALPrediction)
+                    .join(Snippet, Snippet.id == ALPrediction.snippet_id)
+                    .filter(
+                        ALPrediction.model_checkpoint_id == model_checkpoint_id,
+                        Snippet.snippet_set_id == snippet_set_id,
+                    )
+                    .options(
+                        selectinload(ALPrediction.snippet).load_only(
+                            Snippet.start_time, Snippet.end_time, Snippet.recording_id
+                        )
+                    )
+                    .all()
+                )
+                scored = [
+                    (p, _noisy_or_confidence(p.predicted_probabilities, label_scope))
+                    for p in all_preds
+                ]
+                scored.sort(key=lambda x: (-x[1], x[0].id))
+                all_preds = [p for p, _ in scored]
+                ranked_triples = [(p.id, p.snippet_id, s) for p, s in scored]
+                set_cached_confidence_ranking(model_checkpoint_id, snippet_set_id, label_scope, ranked_triples)
+
+                # Filter out already-annotated snippets using the pre-sorted objects.
+                annotated_exists_set = {
+                    row[0]
+                    for row in db.query(ALSnippetAnnotation.snippet_id).filter(
+                        ALSnippetAnnotation.dataset_id == dataset_id,
+                    ).all()
+                }
+                candidates = [p for p in all_preds if p.snippet_id not in annotated_exists_set]
+                return candidates[:k]
 
         # Cache hit: filter annotated IDs and fetch only the top-k full objects.
         annotated_snippet_ids = {
@@ -618,11 +696,15 @@ def get_top_prediction_suggestions(
                 ALSnippetAnnotation.dataset_id == dataset_id,
             ).all()
         }
-        top_k_pred_ids = [
-            pred_id
-            for pred_id, snippet_id, _ in ranked_triples
-            if snippet_id not in annotated_snippet_ids
-        ][:k]
+        # Stop as soon as K unannotated rows are found. Building a full filtered
+        # list needlessly walked all 100k+ cached entries on every warm request.
+        top_k_pred_ids: list[int] = []
+        for pred_id, snippet_id, _ in ranked_triples:
+            if snippet_id in annotated_snippet_ids:
+                continue
+            top_k_pred_ids.append(pred_id)
+            if len(top_k_pred_ids) >= k:
+                break
 
         if not top_k_pred_ids:
             return []
