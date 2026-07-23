@@ -148,3 +148,39 @@ class TestDiversityApproxError:
         result = diversity_approx_error(torch.empty((0, 16)), torch.empty((0, 16)))
         assert result["recall_at_1"] is None
         assert result["n"] == 0
+
+
+class TestZscore:
+    def test_standard_case(self):
+        from active_learning.samplers import zscore
+        x = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+        z = zscore(x)
+        assert abs(float(z.mean())) < 1e-5
+        assert abs(float(z.std()) - 1.0) < 1e-4
+
+    def test_empty_tensor_returned_unchanged(self):
+        from active_learning.samplers import zscore
+        x = torch.empty(0)
+        z = zscore(x)
+        assert z.shape == (0,)
+
+    def test_constant_tensor_returns_zeros(self):
+        from active_learning.samplers import zscore
+        x = torch.tensor([3.14, 3.14, 3.14, 3.14])
+        z = zscore(x)
+        assert torch.all(z == 0.0)
+
+    def test_near_zero_std_returns_zeros_not_nan(self):
+        from active_learning.samplers import zscore
+        x = torch.tensor([1.0, 1.0 + 1e-12, 1.0 - 1e-12])
+        z = zscore(x)
+        assert not torch.any(torch.isnan(z))
+        assert torch.all(z == 0.0)
+
+    def test_single_element_returns_zero(self):
+        from active_learning.samplers import zscore
+        x = torch.tensor([42.0])
+        z = zscore(x)
+        assert z.shape == (1,)
+        # std of one element is 0, so falls into the near-zero-std branch
+        assert float(z[0]) == 0.0
