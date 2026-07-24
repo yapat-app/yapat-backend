@@ -99,15 +99,21 @@ class DatasetService:
         self.db.delete(dataset)
         self.db.commit()
 
-    def list_datasets(self, current_user: User, skip: int = 0, limit: int = 100):
+    def list_datasets(
+        self,
+        current_user: User,
+        skip: int = 0,
+        limit: int = 100,
+        include_reference: bool = False,
+    ):
+        # Reference-only datasets (is_reference=True) are training data, not
+        # something to annotate -- hidden from normal listings unless asked for.
         # Admins see everything
         if current_user.role == UserRole.ADMIN:
-            return (
-                self.db.query(DatasetModel)
-                .offset(skip)
-                .limit(limit)
-                .all()
-            )
+            query = self.db.query(DatasetModel)
+            if not include_reference:
+                query = query.filter(DatasetModel.is_reference.is_(False))
+            return query.offset(skip).limit(limit).all()
 
         # Non-admin users: datasets from teams where user is any member (owner or user)
         member_team_ids = (
@@ -135,13 +141,11 @@ class DatasetService:
         if direct_access_ids:
             filters.append(DatasetModel.id.in_(direct_access_ids))
 
-        return (
-            self.db.query(DatasetModel)
-            .filter(or_(*filters))
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
+        query = self.db.query(DatasetModel).filter(or_(*filters))
+        if not include_reference:
+            query = query.filter(DatasetModel.is_reference.is_(False))
+
+        return query.offset(skip).limit(limit).all()
 
     def user_can_access_dataset(self, user: User, dataset_id: int) -> bool:
         dataset = self.get_dataset(dataset_id)

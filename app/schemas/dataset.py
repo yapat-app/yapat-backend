@@ -25,6 +25,9 @@ class DatasetCreate(DatasetBase):
     team_id: Optional[int] = None  # Optional for admins, required for regular users
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
+    # Marks this dataset as reference-only training data (never surfaced for
+    # annotation; other datasets/teams opt in via reference links). Admin-set.
+    is_reference: bool = False
 
 
 class DatasetUpdate(BaseModel):
@@ -35,6 +38,7 @@ class DatasetUpdate(BaseModel):
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
     retrain_after_threshold: Optional[int] = None
+    is_reference: Optional[bool] = None
 
     @field_validator("spectrogram_f_min_hz", "spectrogram_f_max_hz")
     @classmethod
@@ -64,6 +68,7 @@ class Dataset(DatasetBase):
     spectrogram_f_max_hz: Optional[float] = None
     quick_labels: Optional[List[Dict[str, Any]]] = None
     retrain_after_threshold: Optional[int] = None
+    is_reference: bool = False
     created_at: datetime
     updated_at: Optional[datetime] = None
     recording_count: Optional[int] = None  # Number of recordings in this dataset

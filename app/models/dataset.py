@@ -2,7 +2,7 @@
 Dataset model
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Table, UniqueConstraint, Enum as SQLEnum, Float, JSON
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Table, UniqueConstraint, Enum as SQLEnum, Float, JSON, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -54,6 +54,11 @@ class Dataset(Base):
     # PAM active-learning auto-retrain threshold override. Null = use the global
     # RETRAIN_AFTER default from active_learning/config.yaml.
     retrain_after_threshold = Column(Integer, nullable=True)
+    # Marks this dataset as reference-only training data: ingested through the
+    # normal scan/snippet/embed pipeline like any other dataset, but never
+    # surfaced in annotation/labelling views. Other datasets/teams opt into
+    # using it via DatasetReferenceLink. See docs/reference-data-pool-design.md.
+    is_reference = Column(Boolean, nullable=False, default=False, server_default="false", index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -95,5 +100,21 @@ class Dataset(Base):
         "WSSEDSpeciesModel",
         back_populates="dataset",
         cascade="all, delete-orphan",
+    )
+    # Reference pool links where THIS dataset is the target (i.e. datasets it
+    # draws reference training data from).
+    reference_links = relationship(
+        "DatasetReferenceLink",
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+        foreign_keys="DatasetReferenceLink.dataset_id",
+    )
+    # Reference pool links where THIS dataset is the source (i.e. who is using
+    # this dataset as reference data). Only meaningful when is_reference=True.
+    referenced_by_links = relationship(
+        "DatasetReferenceLink",
+        back_populates="reference_dataset",
+        cascade="all, delete-orphan",
+        foreign_keys="DatasetReferenceLink.reference_dataset_id",
     )
 

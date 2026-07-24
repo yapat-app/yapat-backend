@@ -42,6 +42,7 @@ from app.models.pam_active_learning import (
     ALRetrainStatus,
 )
 from app.models.study_event import StudyEvent
+from app.models.reference_link import DatasetReferenceLink
 
 __all__ = [
     "User",
@@ -79,4 +80,6 @@ __all__ = [
     "ALRetrainStatus",
     # Study interaction logging
     "StudyEvent",
+    # Reference data pool
+    "DatasetReferenceLink",
 ]

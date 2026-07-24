@@ -109,11 +109,16 @@ def list_available_dataset_paths(
 def read_datasets(
         skip: int = 0,
         limit: int = 100,
+        include_reference: bool = Query(
+            False, description="Include reference-only datasets (is_reference=True) in results."
+        ),
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_active_user),
 ):
     svc = DatasetService(db)
-    datasets = svc.list_datasets(current_user=current_user, skip=skip, limit=limit)
+    datasets = svc.list_datasets(
+        current_user=current_user, skip=skip, limit=limit, include_reference=include_reference
+    )
     
     # Add recording count for each dataset
     dataset_ids = [ds.id for ds in datasets]

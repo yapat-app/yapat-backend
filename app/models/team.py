@@ -30,6 +30,7 @@ class Team(Base):
     memberships = relationship("TeamMembership", back_populates="team", cascade="all, delete-orphan")
     datasets = relationship("Dataset", back_populates="team")
     invitations = relationship("TeamInvitation", back_populates="team", cascade="all, delete-orphan")
+    reference_links = relationship("DatasetReferenceLink", back_populates="team", cascade="all, delete-orphan")
 
 
 class TeamMembership(Base):

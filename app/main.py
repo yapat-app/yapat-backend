@@ -23,6 +23,7 @@ from app.api import (
     feed,
     invitations,
     pam_active_learning,
+    reference_links,
     recordings,
     snippets,
     study_events,
@@ -85,6 +86,7 @@ app.include_router(taxonomy.router, prefix=f"{settings.API_STR}/taxonomy", tags=
 app.include_router(custom_taxonomy.router, prefix=f"{settings.API_STR}/taxonomy", tags=["custom-taxonomy"])
 app.include_router(embeddings.router, prefix=f"{settings.API_STR}", tags=["embeddings"])
 app.include_router(pam_active_learning.router, prefix=f"{settings.API_STR}/pam-al", tags=["pam-active-learning"])
+app.include_router(reference_links.router, prefix=f"{settings.API_STR}/reference-links", tags=["reference-data-pool"])
 app.include_router(visualisations.router, prefix=f"{settings.API_STR}/visualisations", tags=["visualisations"])
 app.include_router(wssed.router, prefix=f"{settings.API_STR}/wssed", tags=["wssed"])
 app.include_router(study_events.router, prefix=f"{settings.API_STR}/study-events", tags=["study-events"])
