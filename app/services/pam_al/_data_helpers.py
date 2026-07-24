@@ -93,19 +93,31 @@ def align_embeddings_and_labels(
     snippet_rows: List[Dict[str, Any]],
     gt_index: Dict[str, List[Dict[str, Any]]],
     species_list: List[str],
+    min_overlap_seconds: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray, List[int]]:
     """
     Align snippet embeddings with ground truth.
 
-    For chunk-level copied files, matching is filename-based.
-    If a GT event matches the snippet filename, its labels are applied directly,
-    regardless of original min_t/max_t values.
+    Matching is always filename-based first (snippet's file_name, falling
+    back to file_path). Within a matched file, an event's labels apply to a
+    snippet in one of two ways depending on what the metadata CSV provided:
 
-    This is appropriate when files are already named like:
-        originalfname_min_t_max_t.wav
-
-    and each snippet row has:
-        start_time=0.0, end_time=3.0
+    - Time-aware: if the event carries real start_time/end_time (i.e. the
+      CSV had onset/offset, start_time/end_time, or min_t/max_t columns),
+      the event only applies to snippets whose own [start_time, end_time)
+      window overlaps the event's by more than ``min_overlap_seconds``.
+      This is what supports arbitrary-length recordings that get
+      auto-windowed into many snippets, with a metadata CSV giving precise
+      per-event onset/offset times against the *whole recording's* clock
+      (which is what a snippet's own start_time/end_time is measured
+      against too, so the two are directly comparable).
+    - Whole-file: if the event has no time info at all, its labels apply to
+      every snippet of that file. This is the historical behavior, and
+      remains correct for chunk-level copied files named like
+      ``originalfname_min_t_max_t.wav`` where each file *is* already a
+      single labeled clip (each snippet row then has
+      start_time=0.0, end_time=<window>, matching the one event for that
+      file's key).
     """
 
     keep_indices: List[int] = []
@@ -117,16 +129,20 @@ def align_embeddings_and_labels(
     no_gt_key_match = 0
     positive_aligned = 0
 
-    logger.info("========== CHUNK-LEVEL ALIGNMENT START ==========")
+    logger.info("========== ALIGNMENT START ==========")
     logger.info("X shape: %s", getattr(X, "shape", None))
     logger.info("Number of snippet rows: %d", len(snippet_rows))
     logger.info("GT index size: %d", len(gt_index))
     logger.info("Species list: %s", species_list)
 
+    time_filtered_events = 0
+
     for i, snippet in enumerate(snippet_rows):
         snippet_id = snippet.get("snippet_id")
         snippet_file_name = snippet.get("file_name")
         snippet_file_path = snippet.get("file_path")
+        snippet_start = snippet.get("start_time")
+        snippet_end = snippet.get("end_time")
 
         events = gt_index.get(snippet_file_name)
         matched_key = snippet_file_name
@@ -157,18 +173,34 @@ def align_embeddings_and_labels(
         y = np.zeros(len(species_list), dtype=np.float32)
 
         for event_idx, event in enumerate(events):
+            event_start = event.get("start_time")
+            event_end = event.get("end_time")
+
+            if (
+                event_start is not None and event_end is not None
+                and snippet_start is not None and snippet_end is not None
+            ):
+                # Time-aware: only apply this event's labels if it actually
+                # overlaps this snippet's own window (both measured against
+                # the same recording's clock).
+                overlap = min(snippet_end, event_end) - max(snippet_start, event_start)
+                if overlap <= min_overlap_seconds:
+                    time_filtered_events += 1
+                    continue
+
             event_labels = event["labels"]
             y = np.maximum(y, event_labels)
 
             if i < 30:
                 logger.info(
-                    "[CHUNK LABEL MATCH] i=%d event=%d key=%s snippet_id=%s "
-                    "file_name=%s labels=%s",
+                    "[LABEL MATCH] i=%d event=%d key=%s snippet_id=%s "
+                    "file_name=%s snippet=[%s,%s) event=[%s,%s) labels=%s",
                     i,
                     event_idx,
                     matched_key,
                     snippet_id,
                     snippet_file_name,
+                    snippet_start, snippet_end, event_start, event_end,
                     event_labels.astype(int).tolist(),
                 )
 
@@ -178,10 +210,11 @@ def align_embeddings_and_labels(
             used_snippet_ids.append(snippet_id)
             positive_aligned += 1
 
-    logger.info("========== CHUNK-LEVEL ALIGNMENT SUMMARY ==========")
+    logger.info("========== ALIGNMENT SUMMARY ==========")
     logger.info("Matched by file_name: %d", matched_by_file_name)
     logger.info("Matched by file_path: %d", matched_by_file_path)
     logger.info("No GT key match: %d", no_gt_key_match)
+    logger.info("Time-filtered (non-overlapping) events skipped: %d", time_filtered_events)
     logger.info("Positive aligned samples: %d", positive_aligned)
 
     if not keep_indices:
@@ -195,7 +228,7 @@ def align_embeddings_and_labels(
     logger.info("Final X_aligned shape: %s", X_aligned.shape)
     logger.info("Final y_aligned shape: %s", y_aligned.shape)
     logger.info("Final class support: %s", y_aligned.sum(axis=0).astype(int).tolist())
-    logger.info("========== CHUNK-LEVEL ALIGNMENT END ==========")
+    logger.info("========== ALIGNMENT END ==========")
 
     return X_aligned, y_aligned, used_snippet_ids
 
