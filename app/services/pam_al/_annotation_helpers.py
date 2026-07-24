@@ -5,6 +5,7 @@ label matrices.
 
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 
 import numpy as np
@@ -12,11 +13,81 @@ from sqlalchemy.orm import Session
 
 from app.models.snippet import Snippet
 from app.models.user import User
+from app.models.dataset import Dataset
 from app.models.pam_active_learning import (
     ALSnippetAnnotation,
     ALAnnotationSource,
 )
-from active_learning.config import NO_EVENT_LABEL
+from active_learning.config import NO_EVENT_LABEL, NO_EVENT_LABELS
+
+_SLUG_WHITESPACE_RE = re.compile(r"\s+")
+_SLUG_INVALID_CHARS_RE = re.compile(r"[^a-z0-9_-]")
+
+
+def _quick_label_slug(display_name: str) -> str:
+    """
+    Mirror the frontend's local-label slugify exactly (annotationCreatePayload.ts /
+    DatasetQuickLabelsModal.tsx: `display.trim().toLowerCase().replace(/\\s+/g,
+    "_").replace(/[^a-z0-9_-]/g, "").slice(0, 120)`), so a taxon_id derived here
+    from arbitrary label text matches what the frontend would have generated for
+    the same text.
+    """
+    slug = display_name.strip().lower()
+    slug = _SLUG_WHITESPACE_RE.sub("_", slug)
+    slug = _SLUG_INVALID_CHARS_RE.sub("", slug)
+    return slug[:120]
+
+
+def resolve_no_event_labels(db: Session, dataset_id: int) -> frozenset[str]:
+    """
+    Per-dataset confirmed-negative sentinel set: NO_EVENT_LABELS (taxon_id
+    form, e.g. "local:no_biophony") plus the dataset's own quick-label
+    display_name for any quick label whose taxon_id is one of those
+    sentinels.
+
+    The blind-annotation UI persists a quick label's display_name -- not its
+    taxon_id -- as ALSnippetAnnotation.label (see useQuickLabelList.ts on the
+    frontend, which maps stored quick labels to display_name before they ever
+    reach the label picker). A "No biophony" quick label with
+    taxon_id="local:no_biophony" therefore round-trips through training data
+    as the literal string "No biophony", which NO_EVENT_LABELS alone (taxon_id
+    form) would never match -- silently letting the sentinel leak back in as
+    a trainable species class. Resolving the dataset's quick_labels config
+    here closes that gap without having to change what gets persisted.
+
+    This is an exact-match set; callers that need to tolerate casing/whitespace
+    drift in previously-submitted annotation labels (e.g. the quick label's
+    display text was retyped after annotations already used the old spelling)
+    should check via `is_no_event_label` instead of membership in this set.
+    """
+    labels: set[str] = set(NO_EVENT_LABELS)
+    quick_labels = db.query(Dataset.quick_labels).filter(Dataset.id == dataset_id).scalar() or []
+    for item in quick_labels:
+        if isinstance(item, dict) and item.get("taxon_id") in NO_EVENT_LABELS:
+            display_name = item.get("display_name")
+            if display_name:
+                labels.add(display_name)
+    return frozenset(labels)
+
+
+def is_no_event_label(label: str, no_event_labels: frozenset[str]) -> bool:
+    """
+    True if `label` (an ALSnippetAnnotation.label value) is a confirmed-negative
+    sentinel.
+
+    Checks, in order:
+      1. Exact match against `no_event_labels` (NO_EVENT_LABELS taxon_ids plus
+         the dataset's currently-configured quick-label display_name(s)).
+      2. A case/whitespace-insensitive slug match against the canonical
+         NO_EVENT_LABELS taxon_ids -- covers a quick label whose display text
+         was typed with different casing or extra whitespace than whatever is
+         configured right now (e.g. "No Biophony", "no  biophony", trailing
+         spaces), including historical annotations from before the display
+         text was last edited.
+    """
+    if label in no_event_labels:
+        return True
+    return f"local:{_quick_label_slug(label)}" in NO_EVENT_LABELS
 
 
 def store_snippet_annotations(

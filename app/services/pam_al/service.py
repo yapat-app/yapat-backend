@@ -56,7 +56,6 @@ from active_learning.config import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_HIDDEN_DIM,
     DEFAULT_DROPOUT,
-    NO_EVENT_LABELS,
 )
 from app.services.pam_al import _checkpoint_helpers as ckpt_h
 from app.services.pam_al import _data_helpers as data_h
@@ -243,12 +242,14 @@ class PAMActiveLearningService:
             # Exclude the reserved confirmed-negative sentinels (No biophony /
             # Other biophony) from the trainable label space -- those
             # snippets are retained as explicit all-zero rows below, not as
-            # a real class.
+            # a real class. Resolved per-dataset since quick labels persist
+            # their display_name, not taxon_id, as the annotation label.
+            no_event_labels = ann_h.resolve_no_event_labels(self.db, body.dataset_id)
             species_list = sorted({
                 label
                 for labels in annotations_by_snippet.values()
                 for label in labels
-                if label not in NO_EVENT_LABELS
+                if not ann_h.is_no_event_label(label, no_event_labels)
             })
 
             if not species_list:
@@ -1555,10 +1556,13 @@ class PAMActiveLearningService:
             # initially empty label space from reference metadata. Exclude
             # the reserved confirmed-negative sentinels (No/Other biophony)
             # -- those snippets are retained as explicit all-zero rows below,
-            # not as a real class.
+            # not as a real class. Resolved per-dataset since quick labels
+            # persist their display_name, not taxon_id, as the annotation
+            # label.
+            no_event_labels = ann_h.resolve_no_event_labels(self.db, dataset_id)
             species_candidates = sorted({
                 lbl for labels in annotations_by_snippet.values() for lbl in labels
-                if lbl not in NO_EVENT_LABELS
+                if not ann_h.is_no_event_label(lbl, no_event_labels)
             })
             keep = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
             X_train = X[keep] if keep else np.empty((0, X.shape[1]), dtype=X.dtype)
