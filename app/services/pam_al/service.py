@@ -164,6 +164,47 @@ class PAMActiveLearningService:
         return ckpt_h.get_pam_dataset(self.db, dataset_id)
 
     # ==================================================================
+    # Reference data pool
+    # ==================================================================
+
+    def _mix_in_reference_pool(
+        self,
+        ds: Dataset,
+        embedding_model_id: int,
+        species_list: List[str],
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        snippet_ids: List[Optional[int]],
+    ) -> tuple[np.ndarray, np.ndarray, List[Optional[int]], List[str], Dict[str, Any]]:
+        """
+        Concatenate this dataset's linked reference pool (see
+        docs/reference-data-pool-design.md) into a training set before
+        filter_and_balance_classes. Always on -- every cold-start and
+        retrain mixes in the full linked reference pool, no sampling ratio.
+
+        Reference-pool rows are appended with snippet_id=None in the
+        returned snippet_ids list, since they belong to a different
+        dataset's snippets -- callers must exclude None entries before
+        persisting anything keyed by snippet_id for ``ds``.
+        """
+        X_ref, y_ref, unified_species, ref_info = data_h.load_reference_pool_training_data(
+            self.db, ds, embedding_model_id, species_list,
+        )
+
+        if unified_species != species_list:
+            pad_width = len(unified_species) - len(species_list)
+            if pad_width > 0:
+                y_train = np.hstack([y_train, np.zeros((y_train.shape[0], pad_width), dtype=y_train.dtype)])
+            species_list = unified_species
+
+        if X_ref.shape[0] > 0:
+            X_train = np.concatenate([X_train, X_ref], axis=0)
+            y_train = np.concatenate([y_train, y_ref], axis=0)
+            snippet_ids = list(snippet_ids) + [None] * X_ref.shape[0]
+
+        return X_train, y_train, snippet_ids, species_list, ref_info
+
+    # ==================================================================
     # Train from scratch  (sync — kept for backward compat)
     # ==================================================================
 
@@ -271,6 +312,14 @@ class PAMActiveLearningService:
                     annotations_by_snippet,
                 )
 
+            X_train, y_train, used_snippet_ids, species_list, ref_info = self._mix_in_reference_pool(
+                ds, body.embedding_model_id, species_list, X_train, y_train, used_snippet_ids,
+            )
+            logger.info(
+                "Mixed reference pool into bootstrap cold-start dataset_id=%d reference_samples=%d",
+                body.dataset_id, ref_info.get("reference_sample_count", 0),
+            )
+
             X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
                 model.filter_and_balance_classes(
                     X=X_train, y=y_train, snippet_ids=used_snippet_ids,
@@ -311,8 +360,16 @@ class PAMActiveLearningService:
                 "resolved_snippet_set_id": snippet_set_id, "n_dim": n_dim, "num_classes": num_classes,
                 "train_samples": int(X_train.shape[0]), "label_order": used_species,
                 "used_species": used_species, "excluded_species": excluded_species, "class_counts": class_counts,
+                "reference_pool": ref_info,
             }
-            ann_h.store_snippet_annotations(self.db, body.dataset_id, labeled_snippet_ids, y_train, used_species, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
+
+            # Reference-pool rows carry snippet_id=None (they belong to a different
+            # dataset's snippets) -- exclude them so we never write another
+            # dataset's snippet ids into this dataset's GROUND_TRUTH annotations.
+            own_mask = [sid is not None for sid in labeled_snippet_ids]
+            own_sids = [sid for sid, keep in zip(labeled_snippet_ids, own_mask) if keep]
+            own_y = y_train[np.asarray(own_mask, dtype=bool)] if own_sids else y_train[:0]
+            ann_h.store_snippet_annotations(self.db, body.dataset_id, own_sids, own_y, used_species, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
 
             inference_metrics = None
             if body.run_inference:
@@ -329,7 +386,7 @@ class PAMActiveLearningService:
                 "label_config_path": body.label_config_path, "aligned_snippet_count": len(used_snippet_ids),
                 "train_samples": int(X_train.shape[0]), "num_classes": int(num_classes),
                 "used_species": used_species, "excluded_species": excluded_species,
-                "class_counts": class_counts, **train_metrics,
+                "class_counts": class_counts, "reference_pool": ref_info, **train_metrics,
             }
             ckpt_h.set_active_family_checkpoint(self.db, body.dataset_id, body.model_family_name, model_ckpt.id)
             self.db.commit()
@@ -1201,6 +1258,15 @@ class PAMActiveLearningService:
                 int(y_train.shape[0]),
                 int(y_train.shape[1]),
             )
+
+            X_train, y_train, used_sids, species_list, ref_info = self._mix_in_reference_pool(
+                ds, hyper["embedding_model_id"], species_list, X_train, y_train, used_sids,
+            )
+            logger.info(
+                "Mixed reference pool into cold-start checkpoint_id=%d reference_samples=%d",
+                checkpoint_id, ref_info.get("reference_sample_count", 0),
+            )
+
             model = ckpt_h.make_model(model_ckpt.model_type)
             X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = model.filter_and_balance_classes(
                 X=X_train, y=y_train, snippet_ids=used_sids, species_list=species_list,
@@ -1243,9 +1309,16 @@ class PAMActiveLearningService:
             model_ckpt.hyperparameters = {**(model_ckpt.hyperparameters or {}),
                 "resolved_snippet_set_id": snippet_set_id, "n_dim": n_dim, "num_classes": num_classes,
                 "train_samples": int(X_train.shape[0]), "label_order": used_sp,
-                "used_species": used_sp, "excluded_species": excl_sp, "class_counts": class_counts}
+                "used_species": used_sp, "excluded_species": excl_sp, "class_counts": class_counts,
+                "reference_pool": ref_info}
 
-            ann_h.store_snippet_annotations(self.db, model_ckpt.dataset_id, labeled_sids, y_train, used_sp, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
+            # Reference-pool rows carry snippet_id=None (they belong to a different
+            # dataset's snippets) -- exclude them so we never write another
+            # dataset's snippet ids into this dataset's GROUND_TRUTH annotations.
+            own_mask = [sid is not None for sid in labeled_sids]
+            own_sids = [sid for sid, keep in zip(labeled_sids, own_mask) if keep]
+            own_y = y_train[np.asarray(own_mask, dtype=bool)] if own_sids else y_train[:0]
+            ann_h.store_snippet_annotations(self.db, model_ckpt.dataset_id, own_sids, own_y, used_sp, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
 
             inference_metrics = None
             if hyper.get("run_inference"):
@@ -1261,7 +1334,8 @@ class PAMActiveLearningService:
             job.result_metrics = {"new_checkpoint_id": model_ckpt.id, "new_checkpoint_path": cp,
                 "aligned_snippet_count": len(used_sids), "train_samples": int(X_train.shape[0]),
                 "num_classes": int(num_classes), "used_species": used_sp, "excluded_species": excl_sp,
-                "class_counts": class_counts, "inference_metrics": inference_metrics, **train_metrics}
+                "class_counts": class_counts, "inference_metrics": inference_metrics,
+                "reference_pool": ref_info, **train_metrics}
 
             ckpt_h.set_active_family_checkpoint(self.db, model_ckpt.dataset_id, model_ckpt.model_family_name, model_ckpt.id)
             self.db.commit()
@@ -1489,6 +1563,15 @@ class PAMActiveLearningService:
             train_sids = [snippet_ids[i] for i in keep]
             y_train_full = ann_h.build_multihot_from_annotations(train_sids, species_candidates, annotations_by_snippet)
 
+            ds = ckpt_h.get_pam_dataset(self.db, dataset_id)
+            X_train, y_train_full, train_sids, species_candidates, ref_info = self._mix_in_reference_pool(
+                ds, embedding_model_id, species_candidates, X_train, y_train_full, train_sids,
+            )
+            logger.info(
+                "Mixed reference pool into retrain checkpoint_id=%d reference_samples=%d",
+                checkpoint_id, ref_info.get("reference_sample_count", 0),
+            )
+
             is_mlp = new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
             hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
             do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
@@ -1547,7 +1630,8 @@ class PAMActiveLearningService:
                                         "used_species": used_species,
                                         "excluded_species": excluded_species, "class_counts": class_counts,
                                         "resolved_snippet_set_id": snippet_set_id,
-                                        "embedding_model_id": embedding_model_id}
+                                        "embedding_model_id": embedding_model_id,
+                                        "reference_pool": ref_info}
 
             labeled_ids = ann_h.get_labeled_snippet_ids_for_dataset(self.db, dataset_id)
             inference_metrics = None
@@ -1563,7 +1647,8 @@ class PAMActiveLearningService:
             job.result_metrics = {"new_checkpoint_id": new_ckpt.id, "new_checkpoint_path": cp,
                                   "train_samples": int(X_train.shape[0]), "num_classes": int(y_train.shape[1]),
                                   "excluded_species": excluded_species, "class_counts": class_counts,
-                                  "inference_metrics": inference_metrics, **train_metrics}
+                                  "inference_metrics": inference_metrics, "reference_pool": ref_info,
+                                  **train_metrics}
 
             ckpt_h.set_active_family_checkpoint(self.db, dataset_id, new_ckpt.model_family_name, new_ckpt.id)
             self.db.commit()

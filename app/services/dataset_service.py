@@ -99,15 +99,21 @@ class DatasetService:
         self.db.delete(dataset)
         self.db.commit()
 
-    def list_datasets(self, current_user: User, skip: int = 0, limit: int = 100):
+    def list_datasets(
+        self,
+        current_user: User,
+        skip: int = 0,
+        limit: int = 100,
+        include_reference: bool = False,
+    ):
+        # Reference-only datasets (is_reference=True) are training data, not
+        # something to annotate -- hidden from normal listings unless asked for.
         # Admins see everything
         if current_user.role == UserRole.ADMIN:
-            return (
-                self.db.query(DatasetModel)
-                .offset(skip)
-                .limit(limit)
-                .all()
-            )
+            query = self.db.query(DatasetModel)
+            if not include_reference:
+                query = query.filter(DatasetModel.is_reference.is_(False))
+            return query.offset(skip).limit(limit).all()
 
         # Non-admin users: datasets from teams where user is any member (owner or user)
         member_team_ids = (
@@ -135,13 +141,11 @@ class DatasetService:
         if direct_access_ids:
             filters.append(DatasetModel.id.in_(direct_access_ids))
 
-        return (
-            self.db.query(DatasetModel)
-            .filter(or_(*filters))
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
+        query = self.db.query(DatasetModel).filter(or_(*filters))
+        if not include_reference:
+            query = query.filter(DatasetModel.is_reference.is_(False))
+
+        return query.offset(skip).limit(limit).all()
 
     def user_can_access_dataset(self, user: User, dataset_id: int) -> bool:
         dataset = self.get_dataset(dataset_id)
@@ -431,6 +435,11 @@ class DatasetService:
         if not audio_files:
             return []
 
+        if dataset.is_reference:
+            audio_files = self._filter_to_referenced_files(dataset, audio_files)
+            if not audio_files:
+                return []
+
         # Resolve relative (DB-stored) paths up front, then filter out files
         # we already have in a single query instead of one SELECT per file.
         candidates = [
@@ -477,6 +486,67 @@ class DatasetService:
         self._flush_batch(batch)
 
         return new_recordings
+
+    def _filter_to_referenced_files(
+        self, dataset: DatasetModel, audio_files: List[str]
+    ) -> List[str]:
+        """
+        For reference datasets (Dataset.is_reference=True), only register
+        recordings whose filename is actually referenced by pam_metadata.csv
+        -- avoids spending scan/embed compute on files the reference pool
+        will never use as ground truth. Lets source_uri point at a larger
+        directory (e.g. an upstream corpus's full folder) without pulling in
+        everything in it.
+
+        The metadata CSV location itself defaults to {source_uri}/pam_metadata.csv
+        but can be overridden per-dataset via Dataset.reference_metadata_path
+        (bare filename -> resolved within source_uri; path with "/" -> resolved
+        relative to DATA_ROOT instead, fully independent of source_uri). This
+        keeps a shared raw-audio corpus untouched by any given reference pool's
+        metadata -- see docs/reference-data-pool-design.md.
+
+        Falls back to registering every file found if no metadata CSV exists
+        yet (e.g. dataset registered before the CSV was placed) rather than
+        silently registering zero recordings.
+        """
+        from app.utils.pam_training_paths import resolve_pam_metadata_path
+        from app.services.pam_al._data_helpers import get_referenced_filenames
+
+        source_uri = dataset.source_uri
+        DATA_ROOT = settings.DATA_ROOT or "/data"
+
+        try:
+            meta_rel = resolve_pam_metadata_path(
+                DATA_ROOT, source_uri, metadata_path=dataset.reference_metadata_path,
+            )
+        except ValueError:
+            logger.warning(
+                "Reference dataset id=%s source_uri=%s has no pam_metadata.csv yet "
+                "(reference_metadata_path=%r); registering all %d file(s) found instead "
+                "of filtering.",
+                dataset.id, source_uri, dataset.reference_metadata_path, len(audio_files),
+            )
+            return audio_files
+
+        meta_abs = os.path.join(DATA_ROOT, meta_rel)
+        try:
+            referenced = get_referenced_filenames(meta_abs)
+        except ValueError as e:
+            logger.warning(
+                "Could not read pam_metadata.csv at %s (%s); registering all %d file(s) found.",
+                meta_abs, e, len(audio_files),
+            )
+            return audio_files
+
+        filtered = [f for f in audio_files if os.path.basename(f) in referenced]
+        skipped = len(audio_files) - len(filtered)
+        if skipped:
+            logger.info(
+                "Reference dataset scan (id=%s, source_uri=%s, metadata=%s): %d file(s) "
+                "not referenced in pam_metadata.csv were skipped, %d registered.",
+                dataset.id, source_uri, meta_abs, skipped, len(filtered),
+            )
+        return filtered
 
     # ---------------------------------------------------------
     # Helpers

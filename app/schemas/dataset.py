@@ -25,6 +25,14 @@ class DatasetCreate(DatasetBase):
     team_id: Optional[int] = None  # Optional for admins, required for regular users
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
+    # Marks this dataset as reference-only training data (never surfaced for
+    # annotation; other datasets/teams opt in via reference links). Admin-set.
+    is_reference: bool = False
+    # Optional override for where pam_metadata.csv lives, decoupled from
+    # source_uri. Bare filename -> resolved within source_uri; path with "/"
+    # -> resolved relative to DATA_ROOT instead. Only meaningful when
+    # is_reference=True. Null = default to {source_uri}/pam_metadata.csv.
+    reference_metadata_path: Optional[str] = None
 
 
 class DatasetUpdate(BaseModel):
@@ -35,6 +43,8 @@ class DatasetUpdate(BaseModel):
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
     retrain_after_threshold: Optional[int] = None
+    is_reference: Optional[bool] = None
+    reference_metadata_path: Optional[str] = None
 
     @field_validator("spectrogram_f_min_hz", "spectrogram_f_max_hz")
     @classmethod
@@ -64,6 +74,8 @@ class Dataset(DatasetBase):
     spectrogram_f_max_hz: Optional[float] = None
     quick_labels: Optional[List[Dict[str, Any]]] = None
     retrain_after_threshold: Optional[int] = None
+    is_reference: bool = False
+    reference_metadata_path: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     recording_count: Optional[int] = None  # Number of recordings in this dataset
