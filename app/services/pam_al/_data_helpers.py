@@ -130,6 +130,7 @@ def align_embeddings_and_labels(
     matched_by_file_path = 0
     no_gt_key_match = 0
     positive_aligned = 0
+    negative_aligned = 0
 
     logger.info("========== ALIGNMENT START ==========")
     logger.info("X shape: %s", getattr(X, "shape", None))
@@ -206,11 +207,19 @@ def align_embeddings_and_labels(
                     event_labels.astype(int).tolist(),
                 )
 
+        # Keep every matched row, positive or confirmed-negative (all-zero).
+        # A snippet whose window overlapped a matched recording but no actual
+        # event is a genuine "no target species here" sample, not noise --
+        # callers that need to route negatives around min/max-samples-per-class
+        # filtering (e.g. split_filter_reattach_negatives) rely on the zero
+        # rows still being present here rather than silently dropped.
+        keep_indices.append(i)
+        y_rows.append(y)
+        used_snippet_ids.append(snippet_id)
         if y.sum() > 0:
-            keep_indices.append(i)
-            y_rows.append(y)
-            used_snippet_ids.append(snippet_id)
             positive_aligned += 1
+        else:
+            negative_aligned += 1
 
     logger.info("========== ALIGNMENT SUMMARY ==========")
     logger.info("Matched by file_name: %d", matched_by_file_name)
@@ -218,6 +227,7 @@ def align_embeddings_and_labels(
     logger.info("No GT key match: %d", no_gt_key_match)
     logger.info("Time-filtered (non-overlapping) events skipped: %d", time_filtered_events)
     logger.info("Positive aligned samples: %d", positive_aligned)
+    logger.info("Negative (confirmed no-event) aligned samples: %d", negative_aligned)
 
     if not keep_indices:
         raise ValueError(
@@ -335,9 +345,13 @@ def load_ground_truth_metadata(
                 if species_value in species_to_idx:
                     y[species_to_idx[species_value]] = 1.0
 
-            if y.sum() == 0:
-                continue
-
+            # Rows with all-zero labels (relative to species_list) are kept as
+            # confirmed negatives -- e.g. a wide-format row asserting "none of
+            # these species" for a clip/time-window, or an arbitrary-length
+            # recording's onset/offset row for a non-target event. Previously
+            # dropped here, which silently excluded such rows from gt_index
+            # entirely (bad for reference-pool file filtering too: a recording
+            # mentioned only via all-zero rows never got registered).
             gt_index.setdefault(recording_key, []).append(
                 {
                     "labels": y,
@@ -350,6 +364,72 @@ def load_ground_truth_metadata(
         raise ValueError(f"No usable ground-truth rows found in metadata file: {metadata_path}")
 
     return gt_index
+
+
+def split_filter_reattach_negatives(
+    X: np.ndarray,
+    y_full: np.ndarray,
+    snippet_ids: List[Optional[int]],
+    species_candidates: List[str],
+    model,
+    min_samples_per_class: int,
+    max_samples_per_class: Optional[int],
+    is_negative_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, List[Optional[int]], List[str], List[str], Dict[str, int]]:
+    """
+    Run filter_and_balance_classes on positive rows only, then reattach
+    negative rows as explicit all-zero targets sized to the final label_order.
+
+    filter_and_balance_classes drops all-zero rows internally
+    (``y.sum(axis=1) > 0``), which would otherwise discard confirmed
+    negatives (e.g. rows for the reserved "no event" sentinel label, or
+    structurally all-zero ground-truth CSV rows) as if they were noise. This
+    splits negatives out first, runs min/max-samples-per-class filtering only
+    on the positive rows -- so a large negative pool can never distort which
+    species clear min_samples_per_class or how max_samples_per_class caps
+    them -- then adds the negatives back in once num_classes/label_order is
+    finalized.
+
+    ``is_negative_mask`` is caller-defined: pass ``y_full.sum(axis=1) == 0``
+    for a structural check (ground-truth CSV rows, reference-pool rows), or
+    an annotation-derived mask (e.g. a snippet's only trusted label is the
+    NO_EVENT_LABEL sentinel) when y_full was built by excluding that sentinel
+    from species_candidates in the first place -- in both cases the negative
+    rows are already all-zero in y_full by construction.
+
+    Returns the same 6-tuple shape as model.filter_and_balance_classes.
+    """
+    is_negative_mask = np.asarray(is_negative_mask, dtype=bool)
+    pos_mask = ~is_negative_mask
+
+    X_pos = X[pos_mask]
+    y_pos = y_full[pos_mask]
+    pos_sids = [sid for sid, keep in zip(snippet_ids, pos_mask) if keep]
+
+    X_neg = X[is_negative_mask]
+    neg_sids = [sid for sid, keep in zip(snippet_ids, is_negative_mask) if keep]
+
+    X_train, y_train, labeled_sids, used_species, excluded_species, class_counts = (
+        model.filter_and_balance_classes(
+            X=X_pos, y=y_pos, snippet_ids=pos_sids,
+            species_list=species_candidates,
+            min_samples_per_class=min_samples_per_class,
+            max_samples_per_class=max_samples_per_class,
+        )
+    )
+
+    if neg_sids and len(used_species) > 0:
+        y_neg = np.zeros((len(neg_sids), len(used_species)), dtype=np.float32)
+        X_train = np.concatenate([X_train, X_neg], axis=0)
+        y_train = np.concatenate([y_train, y_neg], axis=0)
+        labeled_sids = list(labeled_sids) + neg_sids
+        logger.info(
+            "split_filter_reattach_negatives: reattached %d confirmed-negative rows "
+            "(positive rows=%d, classes=%d)",
+            len(neg_sids), len(pos_sids), len(used_species),
+        )
+
+    return X_train, y_train, labeled_sids, used_species, excluded_species, class_counts
 
 
 # ── Reference data pool ──────────────────────────────────────────────────

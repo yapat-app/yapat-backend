@@ -27,3 +27,20 @@ DIVERSITY_HNSW_MIN_NL : 500
 DIVERSITY_HNSW_MIN_NL : 500
 
 RETRAIN_AFTER : 100
+
+# Reserved sentinel labels for confirmed-negative snippets -- match the
+# frontend quick-label modal's slug convention (display text -> taxon_id
+# "local:<slug>"), e.g. "No biophony" (no biological sound at all) and
+# "Other biophony" (a biological sound is present, but not one of the
+# target species -- still a genuine negative for every target class). Add
+# more entries here as needed. All are excluded from the trainable label
+# space everywhere species_list/species_candidates are built from
+# annotations; snippets carrying only one (or more) of these labels are
+# trained as explicit all-zero (confirmed-negative) rows instead of a class
+# of their own, so confidence/composite/label_scope never see any of them
+# as a species. The first entry is the canonical label used when
+# persisting a collapsed confirmed-negative GROUND_TRUTH annotation row
+# (see store_snippet_annotations).
+NO_EVENT_LABELS :
+  - "local:no_biophony"
+  - "local:other_biophony"

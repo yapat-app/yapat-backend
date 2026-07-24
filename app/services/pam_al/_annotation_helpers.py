@@ -16,6 +16,7 @@ from app.models.pam_active_learning import (
     ALSnippetAnnotation,
     ALAnnotationSource,
 )
+from active_learning.config import NO_EVENT_LABEL
 
 
 def store_snippet_annotations(
@@ -28,7 +29,13 @@ def store_snippet_annotations(
     model_checkpoint_id: int | None = None,
     user_id: int | None = None,
 ) -> None:
-    """Store one annotation row per positive label per snippet."""
+    """
+    Store one annotation row per positive label per snippet; a snippet with
+    no positive label (a confirmed negative -- see
+    split_filter_reattach_negatives) is stored as a single NO_EVENT_LABEL
+    row instead of being silently skipped, so it round-trips as "labeled,
+    no event" rather than looking unlabeled on reload.
+    """
     if len(snippet_ids) != y.shape[0]:
         raise ValueError(f"Mismatch: {len(snippet_ids)=} but y has {y.shape[0]} rows.")
     if len(label_order) != y.shape[1]:
@@ -40,10 +47,13 @@ def store_snippet_annotations(
 
     for row_idx, snippet_id in enumerate(snippet_ids):
         positive_indices = np.where(y[row_idx] > 0)[0]
+        labels_to_store = (
+            [label_order[i] for i in positive_indices]
+            if len(positive_indices) > 0
+            else [NO_EVENT_LABEL]
+        )
 
-        for class_idx in positive_indices:
-            label = label_order[class_idx]
-
+        for label in labels_to_store:
             if (snippet_id, label) in seen:
                 continue
 

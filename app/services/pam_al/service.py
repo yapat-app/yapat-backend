@@ -56,6 +56,7 @@ from active_learning.config import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_HIDDEN_DIM,
     DEFAULT_DROPOUT,
+    NO_EVENT_LABELS,
 )
 from app.services.pam_al import _checkpoint_helpers as ckpt_h
 from app.services.pam_al import _data_helpers as data_h
@@ -239,10 +240,15 @@ class PAMActiveLearningService:
             if not annotations_by_snippet:
                 raise ValueError("No user annotations available for bootstrap training.")
 
+            # Exclude the reserved confirmed-negative sentinels (No biophony /
+            # Other biophony) from the trainable label space -- those
+            # snippets are retained as explicit all-zero rows below, not as
+            # a real class.
             species_list = sorted({
                 label
                 for labels in annotations_by_snippet.values()
                 for label in labels
+                if label not in NO_EVENT_LABELS
             })
 
             if not species_list:
@@ -320,12 +326,14 @@ class PAMActiveLearningService:
                 body.dataset_id, ref_info.get("reference_sample_count", 0),
             )
 
+            is_negative_mask = y_train.sum(axis=1) == 0
             X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
-                model.filter_and_balance_classes(
-                    X=X_train, y=y_train, snippet_ids=used_snippet_ids,
-                    species_list=species_list,
+                data_h.split_filter_reattach_negatives(
+                    X=X_train, y_full=y_train, snippet_ids=used_snippet_ids,
+                    species_candidates=species_list, model=model,
                     min_samples_per_class=body.min_samples_per_class,
                     max_samples_per_class=body.max_samples_per_class,
+                    is_negative_mask=is_negative_mask,
                 )
             )
 
@@ -1268,10 +1276,15 @@ class PAMActiveLearningService:
             )
 
             model = ckpt_h.make_model(model_ckpt.model_type)
-            X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = model.filter_and_balance_classes(
-                X=X_train, y=y_train, snippet_ids=used_sids, species_list=species_list,
-                min_samples_per_class=hyper.get("min_samples_per_class", 1),
-                max_samples_per_class=hyper.get("max_samples_per_class"),
+            is_negative_mask = y_train.sum(axis=1) == 0
+            X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = (
+                data_h.split_filter_reattach_negatives(
+                    X=X_train, y_full=y_train, snippet_ids=used_sids,
+                    species_candidates=species_list, model=model,
+                    min_samples_per_class=hyper.get("min_samples_per_class", 1),
+                    max_samples_per_class=hyper.get("max_samples_per_class"),
+                    is_negative_mask=is_negative_mask,
+                )
             )
 
             if y_train.shape[0] == 0:
@@ -1540,7 +1553,13 @@ class PAMActiveLearningService:
             # full candidate list before min_samples_per_class filtering;
             # filter_and_balance_classes narrows it to `used_species` below,
             # which becomes the final, persisted label_order.
-            species_candidates = sorted({lbl for labels in annotations_by_snippet.values() for lbl in labels})
+            # Exclude the reserved confirmed-negative sentinels -- those
+            # snippets are retained as explicit all-zero rows below, not as a
+            # real class.
+            species_candidates = sorted({
+                lbl for labels in annotations_by_snippet.values() for lbl in labels
+                if lbl not in NO_EVENT_LABELS
+            })
             if not species_candidates:
                 raise ValueError(f"No labels found in trusted annotations for dataset_id={dataset_id}.")
 
@@ -1579,12 +1598,14 @@ class PAMActiveLearningService:
 
             model = ckpt_h.make_model(new_ckpt.model_type)
 
+            is_negative_mask = y_train_full.sum(axis=1) == 0
             X_train, y_train, labeled_sids, used_species, excluded_species, class_counts = (
-                model.filter_and_balance_classes(
-                    X=X_train, y=y_train_full, snippet_ids=train_sids,
-                    species_list=species_candidates,
+                data_h.split_filter_reattach_negatives(
+                    X=X_train, y_full=y_train_full, snippet_ids=train_sids,
+                    species_candidates=species_candidates, model=model,
                     min_samples_per_class=int(hyper.get("min_samples_per_class", 1)),
                     max_samples_per_class=hyper.get("max_samples_per_class"),
+                    is_negative_mask=is_negative_mask,
                 )
             )
 
