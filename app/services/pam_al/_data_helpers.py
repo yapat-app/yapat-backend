@@ -402,6 +402,30 @@ def scan_metadata_species(metadata_path: str) -> set:
         return {c for c in fieldnames if c not in _METADATA_STRUCTURAL_COLUMNS}
 
 
+def get_referenced_filenames(metadata_path: str) -> set:
+    """
+    Return the exact set of recording-key filenames a pam_metadata.csv-format
+    file references -- i.e. the same keys load_ground_truth_metadata would
+    build in gt_index (either ``{fname}_{min_t}_{max_t}.wav`` for chunk-level
+    CSVs, or the plain filename column value otherwise).
+
+    Used to filter which on-disk audio files actually get registered/scanned
+    for a reference dataset, so scan/embed compute isn't spent on files the
+    CSV will never use as ground truth -- lets ``source_uri`` point at a
+    larger directory (e.g. the full upstream corpus) while only the files
+    the metadata CSV mentions get turned into Recordings.
+
+    Reuses load_ground_truth_metadata directly (via a species list
+    discovered from the CSV itself) so the filter can never drift out of
+    sync with what training-time matching actually does.
+    """
+    species_list = sorted(scan_metadata_species(metadata_path))
+    if not species_list:
+        return set()
+    gt_index = load_ground_truth_metadata(metadata_path, species_list, allowed_subsets=None)
+    return set(gt_index.keys())
+
+
 def get_reference_dataset_ids(db: Session, dataset) -> List[int]:
     """
     Resolve the effective reference-dataset ids for a target dataset: the
@@ -479,7 +503,9 @@ def load_reference_pool_training_data(
             })
             continue
         try:
-            meta_rel, _ = resolve_pam_training_paths(DATA_ROOT, ref_ds.source_uri)
+            meta_rel, _ = resolve_pam_training_paths(
+                DATA_ROOT, ref_ds.source_uri, metadata_path=ref_ds.reference_metadata_path,
+            )
             meta_path = os.path.join(DATA_ROOT, meta_rel)
             own_species = scan_metadata_species(meta_path)
         except ValueError as e:

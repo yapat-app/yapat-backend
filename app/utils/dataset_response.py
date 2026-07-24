@@ -23,6 +23,7 @@ def dataset_to_dict(
         "spectrogram_f_max_hz": dataset.spectrogram_f_max_hz,
         "retrain_after_threshold": dataset.retrain_after_threshold,
         "is_reference": dataset.is_reference,
+        "reference_metadata_path": dataset.reference_metadata_path,
         "created_at": dataset.created_at,
         "updated_at": dataset.updated_at,
         "recording_count": recording_count,

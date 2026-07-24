@@ -138,24 +138,52 @@ every labeled row gets used regardless of subset (that's a deliberate
 decision: reference data is never evaluated inside the tool, so there's no
 need to hold out a test split).
 
-**2. Lay out the folder** under `DATA_ROOT`, containing your audio (clips or
-whole recordings, per whichever option you picked) plus `pam_metadata.csv`.
+**2. Decide where `pam_metadata.csv` lives.** You don't need to curate a
+clean folder with only the referenced files, and you don't need to touch
+the shared audio corpus at all — `source_uri` can point straight at a much
+larger, independent directory (an upstream corpus's own folder, with
+unrelated subfolders and files nowhere mentioned in the CSV, nested however
+deep), and the CSV can live somewhere else entirely:
+
+- Default: `pam_metadata.csv` sits at `{source_uri}/pam_metadata.csv`.
+- Override: set `reference_metadata_path` on the dataset to a path
+  elsewhere under `DATA_ROOT` (e.g.
+  `"reference_pools/anuraset_6species/pam_metadata.csv"`) to keep it
+  completely out of the audio corpus's own folder. A bare filename (no
+  `/`) still resolves inside `source_uri`; anything with a `/` resolves
+  relative to `DATA_ROOT` instead.
+
+Either way, scanning filters the file list down to just what the resolved
+CSV references before creating any `Recording` row — so pointing
+`source_uri` straight at an upstream corpus's full folder (e.g. AnuraSet's
+`raw_data/`, all four site subfolders, ~1,600 recordings) works fine and
+only the CSV-referenced files get registered, embedded, and stored;
+everything else is skipped and never costs any compute. You can even
+register multiple reference datasets against the *same* `source_uri`
+(different species subsets, different `reference_metadata_path` each) —
+`Dataset` uniqueness is on `(team_id, source_uri)`, and admin-owned
+reference datasets all share `team_id=NULL`, so this doesn't collide.
 
 **3. Register the dataset**, marked as reference-only:
 
 ```
 POST /api/datasets/
 {
-  "name": "AnuraSet reference pool",
-  "source_uri": "reference/anuraset_train",
+  "name": "AnuraSet reference pool (6 species)",
+  "source_uri": "anuraset/raw_data",
+  "reference_metadata_path": "reference_pools/anuraset_6species/pam_metadata.csv",
   "dataset_type": "PAM",
   "is_reference": true,
   "team_id": null
 }
 ```
 
+(Omit `reference_metadata_path` entirely to use the default
+`{source_uri}/pam_metadata.csv` location instead.)
+
 This auto-dispatches the scan task, which creates one `Recording` row per
-audio file.
+audio file the metadata CSV references (not per audio file present in
+`source_uri`).
 
 **4. Generate embeddings** using the *same* embedding model your target
 dataset(s) use (mixing across embedding spaces is refused by the

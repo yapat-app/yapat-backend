@@ -22,13 +22,36 @@ and protect against catastrophic forgetting.
 A reference dataset is an ordinary `Dataset` row (`is_reference=True`) that
 goes through the normal ingest pipeline -- audio on disk under `DATA_ROOT`,
 registered via `POST /api/datasets/`, scanned/segmented/embedded like any
-other dataset -- and carries a `pam_metadata.csv` in its `source_uri` folder,
-same format `load_ground_truth_metadata` already parses for cold-start
-bootstrap (`fname`/`min_t`/`max_t` or one binary column per species, or a
+other dataset -- paired with a `pam_metadata.csv`, same format
+`load_ground_truth_metadata` already parses for cold-start bootstrap
+(`fname`/`min_t`/`max_t` or one binary column per species, or a
 `species`/`label` column; optional `subset` column, ignored here -- all
 labeled rows are used regardless of subset).
 
+By default the CSV is expected at `{source_uri}/pam_metadata.csv`, but
+`Dataset.reference_metadata_path` can override that per-dataset: a bare
+filename still resolves within `source_uri`, while a path containing `/`
+resolves relative to `DATA_ROOT` instead, fully independent of
+`source_uri`. This keeps a shared raw-audio corpus (e.g. an upstream
+benchmark's own folder) untouched by any given reference pool's metadata --
+multiple reference `Dataset` rows can point `source_uri` at the *same*
+underlying audio folder while each supplying its own
+`reference_metadata_path` elsewhere under `DATA_ROOT`, since `Dataset`
+uniqueness is only on `(team_id, source_uri)` and admin-owned reference
+datasets share `team_id=NULL`.
+
 `is_reference=True` datasets:
+- **only register recordings the metadata CSV actually mentions.**
+  `DatasetService.scan_recordings` normally walks the entire `source_uri`
+  tree and registers every audio file it finds; for reference datasets it
+  first filters that list down to files whose basename is a key in
+  `pam_metadata.csv` (`_filter_to_referenced_files`, reusing
+  `get_referenced_filenames` / `load_ground_truth_metadata` so the filter
+  can never drift from what training-time matching actually does). This
+  means `source_uri` can point at a much larger directory -- including one
+  with unrelated subfolders -- without wasting scan/embed compute on files
+  the pool will never use. Falls back to registering everything if no CSV
+  exists yet, rather than silently registering zero.
 - are excluded from `GET /api/datasets/` unless `include_reference=true` is
   passed, so they never show up as something to annotate
 - are still full datasets otherwise -- same scan/snippet/embed pipeline,

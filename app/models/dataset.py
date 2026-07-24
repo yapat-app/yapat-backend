@@ -59,6 +59,14 @@ class Dataset(Base):
     # surfaced in annotation/labelling views. Other datasets/teams opt into
     # using it via DatasetReferenceLink. See docs/reference-data-pool-design.md.
     is_reference = Column(Boolean, nullable=False, default=False, server_default="false", index=True)
+    # Optional override for where pam_metadata.csv lives, only meaningful when
+    # is_reference=True. Same resolution convention as resolve_pam_training_paths:
+    # a bare filename resolves within source_uri (default: "pam_metadata.csv");
+    # a path containing "/" resolves relative to DATA_ROOT instead, fully
+    # independent of source_uri. Null = default to {source_uri}/pam_metadata.csv.
+    # Lets a shared raw-audio corpus (source_uri) stay untouched by any given
+    # reference pool's metadata -- see docs/reference-data-pool-design.md.
+    reference_metadata_path = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
