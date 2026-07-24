@@ -25,3 +25,7 @@ DEFAULT_LEARNING_RATE = _cfg["DEFAULT_LEARNING_RATE"]
 DEFAULT_BATCH_SIZE = _cfg["DEFAULT_BATCH_SIZE"]
 DEFAULT_HIDDEN_DIM = _cfg["DEFAULT_HIDDEN_DIM"]
 DEFAULT_DROPOUT = _cfg["DEFAULT_DROPOUT"]
+
+# Reserved confirmed-negative sentinel labels (see config.yaml for details).
+NO_EVENT_LABELS = frozenset(_cfg["NO_EVENT_LABELS"])
+NO_EVENT_LABEL = _cfg["NO_EVENT_LABELS"][0]  # canonical label for collapsed GROUND_TRUTH rows

@@ -18,6 +18,7 @@ from app.models.pam_active_learning import (
 )
 
 from app.services.pam_al._annotation_helpers import replace_user_labels_for_snippet
+from active_learning.config import NO_EVENT_LABELS
 
 # Trigger values that represent actual model-retrain jobs.
 # "inference" jobs use the same ALRetrainJob table but are NOT retrains and
@@ -232,4 +233,17 @@ def resolve_feedback_labels(
     if action == "MODIFY":
         return incoming_labels
     return []
+
+
+def is_no_event_feedback(labels: list[str] | None) -> bool:
+    """
+    True if feedback carries no real label -- either nothing at all, or only
+    reserved confirmed-negative sentinels (e.g. "No biophony" and/or "Other
+    biophony" quick labels). Callers use this to decide whether a snippet
+    should be treated as an explicit confirmed negative rather than a real
+    species label.
+    """
+    if not labels:
+        return True
+    return set(labels).issubset(NO_EVENT_LABELS)
 
