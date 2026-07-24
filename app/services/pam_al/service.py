@@ -1529,20 +1529,6 @@ class PAMActiveLearningService:
                 "Loaded trusted annotations for retrain checkpoint_id=%d annotated_snippets=%d",
                 checkpoint_id, len(annotations_by_snippet),
             )
-            if not annotations_by_snippet:
-                raise ValueError(
-                    f"No trusted annotations available for retraining "
-                    f"(dataset_id={dataset_id}). "
-                    "Ensure ground-truth or user labels exist before retraining."
-                )
-
-            # Recompute the label candidate set fresh each retrain. This is the
-            # full candidate list before min_samples_per_class filtering;
-            # filter_and_balance_classes narrows it to `used_species` below,
-            # which becomes the final, persisted label_order.
-            species_candidates = sorted({lbl for labels in annotations_by_snippet.values() for lbl in labels})
-            if not species_candidates:
-                raise ValueError(f"No labels found in trusted annotations for dataset_id={dataset_id}.")
 
             X, snippet_rows = data_h.load_embeddings(self.db, snippet_set_id, embedding_model_id)
             snippet_ids = [r["snippet_id"] for r in snippet_rows]
@@ -1551,17 +1537,19 @@ class PAMActiveLearningService:
                 checkpoint_id, len(snippet_rows),
             )
 
+            # Recompute the label candidate set fresh each retrain. Target
+            # annotations are optional when a linked reference pool supplies
+            # ground-truth training rows; _mix_in_reference_pool expands this
+            # initially empty label space from reference metadata.
+            species_candidates = sorted({lbl for labels in annotations_by_snippet.values() for lbl in labels})
             keep = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
-            if not keep:
-                raise ValueError(
-                    f"No embeddings found for snippets with trusted annotations "
-                    f"(annotated snippet ids: {list(annotations_by_snippet.keys())[:10]}..., "
-                    f"snippet_set snippet ids sample: {snippet_ids[:10]}...)."
-                )
-
-            X_train = X[keep]
+            X_train = X[keep] if keep else np.empty((0, X.shape[1]), dtype=X.dtype)
             train_sids = [snippet_ids[i] for i in keep]
-            y_train_full = ann_h.build_multihot_from_annotations(train_sids, species_candidates, annotations_by_snippet)
+            y_train_full = (
+                ann_h.build_multihot_from_annotations(train_sids, species_candidates, annotations_by_snippet)
+                if keep and species_candidates
+                else np.empty((0, len(species_candidates)), dtype=np.float32)
+            )
 
             ds = ckpt_h.get_pam_dataset(self.db, dataset_id)
             X_train, y_train_full, train_sids, species_candidates, ref_info = self._mix_in_reference_pool(
@@ -1571,6 +1559,17 @@ class PAMActiveLearningService:
                 "Mixed reference pool into retrain checkpoint_id=%d reference_samples=%d",
                 checkpoint_id, ref_info.get("reference_sample_count", 0),
             )
+
+            if X_train.shape[0] == 0:
+                raise ValueError(
+                    f"No training data available for retraining (dataset_id={dataset_id}). "
+                    "Ensure trusted target annotations or a valid linked reference pool exists."
+                )
+            if not species_candidates:
+                raise ValueError(
+                    f"No training labels available for retraining (dataset_id={dataset_id}). "
+                    "Ensure trusted target annotations or labeled reference metadata exists."
+                )
 
             is_mlp = new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
             hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
