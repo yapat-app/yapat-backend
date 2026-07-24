@@ -9,12 +9,14 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.models.embedding import EmbeddingVector
 from app.services.pam_al._embedding_cache import load_embeddings_cached
+from app.utils.pam_training_paths import resolve_pam_training_paths
 
 logger = logging.getLogger(__name__)
 
@@ -348,3 +350,201 @@ def load_ground_truth_metadata(
         raise ValueError(f"No usable ground-truth rows found in metadata file: {metadata_path}")
 
     return gt_index
+
+
+# ── Reference data pool ──────────────────────────────────────────────────
+#
+# Reference datasets are ordinary Datasets (Dataset.is_reference=True) that
+# went through the normal scan/snippet/embed pipeline and carry their own
+# pam_metadata.csv (same format load_ground_truth_metadata already parses).
+# A target dataset opts into one or more reference datasets via
+# DatasetReferenceLink (direct dataset_id link, or team_id link shared by
+# every dataset under that team). See docs/reference-data-pool-design.md.
+
+_METADATA_STRUCTURAL_COLUMNS = {
+    "fname", "min_t", "max_t", "start_time", "end_time",
+    "onset", "offset", "subset", "file_name", "recording_file",
+    "recording_name", "file_path", "sample_name",
+}
+
+
+def scan_metadata_species(metadata_path: str) -> set:
+    """
+    Read a pam_metadata.csv-format file and return the set of species it
+    references, without needing a species_list upfront (unlike
+    load_ground_truth_metadata, which requires one to build its label
+    index). Used to discover reference-only species before mixing reference
+    data into a training run.
+    """
+    if not os.path.isfile(metadata_path):
+        raise ValueError(f"Metadata file not found: {metadata_path}")
+
+    with open(metadata_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+
+        species_col = None
+        for candidate in ["species", "label"]:
+            if candidate in fieldnames:
+                species_col = candidate
+                break
+
+        if species_col is not None:
+            species: set = set()
+            for row in reader:
+                value = str(row.get(species_col, "")).strip()
+                if value:
+                    species.add(value)
+            return species
+
+        # Wide format: one binary column per species -- everything that
+        # isn't a known structural column is treated as a species column.
+        return {c for c in fieldnames if c not in _METADATA_STRUCTURAL_COLUMNS}
+
+
+def get_reference_dataset_ids(db: Session, dataset) -> List[int]:
+    """
+    Resolve the effective reference-dataset ids for a target dataset: the
+    union of dataset-scoped links (dataset_id == dataset.id) and
+    team-scoped links (team_id == dataset.team_id).
+    """
+    from app.models.reference_link import DatasetReferenceLink
+
+    filters = [DatasetReferenceLink.dataset_id == dataset.id]
+    if dataset.team_id is not None:
+        filters.append(DatasetReferenceLink.team_id == dataset.team_id)
+
+    rows = (
+        db.query(DatasetReferenceLink.reference_dataset_id)
+        .filter(or_(*filters))
+        .distinct()
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+def load_reference_pool_training_data(
+    db: Session,
+    dataset,
+    embedding_model_id: int,
+    species_list: List[str],
+) -> Tuple[np.ndarray, np.ndarray, List[str], Dict[str, Any]]:
+    """
+    Load and concatenate training data from every reference dataset linked
+    to ``dataset`` (directly, or via its team).
+
+    Returns (X_ref, y_ref, unified_species_list, info):
+      - unified_species_list is ``species_list`` with any reference-only
+        species appended at the end. If it differs from ``species_list``,
+        the caller must zero-pad its own y matrix's columns to match before
+        concatenating with y_ref.
+      - info carries per-reference-dataset sample counts and a list of
+        skipped datasets (with reasons) for checkpoint provenance / debugging.
+
+    Reference datasets missing a metadata CSV, a default snippet set, or
+    embeddings for ``embedding_model_id`` are skipped with a logged reason
+    rather than failing the whole training run -- reference data is
+    supplementary, not required.
+    """
+    from app.config import settings
+    from app.models.dataset import Dataset as DatasetModel
+
+    empty_info = {"reference_dataset_ids": [], "reference_sample_count": 0, "skipped": []}
+
+    ref_ids = get_reference_dataset_ids(db, dataset)
+    if not ref_ids:
+        return (
+            np.empty((0, 0), dtype=np.float32),
+            np.empty((0, len(species_list)), dtype=np.float32),
+            list(species_list),
+            empty_info,
+        )
+
+    ref_datasets = db.query(DatasetModel).filter(DatasetModel.id.in_(ref_ids)).all()
+    DATA_ROOT = settings.DATA_ROOT or "/data"
+
+    skipped: List[Dict[str, Any]] = []
+
+    # Pass 1: resolve each reference dataset's metadata path and discover its
+    # own species vocabulary, so the unified label space is known before any
+    # y matrix gets built.
+    ref_meta: Dict[int, Dict[str, Any]] = {}
+    extra_species: set = set()
+
+    for ref_ds in ref_datasets:
+        if ref_ds.default_snippet_set_id is None:
+            skipped.append({
+                "dataset_id": ref_ds.id, "name": ref_ds.name,
+                "reason": "no default_snippet_set_id",
+            })
+            continue
+        try:
+            meta_rel, _ = resolve_pam_training_paths(DATA_ROOT, ref_ds.source_uri)
+            meta_path = os.path.join(DATA_ROOT, meta_rel)
+            own_species = scan_metadata_species(meta_path)
+        except ValueError as e:
+            skipped.append({"dataset_id": ref_ds.id, "name": ref_ds.name, "reason": str(e)})
+            continue
+
+        if not own_species:
+            skipped.append({
+                "dataset_id": ref_ds.id, "name": ref_ds.name,
+                "reason": "metadata file has no usable species",
+            })
+            continue
+
+        ref_meta[ref_ds.id] = {
+            "dataset": ref_ds, "metadata_path": meta_path, "own_species": sorted(own_species),
+        }
+        extra_species |= own_species
+
+    unified_species = list(species_list) + [sp for sp in sorted(extra_species) if sp not in species_list]
+    species_to_unified_idx = {sp: i for i, sp in enumerate(unified_species)}
+
+    # Pass 2: load embeddings + labels per reference dataset (against its own
+    # species vocabulary, since a single CSV rarely covers every species
+    # across every linked reference dataset), then scatter into the unified
+    # column space.
+    X_parts: List[np.ndarray] = []
+    y_parts: List[np.ndarray] = []
+    per_dataset_counts: Dict[int, int] = {}
+
+    for ref_id, meta in ref_meta.items():
+        ref_ds = meta["dataset"]
+        try:
+            X, snippet_rows = load_embeddings(db, ref_ds.default_snippet_set_id, embedding_model_id)
+            gt_index = load_ground_truth_metadata(meta["metadata_path"], meta["own_species"], allowed_subsets=None)
+            X_own, y_own, _ = align_embeddings_and_labels(X, snippet_rows, gt_index, meta["own_species"])
+        except ValueError as e:
+            skipped.append({"dataset_id": ref_ds.id, "name": ref_ds.name, "reason": str(e)})
+            continue
+
+        if X_own.shape[0] == 0:
+            continue
+
+        y_scattered = np.zeros((y_own.shape[0], len(unified_species)), dtype=np.float32)
+        for local_idx, sp in enumerate(meta["own_species"]):
+            y_scattered[:, species_to_unified_idx[sp]] = y_own[:, local_idx]
+
+        X_parts.append(X_own)
+        y_parts.append(y_scattered)
+        per_dataset_counts[ref_id] = int(X_own.shape[0])
+
+    if not X_parts:
+        return (
+            np.empty((0, 0), dtype=np.float32),
+            np.empty((0, len(unified_species)), dtype=np.float32),
+            unified_species,
+            {"reference_dataset_ids": ref_ids, "reference_sample_count": 0, "skipped": skipped},
+        )
+
+    X_ref = np.concatenate(X_parts, axis=0)
+    y_ref = np.concatenate(y_parts, axis=0)
+
+    info = {
+        "reference_dataset_ids": ref_ids,
+        "reference_sample_count": int(X_ref.shape[0]),
+        "reference_counts_by_dataset": per_dataset_counts,
+        "skipped": skipped,
+    }
+    return X_ref, y_ref, unified_species, info
