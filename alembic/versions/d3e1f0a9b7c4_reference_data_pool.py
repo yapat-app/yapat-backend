@@ -1,4 +1,4 @@
-"""reference data pool: datasets.is_reference/reference_metadata_path + dataset_reference_links
+"""reference data pool: datasets.is_reference + dataset_reference_links
 
 Revision ID: d3e1f0a9b7c4
 Revises: a0c672de4d81
@@ -21,11 +21,6 @@ def upgrade() -> None:
         sa.Column('is_reference', sa.Boolean(), nullable=False, server_default=sa.false()),
     )
     op.create_index(op.f('ix_datasets_is_reference'), 'datasets', ['is_reference'], unique=False)
-    op.add_column(
-        'datasets',
-        sa.Column('reference_metadata_path', sa.String(), nullable=True),
-    )
-
     op.create_table(
         'dataset_reference_links',
         sa.Column('id', sa.Integer(), nullable=False),
@@ -69,6 +64,5 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_dataset_reference_links_id'), table_name='dataset_reference_links')
     op.drop_table('dataset_reference_links')
 
-    op.drop_column('datasets', 'reference_metadata_path')
     op.drop_index(op.f('ix_datasets_is_reference'), table_name='datasets')
     op.drop_column('datasets', 'is_reference')

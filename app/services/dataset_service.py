@@ -509,14 +509,14 @@ class DatasetService:
         yet (e.g. dataset registered before the CSV was placed) rather than
         silently registering zero recordings.
         """
-        from app.utils.pam_training_paths import resolve_pam_training_paths
+        from app.utils.pam_training_paths import resolve_pam_metadata_path
         from app.services.pam_al._data_helpers import get_referenced_filenames
 
         source_uri = dataset.source_uri
         DATA_ROOT = settings.DATA_ROOT or "/data"
 
         try:
-            meta_rel, _ = resolve_pam_training_paths(
+            meta_rel = resolve_pam_metadata_path(
                 DATA_ROOT, source_uri, metadata_path=dataset.reference_metadata_path,
             )
         except ValueError:

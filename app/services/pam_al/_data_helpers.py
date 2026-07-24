@@ -16,7 +16,7 @@ from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.models.embedding import EmbeddingVector
 from app.services.pam_al._embedding_cache import load_embeddings_cached
-from app.utils.pam_training_paths import resolve_pam_training_paths
+from app.utils.pam_training_paths import resolve_pam_metadata_path, resolve_pam_training_paths
 
 logger = logging.getLogger(__name__)
 
@@ -503,7 +503,7 @@ def load_reference_pool_training_data(
             })
             continue
         try:
-            meta_rel, _ = resolve_pam_training_paths(
+            meta_rel = resolve_pam_metadata_path(
                 DATA_ROOT, ref_ds.source_uri, metadata_path=ref_ds.reference_metadata_path,
             )
             meta_path = os.path.join(DATA_ROOT, meta_rel)
