@@ -437,6 +437,7 @@ class WSSEDService:
             return None
         return {
             "job_id": job.id,
+            "dataset_id": job.dataset_id,
             "status": job.status.value,
             "model_path": job.model_path,
             "model_paths": job.model_paths,
