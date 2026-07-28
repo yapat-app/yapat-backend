@@ -20,16 +20,10 @@ engine = create_engine(
     max_overflow=5,  # Extra connections created on demand per process
     pool_timeout=30,  # Seconds to wait before giving up on getting a connection
     pool_recycle=3600,  # Recycle connections after 1 hour
-    # Safety net against connection leaks: Postgres terminates any session left
-    # idle inside an open transaction beyond this window, returning it to the
-    # pool. Without it, a request that opens a transaction (e.g. the auth user
-    # lookup) but is then stalled leaves the connection checked out forever;
-    # enough of these exhaust the pool and require a manual restart. Legitimate
-    # transactions complete in milliseconds, so 60s only ever reaps leaks.
     connect_args={"options": "-c idle_in_transaction_session_timeout=60000"},
+
     echo=False  # Set to True for SQL query logging
 )
-
 # Register pgvector type adapter with psycopg2 so that vector columns
 # are properly decoded instead of raising "Unknown PG numeric type".
 try:

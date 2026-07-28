@@ -71,6 +71,7 @@ services:
       - "8000:8000"
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/bioacoustics:/data/monitora:ro
       # Mount host directory for species models (read-write so retraining can save checkpoints)
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
       - ${HOST_MODELS_AL:-./models_AL}:/app/assets/models/single_species_models:ro
@@ -134,6 +135,7 @@ services:
       - EMBEDDING_CHORD_CHUNK_SIZE=${EMBEDDING_CHORD_CHUNK_SIZE:-25}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/bioacoustics:/data/monitora:ro
       # Read-write so Celery worker can save checkpoints when retraining
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
@@ -168,6 +170,7 @@ services:
       - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/bioacoustics:/data/monitora:ro
       # Read-write: worker saves new checkpoint files here after retraining
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
@@ -196,6 +199,7 @@ services:
       - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/bioacoustics:/data/monitora:ro
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
 
