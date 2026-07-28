@@ -31,6 +31,7 @@ class TaxonomyConversation(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     team_id = Column(Integer, ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="SET NULL"), nullable=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     custom_taxonomy_id = Column(Integer, ForeignKey("custom_taxonomies.id", ondelete="SET NULL"), nullable=True)
     status = Column(String(50), nullable=False, default=ConversationStatus.IN_PROGRESS)
@@ -41,6 +42,7 @@ class TaxonomyConversation(Base):
 
     # Relationships
     team = relationship("Team", backref="taxonomy_conversations")
+    dataset = relationship("Dataset", backref="taxonomy_conversations")
     user = relationship("User", backref="taxonomy_conversations")
     custom_taxonomy = relationship("CustomTaxonomy", back_populates="conversations")
     messages = relationship("TaxonomyMessage", back_populates="conversation", cascade="all, delete-orphan", order_by="TaxonomyMessage.created_at")

@@ -37,6 +37,7 @@ def create_conversation(
     user_id: int,
     db: Session,
     team_id: Optional[int] = None,
+    dataset_id: Optional[int] = None,
 ) -> TaxonomyConversation:
     """
     Create a new taxonomy conversation.
@@ -45,6 +46,9 @@ def create_conversation(
         user_id: User creating the conversation
         db: Database session
         team_id: Team the conversation belongs to (None for personal conversations)
+        dataset_id: Dataset the label space is associated with (None for team-only
+            conversations). Labels added from chat are mirrored into this dataset's
+            quick_labels.
 
     Returns:
         Created TaxonomyConversation
@@ -52,13 +56,17 @@ def create_conversation(
     conversation = TaxonomyConversation(
         user_id=user_id,
         team_id=team_id,
+        dataset_id=dataset_id,
         status=ConversationStatus.IN_PROGRESS
     )
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
 
-    logger.info(f"Created conversation {conversation.id} for user {user_id} in team {team_id}")
+    logger.info(
+        f"Created conversation {conversation.id} for user {user_id} "
+        f"in team {team_id} (dataset {dataset_id})"
+    )
     return conversation
 
 
@@ -361,12 +369,89 @@ def add_to_label_space(
     db.commit()
     db.refresh(conversation)
 
+    # Mirror the newly added items into the associated dataset's quick_labels so
+    # they show up in GET /api/datasets/{id}/quick-labels for annotation.
+    if conversation.dataset_id:
+        try:
+            sync_items_to_dataset_quick_labels(conversation.dataset_id, added_items, db)
+            db.refresh(conversation)
+        except Exception:
+            # Quick-label mirroring is best-effort; never fail the add because of it.
+            logger.exception(
+                "Failed to sync label space to dataset %s quick_labels (conversation %s)",
+                conversation.dataset_id,
+                conversation_id,
+            )
+            db.rollback()
+
     logger.info(f"Added %d item(s) to label space in conversation {conversation_id}", len(added_items))
     return {
         "conversation": conversation,
         "added_items": added_items,
         "skipped_count": skipped_count,
     }
+
+
+def _label_space_item_to_quick_label(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """
+    Map a conversation label_space item to the dataset quick_labels shape
+    ({"taxon_id", "display_name"}).
+
+    quick_labels requires a non-empty taxon_id; when the source node has none
+    we synthesize a stable "local:<slug>" id from the display name so the label
+    is still usable for annotation.
+    """
+    display_name = item.get("name") or item.get("display_name")
+    if not display_name:
+        return None
+    taxon_id = item.get("taxon_id")
+    if not taxon_id:
+        slug = str(display_name).strip().lower().replace(" ", "_")[:120]
+        if not slug:
+            return None
+        taxon_id = f"local:{slug}"
+    return {"taxon_id": str(taxon_id), "display_name": str(display_name)}
+
+
+def sync_items_to_dataset_quick_labels(
+    dataset_id: int,
+    items: List[Dict[str, Any]],
+    db: Session,
+) -> int:
+    """
+    Merge label_space items into a dataset's quick_labels (append-and-dedup by taxon_id).
+
+    Does not replace existing quick_labels; only adds new taxa. Returns the number
+    of quick labels actually added. Safe to call with an empty items list.
+    """
+    from app.models.dataset import Dataset
+
+    if not items:
+        return 0
+
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        logger.warning("sync_items_to_dataset_quick_labels: dataset %s not found", dataset_id)
+        return 0
+
+    existing = list(dataset.quick_labels) if dataset.quick_labels else []
+    existing_ids = {ql.get("taxon_id") for ql in existing if isinstance(ql, dict)}
+
+    added = 0
+    for item in items:
+        ql = _label_space_item_to_quick_label(item)
+        if not ql or ql["taxon_id"] in existing_ids:
+            continue
+        existing.append(ql)
+        existing_ids.add(ql["taxon_id"])
+        added += 1
+
+    if added:
+        dataset.quick_labels = existing
+        flag_modified(dataset, "quick_labels")
+        db.commit()
+        logger.info("Synced %d quick label(s) to dataset %s", added, dataset_id)
+    return added
 
 
 def reject_taxonomy(conversation_id: int, db: Session) -> TaxonomyConversation:
