@@ -1430,8 +1430,8 @@ class PAMActiveLearningService:
             raise ValueError(f"Parent checkpoint {parent_checkpoint_id} not found.")
 
         hyper = parent_ckpt.hyperparameters or {}
-    # Auto-retrain checkpoints must carry all required hyperparameters so
-    # the worker can execute without additional lookups.
+        # Auto-retrain checkpoints must carry all required hyperparameters so
+        # the worker can execute without additional lookups.
         # Prefer the dataset's current default snippet set over the parent's
         # cached value -- see setup_manual_retrain for why (stale
         # snippet_set_id after re-segmentation causes retrain failures).
@@ -1447,9 +1447,12 @@ class PAMActiveLearningService:
         if embedding_model_id is None:
             raise ValueError(f"Parent checkpoint {parent_checkpoint_id} missing embedding_model_id.")
 
-        label_order = hyper.get("label_order")
-        if not label_order:
-            raise ValueError(f"Parent checkpoint {parent_checkpoint_id} missing label_order.")
+        label_order = ckpt_h.resolve_checkpoint_label_order(parent_ckpt)
+        if not hyper.get("label_order"):
+            # Backfill legacy parent checkpoints as well as carrying the resolved
+            # value into the self-contained auto-retrain checkpoint below.
+            parent_ckpt.hyperparameters = {**hyper, "label_order": label_order}
+            hyper = parent_ckpt.hyperparameters
 
         new_version = f"{parent_ckpt.version}_r{int(datetime.now(timezone.utc).timestamp())}"
 

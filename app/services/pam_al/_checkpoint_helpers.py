@@ -301,6 +301,34 @@ def load_species_from_label_config(label_config_path: str) -> List[str]:
     return [str(s) for s in species_list]
 
 
+def resolve_checkpoint_label_order(checkpoint: ALModelCheckpoint) -> List[str]:
+    """Resolve label order from DB metadata, label config, or checkpoint payload."""
+    hyper = checkpoint.hyperparameters or {}
+    label_order = hyper.get("label_order")
+    if label_order:
+        return [str(label) for label in label_order]
+
+    resolution_errors: list[str] = []
+    if checkpoint.label_config_path:
+        try:
+            return load_species_from_label_config(checkpoint.label_config_path)
+        except Exception as exc:
+            resolution_errors.append(f"label config: {exc}")
+
+    if checkpoint.checkpoint_path:
+        try:
+            payload = torch.load(checkpoint.checkpoint_path, map_location="cpu")
+            label_order = payload.get("label_order") if isinstance(payload, dict) else None
+            if label_order:
+                return [str(label) for label in label_order]
+            resolution_errors.append("checkpoint payload has no label_order")
+        except Exception as exc:
+            resolution_errors.append(f"checkpoint payload: {exc}")
+
+    detail = "; ".join(resolution_errors) or "no label config or checkpoint path is available"
+    raise ValueError(f"Checkpoint {checkpoint.id} missing label_order ({detail}).")
+
+
 def make_checkpoint_path(dataset_id: int, family_name: str, version: str, ckpt_id: int) -> str:
     checkpoint_dir = ensure_dir(
         os.path.join(settings.PAM_CHECKPOINTS_DIR, "pam_active_learning", str(dataset_id))
