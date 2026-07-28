@@ -84,9 +84,33 @@ def start_conversation(
     Creates a new conversation context for generating a custom taxonomy.
     User must be a member of the specified team. If no team_id is provided,
     the user's first team is used automatically.
+
+    When dataset_id is provided, the label space is associated with that dataset
+    (labels added from chat are mirrored into the dataset's quick_labels), and
+    team_id is derived from the dataset's team when not given explicitly.
     """
-    # Resolve team_id: use provided value, fall back to user's first team, or None for personal
+    # Resolve dataset_id: verify access and use it to derive team_id when needed
+    dataset_id = request.dataset_id
     team_id = request.team_id
+    if dataset_id is not None:
+        from app.services.dataset_service import DatasetService
+        dataset_svc = DatasetService(db)
+        dataset = dataset_svc.get_dataset(dataset_id)
+        if not dataset:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Dataset {dataset_id} not found"
+            )
+        if not dataset_svc.user_can_access_dataset(current_user, dataset_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this dataset"
+            )
+        # Derive team from the dataset when the caller didn't specify one
+        if team_id is None:
+            team_id = dataset.team_id
+
+    # Resolve team_id: use provided/derived value, fall back to user's first team, or None for personal
     if team_id is None:
         first_membership = db.query(TeamMembership).filter(
             TeamMembership.user_id == current_user.id
@@ -110,6 +134,7 @@ def start_conversation(
         conversation = custom_taxonomy_service.create_conversation(
             user_id=current_user.id,
             team_id=team_id,
+            dataset_id=dataset_id,
             db=db,
         )
         return conversation
