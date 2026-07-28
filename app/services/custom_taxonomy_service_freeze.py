@@ -141,9 +141,30 @@ def freeze_label_space(
         ) from e
     db.refresh(custom_taxonomy)
     db.refresh(conversation)
-    
+
+    # Mirror the frozen label space into the associated dataset's quick_labels so
+    # the labels show up in GET /api/datasets/{id}/quick-labels for annotation.
+    # Skipped for teamless/no-dataset conversations.
+    if conversation.dataset_id:
+        from app.services.custom_taxonomy_service import sync_items_to_dataset_quick_labels
+        try:
+            sync_items_to_dataset_quick_labels(
+                conversation.dataset_id,
+                list(conversation.label_space or []),
+                db,
+            )
+            db.refresh(conversation)
+        except Exception:
+            # Quick-label mirroring is best-effort; never fail the freeze because of it.
+            logger.exception(
+                "Failed to sync frozen label space to dataset %s quick_labels (conversation %s)",
+                conversation.dataset_id,
+                conversation_id,
+            )
+            db.rollback()
+
     logger.info(f"Froze label space and created taxonomy {taxonomy_id} from conversation {conversation_id}")
-    
+
     return {
         "conversation": conversation,
         "taxonomy": custom_taxonomy
