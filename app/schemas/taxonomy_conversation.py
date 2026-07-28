@@ -27,7 +27,8 @@ class MessageResponse(BaseModel):
 
 class ConversationCreate(BaseModel):
     """Schema for creating a conversation"""
-    team_id: Optional[int] = Field(None, description="Team ID for the conversation. If not provided, the user's first team is used.")
+    team_id: Optional[int] = Field(None, description="Team ID for the conversation. If not provided, the user's first team is used (or derived from dataset_id).")
+    dataset_id: Optional[int] = Field(None, description="Dataset ID to associate the label space with. Labels added from chat are mirrored into this dataset's quick_labels. When provided, team_id is derived from the dataset's team if not given explicitly.")
 
 
 class LabelSpaceItem(BaseModel):
@@ -44,6 +45,7 @@ class ConversationResponse(BaseModel):
     """Response schema for a conversation (label space building session)"""
     id: int
     team_id: Optional[int] = None
+    dataset_id: Optional[int] = None
     user_id: int
     custom_taxonomy_id: Optional[int] = None
     status: str = Field(..., description="Conversation status: in_progress, completed, cancelled")
