@@ -1570,10 +1570,16 @@ class PAMActiveLearningService:
             keep = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
             X_train = X[keep] if keep else np.empty((0, X.shape[1]), dtype=X.dtype)
             train_sids = [snippet_ids[i] for i in keep]
-            y_train_full = (
-                ann_h.build_multihot_from_annotations(train_sids, species_candidates, annotations_by_snippet)
-                if keep and species_candidates
-                else np.empty((0, len(species_candidates)), dtype=np.float32)
+            # Keep one target row per annotated snippet even when every target
+            # annotation is a reserved no-event label.  In that case the
+            # trainable label space is initially empty and the correct target
+            # matrix has shape (len(train_sids), 0), not (0, 0).  The reference
+            # pool expands the columns below, leaving these rows as explicit
+            # all-zero confirmed negatives.
+            y_train_full = ann_h.build_multihot_from_annotations(
+                train_sids,
+                species_candidates,
+                annotations_by_snippet,
             )
 
             ds = ckpt_h.get_pam_dataset(self.db, dataset_id)

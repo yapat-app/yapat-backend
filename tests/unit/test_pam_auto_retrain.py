@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 from app.models.pam_active_learning import (
@@ -9,6 +10,7 @@ from app.models.pam_active_learning import (
     ALRetrainJob,
 )
 from app.services.pam_al import service as pam_service
+from app.services.pam_al import _annotation_helpers as annotation_helpers
 from app.services.pam_al import _checkpoint_helpers as checkpoint_helpers
 
 
@@ -95,3 +97,50 @@ def test_setup_auto_retrain_resolves_and_persists_parent_label_order(monkeypatch
     assert checkpoint.hyperparameters["run_inference"] is True
     assert parent.hyperparameters["label_order"] == ["gbif:123", "gbif:456"]
     assert job.model_checkpoint_id == checkpoint.id
+
+
+def test_negative_only_target_rows_stay_aligned_when_reference_pool_adds_labels(monkeypatch):
+    target_snippet_ids = list(range(9))
+    target_annotations = {sid: {"No biophony"} for sid in target_snippet_ids}
+    target_species = []
+    target_x = np.zeros((9, 1024), dtype=np.float32)
+    target_y = annotation_helpers.build_multihot_from_annotations(
+        target_snippet_ids,
+        target_species,
+        target_annotations,
+    )
+
+    assert target_y.shape == (9, 0)
+
+    reference_x = np.zeros((6321, 1024), dtype=np.float32)
+    reference_y = np.zeros((6321, 7), dtype=np.float32)
+    reference_species = [
+        "AMEPIC", "BOAFAB", "DENMIN", "DENNAH", "LEPFUS", "RHIICT", "SCIALT",
+    ]
+    monkeypatch.setattr(
+        pam_service.data_h,
+        "load_reference_pool_training_data",
+        lambda *_args, **_kwargs: (
+            reference_x,
+            reference_y,
+            reference_species,
+            {"reference_sample_count": 6321},
+        ),
+    )
+
+    mixed_x, mixed_y, mixed_sids, species, _ = (
+        pam_service.PAMActiveLearningService(object())._mix_in_reference_pool(
+            SimpleNamespace(id=32),
+            1,
+            target_species,
+            target_x,
+            target_y,
+            target_snippet_ids,
+        )
+    )
+
+    assert mixed_x.shape == (6330, 1024)
+    assert mixed_y.shape == (6330, 7)
+    assert len(mixed_sids) == 6330
+    assert species == reference_species
+    assert np.all(mixed_y[:9] == 0)
