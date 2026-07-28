@@ -15,7 +15,7 @@ import sqlalchemy as sa
 
 
 revision = "2026_07_28_dataset_id_taxconv"
-down_revision = ("b2c3d4e5f6a7", "12fb3a4876f6")
+down_revision = "b2c3d4e5f6a7"
 branch_labels = None
 depends_on = None
 
