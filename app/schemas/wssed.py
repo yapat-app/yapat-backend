@@ -2,6 +2,7 @@
 Pydantic schemas for WSSED API
 """
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
@@ -62,6 +63,25 @@ class WSSEDTrainingJobResponse(BaseModel):
     job_id: int
     status: str
     message: str
+
+
+class WSSEDTrainingJobSummary(BaseModel):
+    """One row in the dataset's trained-model list (see GET /training-jobs)."""
+    job_id: int
+    dataset_id: int
+    status: str  # PENDING | TRAINING | COMPLETED | FAILED
+    model_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    total_epochs: Optional[int] = None
+    current_epoch: Optional[int] = None
+    metrics: Optional[Dict[str, Any]] = None
+    al_checkpoint_id: Optional[int] = None
+    al_model_family_name: Optional[str] = None
+    # True when this job's checkpoint is the one Active Learning currently uses
+    # for its model family.
+    is_active: bool = False
+    error: Optional[str] = None
 
 
 class WSSEDTrainingStatusResponse(BaseModel):

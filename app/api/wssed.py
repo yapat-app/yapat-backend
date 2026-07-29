@@ -8,6 +8,7 @@ delegates remote work to Celery and the WSSED GPU service.
 """
 
 import logging
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ from app.schemas.wssed import (
     RetrainBody,
     WSSEDTrainingJobCreate,
     WSSEDTrainingJobResponse,
+    WSSEDTrainingJobSummary,
     WSSEDTrainingStatusResponse,
     WSSEDDatasetArtifactsResponse,
     WSSEDRegisterALResponse,
@@ -118,6 +120,25 @@ def create_training_job(
         status=job.status.value,
         message=f"Training job {job.id} dispatched. Poll GET /training-jobs/{job.id}/status.",
     )
+
+
+@router.get("/training-jobs", response_model=List[WSSEDTrainingJobSummary])
+def list_training_jobs(
+    dataset_id: int = Query(..., description="YAPAT dataset id"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    List every WSSED training job for a dataset, newest first.
+
+    Backs the model picker: the UI shows the COMPLETED jobs as selectable
+    models, flagging which one Active Learning currently uses (``is_active``).
+    """
+    require_wssed_dataset(db, current_user, dataset_id)
+    svc = WSSEDService(db)
+    return [
+        WSSEDTrainingJobSummary(**row) for row in svc.list_training_jobs(dataset_id)
+    ]
 
 
 @router.post(

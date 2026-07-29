@@ -407,6 +407,57 @@ class WSSEDService:
             .first()
         )
 
+    def list_training_jobs(self, dataset_id: int) -> List[Dict[str, Any]]:
+        """
+        Every WSSED training job for a dataset, newest first, annotated with the
+        Active Learning registration state the model picker needs.
+        """
+        jobs = (
+            self.db.query(WSSEDTrainingJob)
+            .filter(WSSEDTrainingJob.dataset_id == dataset_id)
+            .order_by(WSSEDTrainingJob.id.desc())
+            .all()
+        )
+        if not jobs:
+            return []
+
+        # A job is "active" when its registered checkpoint is the one its model
+        # family currently points at -- that is the model Active Learning uses.
+        active_checkpoint_ids = {
+            row.active_model_checkpoint_id
+            for row in self.db.query(ALModelFamilyState)
+            .filter(ALModelFamilyState.dataset_id == dataset_id)
+            .all()
+            if row.active_model_checkpoint_id is not None
+        }
+
+        summaries: List[Dict[str, Any]] = []
+        for job in jobs:
+            metrics = job.training_metrics or {}
+            progress = job.progress or {}
+            checkpoint_id = metrics.get("al_checkpoint_id")
+            if not isinstance(checkpoint_id, int):
+                checkpoint_id = None
+
+            summaries.append({
+                "job_id": job.id,
+                "dataset_id": job.dataset_id,
+                "status": job.status.value,
+                "model_name": job.model_name,
+                "created_at": job.created_at,
+                "completed_at": job.completed_at,
+                "total_epochs": progress.get("total_epochs"),
+                "current_epoch": progress.get("current_epoch"),
+                "metrics": metrics or None,
+                "al_checkpoint_id": checkpoint_id,
+                "al_model_family_name": metrics.get("al_model_family_name"),
+                "is_active": checkpoint_id is not None
+                and checkpoint_id in active_checkpoint_ids,
+                "error": job.error_message,
+            })
+
+        return summaries
+
     def get_latest_training_job(self, dataset_id: int) -> Optional[WSSEDTrainingJob]:
         """Most recent WSSED training job for a dataset (by id)."""
         return (
@@ -478,8 +529,19 @@ class WSSEDService:
     # ------------------------------------------------------------------ #
 
     async def register_training_job_for_al(self, job_id: int) -> Dict[str, Any]:
-        """Sync job status from GPU, copy checkpoint locally, register for PAM-AL."""
-        job = await self.update_training_status(job_id)
+        """Sync job status from GPU (when needed), copy checkpoint locally, register for PAM-AL."""
+        job = self._get_training_job(job_id)
+        if job is None:
+            raise ValueError(f"Training job {job_id} not found")
+
+        # Selecting an already-finished job -- e.g. picking an older model out of
+        # the dataset's model list -- needs no GPU round-trip: the DB already
+        # holds its final status and checkpoint paths. Only probe the remote
+        # server when something is still missing, so activating an old model
+        # keeps working after the GPU server has forgotten that job.
+        if job.status != TrainingStatus.COMPLETED or not self._select_preferred_checkpoint_path(job):
+            job = await self.update_training_status(job_id)
+
         if job.status != TrainingStatus.COMPLETED:
             raise ValueError(
                 f"Training job {job_id} is {job.status.value}; only COMPLETED jobs can be registered"
