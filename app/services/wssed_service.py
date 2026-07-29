@@ -444,6 +444,8 @@ class WSSEDService:
                 "dataset_id": job.dataset_id,
                 "status": job.status.value,
                 "model_name": job.model_name,
+                "model_path": job.model_path,
+                "model_paths": job.model_paths,
                 "created_at": job.created_at,
                 "completed_at": job.completed_at,
                 "total_epochs": progress.get("total_epochs"),

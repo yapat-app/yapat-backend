@@ -71,6 +71,10 @@ class WSSEDTrainingJobSummary(BaseModel):
     dataset_id: int
     status: str  # PENDING | TRAINING | COMPLETED | FAILED
     model_name: Optional[str] = None
+    # Checkpoint paths: a non-empty path means a usable model exists, which is
+    # how the UI decides a job is offerable regardless of its status string.
+    model_path: Optional[str] = None
+    model_paths: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     total_epochs: Optional[int] = None
