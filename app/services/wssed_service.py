@@ -879,7 +879,24 @@ class WSSEDService:
         job: WSSEDTrainingJob,
         source_path: str,
     ) -> Optional[str]:
-        """Copy GPU checkpoint into PAM_CHECKPOINTS_DIR when the source file is reachable."""
+        """
+        Copy the GPU checkpoint into a job-specific path under PAM_CHECKPOINTS_DIR,
+        decoupling it from the GPU server's shared per-dataset output directory
+        (which a later training run for the same dataset will overwrite in place).
+
+        Re-registering a job (e.g. re-activating an older model from the WSSED
+        picker) must keep working even after that overwrite -- so an existing
+        materialized copy is reused whenever the live GPU-side source is no
+        longer reachable, instead of failing.
+        """
+        dest_dir = (
+            Path(settings.PAM_CHECKPOINTS_DIR)
+            / "wssed_active_learning"
+            / str(job.dataset_id)
+            / f"job_{job.id}"
+        )
+        dest_file = dest_dir / "best_micro_model_segment.pt"
+
         source_file: Optional[Path] = None
         for candidate in self._checkpoint_source_candidates(job, source_path):
             if candidate.is_file():
@@ -887,17 +904,9 @@ class WSSEDService:
                 break
 
         if source_file is None:
-            return None
+            return str(dest_file.resolve()) if dest_file.is_file() else None
 
-        dest_dir = (
-            Path(settings.PAM_CHECKPOINTS_DIR)
-            / "wssed_active_learning"
-            / str(job.dataset_id)
-            / f"job_{job.id}"
-        )
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_file = dest_dir / "best_micro_model_segment.pt"
-
         if not dest_file.exists() or dest_file.stat().st_mtime < source_file.stat().st_mtime:
             shutil.copy2(source_file, dest_file)
 
