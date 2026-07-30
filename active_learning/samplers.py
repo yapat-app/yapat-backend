@@ -4,36 +4,9 @@ import torch.nn.functional as F
 import faiss
 
 
-from app.schemas.pam_active_learning import ALSingleSampleScore
-from active_learning.config import DIVERSITY_HNSW_MIN_NL
+from active_learning.config import (HNSW_NEIGHBORS, HNSW_EF_SEARCH, HNSW_MIN_NL, HNSW_MIN_NU,
+                                    DEFAULT_DENSITY_K, DIVERSITY_NUM_CENTERS, DIVERSITY_UPDATE_K)
 
-
-# TODO(delete): dead code -- superseded by the normalization inlined directly
-# in diversity()/density() below. Nothing in the codebase calls these two
-# functions (verified via repo-wide search). Kept commented instead of
-# removed outright so the zscore PR diff stays focused; delete in a
-# follow-up cleanup once confirmed nothing external depends on them.
-# def normalize_diversity(d: torch.Tensor) -> torch.Tensor:
-#     # diversity already in [0, 1], clamp makes sure no outliers.
-#     return torch.clamp(d, 0.0, 1.0)
-#
-# def normalize_density(
-#     r: torch.Tensor,
-#     q_low: float = 0.05,
-#     q_high: float = 0.95,
-# ) -> torch.Tensor:
-#     # density values will have no bounds e.g. 1/0.03 = 33.33
-#     # therefore we use quantile-based normalization to mitigate outliers, and clamp to [0, 1].
-#     if r.numel() == 0:
-#         return r
-#
-#     lo = torch.quantile(r, q_low)
-#     hi = torch.quantile(r, q_high)
-#
-#     if torch.isclose(lo, hi):
-#         return torch.zeros_like(r)
-#
-#     return torch.clamp((r - lo) / (hi - lo), 0.0, 1.0)
 
 
 def _to_np(x: torch.Tensor) -> np.ndarray:
@@ -42,8 +15,8 @@ def _to_np(x: torch.Tensor) -> np.ndarray:
 
 def _make_hnsw_index(
     vectors: np.ndarray,
-    M: int = 32, # How many neighbor connections each node keeps
-    ef_search: int = 64, # How many candidate nodes are explored during search
+    M: int = HNSW_NEIGHBORS, # How many neighbor connections each node keeps
+    ef_search: int = HNSW_EF_SEARCH, # How many candidate nodes are explored during search
 ) -> faiss.IndexHNSWFlat:
     dim = vectors.shape[1]
 
@@ -53,94 +26,58 @@ def _make_hnsw_index(
 
     return index
 
-def uncertainty(P: torch.Tensor) -> torch.Tensor:
+def zscore(x: torch.Tensor) -> torch.Tensor:
     """
-    Multi-label uncertainty normalized to [0, 1].
+    Standardize x to zero mean, unit variance.
 
-    Raw binary entropy has max log(2) at p=0.5.
-    Dividing by log(2) gives:
-        0 = confident
-        1 = maximally uncertain
+    Edge cases:
+    - Empty tensor (numel == 0): returned unchanged.
+    - Near-zero std (all values identical or near-identical): returns
+      zeros rather than NaN/inf.
     """
-    entropy = -(
-        P * torch.log(P + 1e-12)
-        + (1 - P) * torch.log(1 - P + 1e-12)
-    ).mean(dim=1)
+    if x.numel() == 0:
+        return x
+    std = x.std()
+    if std < 1e-8:
+        return torch.zeros_like(x)
+    return (x - x.mean()) / std
 
-    return torch.clamp(entropy / np.log(2), 0.0, 1.0)
+
 
 def _nearest_labeled_distances(
     z_u_np: np.ndarray,
     z_l_np: np.ndarray,
     hnsw_min_nl: int,
+    hnsw_index: faiss.IndexHNSWFlat | None = None,
 ) -> np.ndarray:
     """
     1-NN distance from each row of z_u_np to the nearest row of z_l_np.
 
-    Below hnsw_min_nl labelled points, brute-force (Flat) search: building an
-    HNSW graph has more per-point overhead than a flat scan is worth at small
-    Nl, and O(N * Nl) is cheap when Nl is small regardless.
-
-    At or above hnsw_min_nl, uses an approximate HNSW index instead: exact
-    search here is O(N * Nl) and was measured as the dominant per-cycle AL
-    scoring cost (see paper Section 2.6 / Fig. 5d), dwarfing density's
-    O(N log N) HNSW-based search. HNSW brings this to ~O(N log Nl), same
-    complexity class as density(), at the cost of being approximate (may
-    occasionally return the second-nearest labelled point instead of the
-    true nearest). Since this score only feeds a ranking/composite acquisition
-    score -- not an exact measurement -- that's an acceptable trade, the same
-    one already made for density().
+    hnsw_index: pre-built index to reuse (e.g. from ALQueryScorer's cache).
+    If None, builds one internally using the hnsw_min_nl threshold -- kept
+    for standalone callers.
     """
-    dim = z_l_np.shape[1]
     n_l = z_l_np.shape[0]
 
-    if n_l < hnsw_min_nl:
-        index = faiss.IndexFlatL2(dim)
+    if hnsw_index is not None:
+        index = hnsw_index
+    elif n_l < hnsw_min_nl:
+        index = faiss.IndexFlatL2(z_l_np.shape[1])
         index.add(z_l_np)
     else:
-        # _make_hnsw_index() already adds the vectors internally.
         index = _make_hnsw_index(z_l_np)
 
     distances, _ = index.search(z_u_np, k=1)
     return np.sqrt(np.maximum(distances[:, 0], 0.0))
 
 
-def diversity(
+
+def diversity_approx_error(
     Z_u: torch.Tensor,
     Z_l: torch.Tensor,
-    hnsw_min_nl: int | None = None,
-) -> torch.Tensor:
-    """
-    Diversity / novelty normalized to [0, 1].
-
-    Uses distance to nearest labeled embedding.
-    Since your observed L2-normalized distances are usually <= 1,
-    we clip values to [0, 1].
-
-    hnsw_min_nl: labelled-set size threshold above which the nearest-labelled
-    search switches from exact (Flat) to approximate (HNSW). Defaults to
-    DIVERSITY_HNSW_MIN_NL from active_learning/config.yaml.
-    """
-    if Z_u.numel() == 0:
-        return torch.empty(0, device=Z_u.device)
-
-    if Z_l.numel() == 0:
-        return torch.zeros(Z_u.shape[0], device=Z_u.device)
-
-    device = Z_u.device
-
-    z_u_np = _to_np(Z_u)
-    z_l_np = _to_np(Z_l)
-
-    threshold = hnsw_min_nl if hnsw_min_nl is not None else DIVERSITY_HNSW_MIN_NL
-    distances = _nearest_labeled_distances(z_u_np, z_l_np, threshold)
-
-    scores = torch.tensor(distances, dtype=torch.float32, device=device)
-
-    return torch.clamp(scores, 0.0, 1.0)
-
-
-def diversity_approx_error(Z_u: torch.Tensor, Z_l: torch.Tensor) -> dict:
+    z_u_np: np.ndarray | None = None,
+    z_l_np: np.ndarray | None = None,
+) -> dict:
     """
     Benchmarking/diagnostic helper: quantify how much the HNSW approximation
     in diversity() actually costs in accuracy, by comparing it against exact
@@ -152,6 +89,14 @@ def diversity_approx_error(Z_u: torch.Tensor, Z_l: torch.Tensor) -> dict:
     Fig. 5d / Section 2.6 with the HNSW path, to report an actual error rate
     alongside the timing improvement rather than assuming the approximation
     is harmless.
+
+    z_u_np/z_l_np: pre-converted arrays to skip re-running _to_np, e.g.
+    scorer.z_u_np / scorer.z_l_np from an existing ALQueryScorer instance
+    for the same Z_u/Z_l. Recomputed from Z_u/Z_l if not supplied. Note
+    this function always builds its own exact and approximate indices
+    regardless -- it deliberately bypasses any cached hnsw_l_index, since
+    the whole point is comparing both paths on the same data, not reusing
+    whichever one the class happened to pick via its threshold.
 
     Returns
     -------
@@ -167,8 +112,8 @@ def diversity_approx_error(Z_u: torch.Tensor, Z_l: torch.Tensor) -> dict:
     if Z_u.numel() == 0 or Z_l.numel() == 0:
         return {"recall_at_1": None, "mean_abs_distance_error": None, "max_abs_distance_error": None, "n": 0}
 
-    z_u_np = _to_np(Z_u)
-    z_l_np = _to_np(Z_l)
+    z_u_np = z_u_np if z_u_np is not None else _to_np(Z_u)
+    z_l_np = z_l_np if z_l_np is not None else _to_np(Z_l)
     dim = z_l_np.shape[1]
 
     exact_index = faiss.IndexFlatL2(dim)
@@ -191,81 +136,9 @@ def diversity_approx_error(Z_u: torch.Tensor, Z_l: torch.Tensor) -> dict:
     }
 
 
-def density(
-    Z_u: torch.Tensor,
-    k: int = 15,
-    q_low: float = 0.05,
-    q_high: float = 0.95,
-) -> torch.Tensor:
-    """
-    Density / representativeness normalized to [0, 1].
-
-    Raw density:
-        rho(i) = 1 / avg distance to k nearest unlabeled neighbors
-
-    Then percentile-normalized:
-        0 = sparse / outlier-like
-        1 = dense / representative
-
-    Uses HNSW approximate nearest-neighbor index (O(n log n)) rather than the
-    brute-force flat index (O(n²)) so that large datasets (100k+ snippets) don't
-    stall the retrain worker for 30–90 seconds.
-    """
-    if Z_u.numel() == 0:
-        return torch.empty(0, device=Z_u.device)
-
-    N_u = Z_u.shape[0]
-    if N_u <= 1:
-        return torch.zeros(N_u, device=Z_u.device)
-
-    device = Z_u.device
-
-    z_u_np = _to_np(Z_u)
-
-    # HNSW is ~30–100x faster than IndexFlatL2 for large n at negligible accuracy cost.
-    index = _make_hnsw_index(z_u_np)
-
-    k_eff = min(k + 1, N_u)
-    distances, _ = index.search(z_u_np, k=k_eff)
-
-    # HNSW distances are squared L2; exclude the self-match (index 0, distance ≈ 0).
-    distances = distances[:, 1:]
-    distances = np.sqrt(np.maximum(distances, 0.0))
-
-    avg = distances.mean(axis=1)
-    raw_scores = 1.0 / (avg + 1e-8)
-
-    scores = torch.tensor(raw_scores, dtype=torch.float32, device=device)
-
-    lo = torch.quantile(scores, q_low)
-    hi = torch.quantile(scores, q_high)
-
-    if torch.isclose(lo, hi):
-        return torch.zeros_like(scores)
-
-    scores = (scores - lo) / (hi - lo)
-    return torch.clamp(scores, 0.0, 1.0)
-
 
 def random(n: int, device: str = "cpu") -> torch.Tensor:
     return torch.rand(n, device=device)
-
-
-def zscore(x: torch.Tensor) -> torch.Tensor:
-    """
-    Standardize x to zero mean, unit variance.
-
-    Edge cases:
-    - Empty tensor (numel == 0): returned unchanged.
-    - Near-zero std (all values identical or near-identical): returns
-      zeros rather than NaN/inf.
-    """
-    if x.numel() == 0:
-        return x
-    std = x.std()
-    if std < 1e-8:
-        return torch.zeros_like(x)
-    return (x - x.mean()) / std
 
 
 def composite(
@@ -297,4 +170,192 @@ def composite(
         + wd * diversity_scores
         + wr * density_scores
     )
+
+def _greedy_farthest_point_select(
+    z_u_np: np.ndarray,
+    nearest_ref_dist: np.ndarray,
+    k: int,
+    hnsw_index: faiss.IndexHNSWFlat | None,
+    update_k: int,
+) -> np.ndarray:
+
+    n_u = z_u_np.shape[0]
+    k = min(k, n_u)
+
+    min_dist = nearest_ref_dist.copy()
+    picked = np.zeros(n_u, dtype=bool)
+
+    for _ in range(k):
+        masked = np.where(picked, -np.inf, min_dist)
+        center = int(np.argmax(masked)) # will give highest value index
+        if masked[center] == -np.inf: #if every point has been picked
+            break
+        picked[center] = True # mark True for the picked point
+
+        if hnsw_index is not None:
+            k_eff = min(update_k, n_u)
+            _, neighbor_ids = hnsw_index.search(z_u_np[center : center + 1], k=k_eff)
+            candidates = neighbor_ids[0]
+            candidates = candidates[candidates >= 0]  # faiss pads with -1 if k_eff > n_u
+        else:
+            candidates = np.arange(n_u)
+
+        d = np.linalg.norm(z_u_np[candidates] - z_u_np[center], axis=1)
+        min_dist[candidates] = np.minimum(min_dist[candidates], d)
+
+    return min_dist
+
+class ALQueryScorer:
+    """
+            Computes uncertainty/diversity/density acquisition scores for one AL
+            scoring cycle, caching the embedding conversions (L2 normalizations) and the HNSW index
+            shared across diversity() and density() so a single cycle doesn't
+            rebuild them twice.
+            """
+
+    def __init__(
+            self,
+            Z_u: torch.Tensor,
+            Z_l: torch.Tensor,
+            hnsw_min_nl: int | None = None,
+            hnsw_min_nu: int | None = None,
+
+    ):
+        self.Z_u = Z_u
+        self.Z_l = Z_l
+        self.device = Z_u.device
+        self.n_u = Z_u.shape[0]
+        self.n_l = Z_l.shape[0] if Z_l.numel() else 0
+
+        self.hnsw_min_nl = hnsw_min_nl if hnsw_min_nl is not None else HNSW_MIN_NL
+        self.hnsw_min_nu = hnsw_min_nu if hnsw_min_nu is not None else HNSW_MIN_NU
+
+        self._z_u_np: np.ndarray | None = None
+        self._z_l_np: np.ndarray | None = None
+        self._hnsw_l_index: faiss.IndexHNSWFlat | None = None
+        self._hnsw_l_index_built = False
+        self._hnsw_u_index: faiss.IndexHNSWFlat | None = None
+        self._hnsw_u_index_built = False
+        self._nearest_ref_dist: np.ndarray | None = None
+
+        self._diversity_raw: torch.Tensor | None = None
+        self._density_raw: torch.Tensor | None = None
+
+    @property
+    def z_u_np(self) -> np.ndarray:
+        if self._z_u_np is None:
+            self._z_u_np = _to_np(self.Z_u)
+        return self._z_u_np
+
+    @property
+    def z_l_np(self) -> np.ndarray | None:
+        if self.n_l == 0:
+            return None
+        if self._z_l_np is None:
+            self._z_l_np = _to_np(self.Z_l)
+        return self._z_l_np
+
+    @property
+    def hnsw_l_index(self) -> faiss.IndexHNSWFlat | None:
+        """
+        Cached HNSW index over Z_l (labeled points), used by
+        nearest_ref_dist's underlying search. None if n_l < hnsw_min_nl --
+        caller falls back to exact Flat search in that case, same threshold
+        logic as hnsw_u_index.
+        """
+        if self.n_l < self.hnsw_min_nl:
+            return None
+        if not self._hnsw_l_index_built:
+            self._hnsw_l_index = _make_hnsw_index(self.z_l_np)
+            self._hnsw_l_index_built = True
+        return self._hnsw_l_index
+
+    @property
+    def hnsw_u_index(self) -> faiss.IndexHNSWFlat | None:
+        """Shared by density() and diversity()'s k-center update step."""
+        if self.n_u < self.hnsw_min_nu:
+            return None
+        if not self._hnsw_u_index_built:
+            self._hnsw_u_index = _make_hnsw_index(self.z_u_np)
+            self._hnsw_u_index_built = True
+        return self._hnsw_u_index
+
+    @property
+    def nearest_ref_dist(self) -> np.ndarray:
+        """almost identical to nearest_labeled_distances() but caches the result for repeated calls in a single AL cycle."""
+        if self._nearest_ref_dist is None:
+            if self.n_l == 0:
+                self._nearest_ref_dist = np.full(self.n_u, 1.0, dtype="float32")
+            else:
+                index = self.hnsw_l_index
+                if index is None:
+                    index = faiss.IndexFlatL2(self.z_l_np.shape[1])
+                    index.add(self.z_l_np)
+                distances, _ = index.search(self.z_u_np, k=1)
+                self._nearest_ref_dist = np.sqrt(np.maximum(distances[:, 0], 0.0))
+        return self._nearest_ref_dist
+
+    def diversity(self, zscored: bool = True, k: int | None = None, update_k: int | None = None) -> torch.Tensor:
+        if self.n_u == 0:
+            return torch.empty(0, device=self.device)
+
+        if self._diversity_raw is None:
+            k_val = k if k is not None else DIVERSITY_NUM_CENTERS
+            uk = update_k if update_k is not None else DIVERSITY_UPDATE_K
+
+            # nearest_ref_dist is a starting score before any redundancy correction.
+            corrected = _greedy_farthest_point_select(
+                self.z_u_np, self.nearest_ref_dist, k_val, self.hnsw_u_index, uk
+            )
+            self._diversity_raw = torch.tensor(corrected, dtype=torch.float32, device=self.device)
+
+        return zscore(self._diversity_raw) if zscored else self._diversity_raw
+
+    def density(self, k: int | None = None, zscored: bool = True) -> torch.Tensor:
+
+        if self.n_u == 0:
+            return torch.empty(0, device=self.device)
+        if self.n_u <= 1:
+            return torch.zeros(self.n_u, device=self.device)
+
+        if self._density_raw is None:
+            k_val = k if k is not None else DEFAULT_DENSITY_K
+
+            if self.hnsw_u_index is not None:
+                index = self.hnsw_u_index
+            else:
+                index = faiss.IndexFlatL2(self.z_u_np.shape[1])
+                index.add(self.z_u_np)
+
+            k_eff = min(k_val + 1, self.n_u)
+            distances, _ = index.search(self.z_u_np, k=k_eff)
+
+            # exclude self-match (index 0, distance ≈ 0)
+            distances = distances[:, 1:]
+            distances = np.sqrt(np.maximum(distances, 0.0))
+
+            avg = distances.mean(axis=1)
+            raw_scores = 1.0 / (avg + 1e-8)
+
+            self._density_raw = torch.tensor(raw_scores, dtype=torch.float32, device=self.device)
+
+        return zscore(self._density_raw) if zscored else self._density_raw
+
+    def uncertainty(self, P: torch.Tensor, zscored: bool = True) -> torch.Tensor:
+
+        if P.numel() == 0:
+            return torch.empty(0, device=P.device)
+
+        entropy = -(
+                P * torch.log(P + 1e-12)
+                + (1 - P) * torch.log(1 - P + 1e-12)
+        ).mean(dim=1) # [0, log(2)] ≈ [0, 0.693]
+
+        return zscore(entropy) if zscored else entropy
+
+
+
+
+
+
 
