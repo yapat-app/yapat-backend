@@ -35,7 +35,7 @@ DIVERSITY_NUM_CENTERS : 100
 DIVERSITY_UPDATE_K : 200
 
 
-RETRAIN_AFTER : 100
+RETRAIN_AFTER : 10
 
 # Reserved sentinel labels for confirmed-negative snippets -- match the
 # frontend quick-label modal's slug convention (display text -> taxon_id

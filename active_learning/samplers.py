@@ -300,18 +300,23 @@ class ALQueryScorer:
             return torch.empty(0, device=self.device)
 
         if self._diversity_raw is None:
-            k_val = k if k is not None else DIVERSITY_NUM_CENTERS
-            uk = update_k if update_k is not None else DIVERSITY_UPDATE_K
+            if self.n_l == 0:
+                # No labeled data yet -- nothing to be "diverse from," so every
+                # unlabeled point is equally uninformative on this axis. Skip
+                self._diversity_raw = torch.full((self.n_u,), 1.0, device=self.device)
+            else:
+                k_val = k if k is not None else DIVERSITY_NUM_CENTERS
+                uk = update_k if update_k is not None else DIVERSITY_UPDATE_K
 
-            # nearest_ref_dist is a starting score before any redundancy correction.
-            corrected = _greedy_farthest_point_select(
-                self.z_u_np, self.nearest_ref_dist, k_val, self.hnsw_u_index, uk
-            )
-            self._diversity_raw = torch.tensor(corrected, dtype=torch.float32, device=self.device)
+                # nearest_ref_dist is a starting score before any redundancy correction.
+                corrected = _greedy_farthest_point_select(
+                    self.z_u_np, self.nearest_ref_dist, k_val, self.hnsw_u_index, uk
+                )
+                self._diversity_raw = torch.tensor(corrected, dtype=torch.float32, device=self.device)
 
         return zscore(self._diversity_raw) if zscored else self._diversity_raw
 
-    def density(self, k: int | None = None, zscored: bool = True) -> torch.Tensor:
+    def density(self, k: int | None = None, zscored: bool = True, q_low: float = 0.05, q_high: float = 0.95) -> torch.Tensor:
 
         if self.n_u == 0:
             return torch.empty(0, device=self.device)
@@ -339,7 +344,19 @@ class ALQueryScorer:
 
             self._density_raw = torch.tensor(raw_scores, dtype=torch.float32, device=self.device)
 
-        return zscore(self._density_raw) if zscored else self._density_raw
+        if not zscored:
+            return self._density_raw
+
+        # raw_scores = 1/avg_dist is right-skewed by construction -- a few
+        # near-duplicate points can produce extreme outlier values that
+        # dominate the mean/std z-scoring is based on. Clip to the
+        # [q_low, q_high] percentile range before z-scoring so those outliers
+        # don't compress everyone else's score toward the mean.
+        #lo = torch.quantile(self._density_raw, q_low)
+        #hi = torch.quantile(self._density_raw, q_high)
+        #clipped = torch.clamp(self._density_raw, lo, hi)
+        #return zscore(clipped)
+        return zscore(self._density_raw)
 
     def uncertainty(self, P: torch.Tensor, zscored: bool = True) -> torch.Tensor:
 

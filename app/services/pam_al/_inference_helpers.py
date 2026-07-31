@@ -19,7 +19,7 @@ from app.models.snippet import Snippet
 from app.models.pam_active_learning import ALPrediction, ALSnippetAnnotation
 from app.schemas.pam_active_learning import ALInferenceRow
 
-from active_learning.samplers import uncertainty, density, diversity, composite, ALQueryScorer
+from active_learning.samplers import composite, ALQueryScorer
 from active_learning.config import (
     DEFAULT_INFERENCE_THRESHOLD,
     DEFAULT_DENSITY_K,
@@ -109,11 +109,23 @@ def build_inference_rows(
         if unlabeled_indices
         else torch.empty(0, device=embeddings.device)
     )
+    logger.info(
+        "pam-al inference: uncertainty min value = %.4f max value = %.4f",
+        uncertainty_scores_u.min().item(), uncertainty_scores_u.max().item(),
+    )
 
     start = time.perf_counter()
     diversity_scores_u = scorer.diversity()
+    logger.info(
+        "pam-al inference: diversity min value = %.4f max value = %.4f",
+        diversity_scores_u.min().item(), diversity_scores_u.max().item(),
+    )
     mid = time.perf_counter()
     density_scores_u = scorer.density()
+    logger.info(
+        "pam-al inference: density min value = %.4f max value = %.4f",
+        density_scores_u.min().item(), density_scores_u.max().item(),
+    )
     end = time.perf_counter()
     logger.info(
         "pam-al inference: acquisition scoring diversity=%.4fs density=%.4fs total=%.4fs",
@@ -128,6 +140,10 @@ def build_inference_rows(
         wu=wu,
         wd=wd,
         wr=wr,
+    )
+    logger.info(
+        "pam-al inference: composite min value = %.4f max value = %.4f",
+        composite_scores_u.min().item(), diversity_scores_u.max().item(),
     )
 
     uncertainty_full = [None] * len(snippet_ids)
