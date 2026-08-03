@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     # 16GB worker at ~20k points, so it stays conservative.
     FPV_TSNE_MAX_POINTS: int = 50_000
     FPV_ISOMAP_MAX_POINTS: int = 15_000
+    # Overall ceiling: datasets with more embeddings than this skip FPV generation
+    # entirely (the callers 413 / skip auto-FPV) rather than queuing a job that
+    # would OOM the worker. Defaults to the largest per-method cap.
+    FPV_MAX_POINTS: int = 100_000
 
     # PAM Active Learning
     PAM_AUTO_RETRAIN_THRESHOLD: int = 5  # Auto-retrain after N feedback events
