@@ -1,6 +1,7 @@
 import logging
 
 import numpy as np
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -31,6 +32,17 @@ from utils.dr_methods import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def count_fpv_points(db: Session, dataset_id: int, embedding_model_id: int) -> int:
+    return (
+        db.query(func.count(EmbeddingVector.snippet_id))
+        .join(Snippet, Snippet.id == EmbeddingVector.snippet_id)
+        .join(SnippetSet, SnippetSet.id == Snippet.snippet_set_id)
+        .filter(SnippetSet.dataset_id == dataset_id)
+        .filter(EmbeddingVector.embedding_model_id == embedding_model_id)
+        .scalar()
+    ) or 0
 
 
 def _fpv_method_availability(n: int) -> dict[str, FPVMethodAvailability] | None:
