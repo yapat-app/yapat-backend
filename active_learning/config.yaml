@@ -7,26 +7,35 @@ DEFAULT_DROPOUT : 0.5
 
 # Default values for active learning inference
 DEFAULT_INFERENCE_THRESHOLD : 0.3
-DEFAULT_DENSITY_K : 15
+DEFAULT_DENSITY_K : 30
 DEFAULT_COMPOSITE_WU : 0.5
 DEFAULT_COMPOSITE_WD : 0.25
 DEFAULT_COMPOSITE_WR : 0.25
 
-# diversity() switches from exact brute-force (Flat) search to approximate
-# HNSW search once the labelled set (Nl) exceeds this size. Below it, HNSW's
-# graph-build overhead isn't worth it -- Flat is already fast at small Nl.
-# Placeholder pending a benchmark rerun (see paper Fig. 5d / Section 2.6);
-# not yet tuned against measured error rate or timing.
-DIVERSITY_HNSW_MIN_NL : 500
+
+# HNSW GRAPH CONFIG
+HNSW_NEIGHBORS : 64
+HNSW_EF_SEARCH : 128
 
 # diversity() switches from exact brute-force (Flat) search to approximate
 # HNSW search once the labelled set (Nl) exceeds this size. Below it, HNSW's
 # graph-build overhead isn't worth it -- Flat is already fast at small Nl.
 # Placeholder pending a benchmark rerun (see paper Fig. 5d / Section 2.6);
 # not yet tuned against measured error rate or timing.
-DIVERSITY_HNSW_MIN_NL : 500
+HNSW_MIN_NL : 500
+HNSW_MIN_NU: 500
 
-RETRAIN_AFTER : 100
+# Number of greedy farthest-point picks (batch centers) diversity() selects,
+# and how many nearest neighbors get their distance score corrected after
+# each pick when using the HNSW-accelerated path (n_u >= DIVERSITY_HNSW_MIN_NU).
+# NUM_CENTERS is an internal tuning constant, not a labeling budget. Points
+# just outside the UPDATE_K neighbor list keep a stale score for that pick --
+
+DIVERSITY_NUM_CENTERS : 100
+DIVERSITY_UPDATE_K : 200
+
+
+RETRAIN_AFTER : 10
 
 # Reserved sentinel labels for confirmed-negative snippets -- match the
 # frontend quick-label modal's slug convention (display text -> taxon_id
