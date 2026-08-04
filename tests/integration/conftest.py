@@ -8,6 +8,7 @@ import soundfile as sf
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.main import app
@@ -78,6 +79,11 @@ def engine():
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
+        # StaticPool, not the SQLite default of one connection per thread: an
+        # in-memory database lives *inside* its connection, so a second thread
+        # would silently get a second, empty database. TestClient serves
+        # requests on its own thread, which is exactly that case.
+        poolclass=StaticPool,
     )
 
     @event.listens_for(engine, "connect")

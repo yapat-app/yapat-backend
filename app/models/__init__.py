@@ -43,6 +43,7 @@ from app.models.pam_active_learning import (
 )
 from app.models.study_event import StudyEvent
 from app.models.reference_link import DatasetReferenceLink
+from app.models.quick_label_entry import QuickLabelEntry
 
 __all__ = [
     "User",
@@ -82,4 +83,6 @@ __all__ = [
     "StudyEvent",
     # Reference data pool
     "DatasetReferenceLink",
+    # Runtime-added quick labels (GBIF picks today, OE label spaces later)
+    "QuickLabelEntry",
 ]

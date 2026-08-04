@@ -14,9 +14,15 @@ from app.database import Base
 
 @pytest.fixture(autouse=True)
 def reset_db(engine):
-    # Drop everything
-    Base.metadata.drop_all(bind=engine)
-    # Recreate fresh tables
+    # datasets <-> snippet_sets is a foreign-key cycle, so SQLAlchemy cannot
+    # topologically sort the DROPs and emits them in an order that trips the
+    # FK enforcement the engine fixture switches on. Disable enforcement for
+    # the teardown only -- leaving it on would fail every test at setup.
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        Base.metadata.drop_all(bind=conn)
+        conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+        conn.commit()
     Base.metadata.create_all(bind=engine)
     yield
 

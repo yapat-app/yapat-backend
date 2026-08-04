@@ -10,9 +10,11 @@ import csv
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import get_db, get_current_active_user, get_current_admin_user
 from app.models.user import User, UserRole
+from app.models.quick_label_entry import QuickLabelEntry, SOURCE_PRIORITY
 from app.models.annotation import Annotation as AnnotationModel
 from app.models.snippet import Snippet
 from app.models.recording import Recording
@@ -30,6 +32,10 @@ from app.schemas.dataset import (
     AudioFile
 )
 from app.schemas.annotation import AnnotationExport
+from app.schemas.quick_label import (
+    QuickLabelEntryBatchCreate,
+    QuickLabelEntryResponse,
+)
 from app.services.dataset_service import DatasetService
 from app.utils.dataset_response import dataset_to_dict
 from app.tasks.processing_tasks import process_dataset
@@ -534,3 +540,157 @@ def put_quick_labels(
     dataset.quick_labels = cleaned
     db.commit()
     return cleaned
+
+
+# ── Runtime quick labels (personal + dataset-wide) ──────────────────────────
+#
+# Separate from the curated `datasets.quick_labels` column above: these are
+# labels that entered the palette while annotating — today a participant
+# picking a species from the GBIF search box. Rows with user_id NULL are
+# dataset-wide and reserved for the Ontology Engineering service.
+
+
+def _require_dataset(db: Session, dataset_id: int) -> "DatasetModel":
+    from app.models.dataset import Dataset as DatasetModel
+
+    dataset = db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return dataset
+
+
+def _visible_quick_label_entries(
+    db: Session, dataset_id: int, user_id: int
+) -> List[QuickLabelEntryResponse]:
+    """The caller's own entries plus every dataset-wide entry, ordered so that
+    hand-picked labels stay ahead of a bulk OE import, newest first within each
+    group."""
+    from sqlalchemy import or_
+
+    rows = (
+        db.query(QuickLabelEntry)
+        .filter(
+            QuickLabelEntry.dataset_id == dataset_id,
+            or_(
+                QuickLabelEntry.user_id == user_id,
+                QuickLabelEntry.user_id.is_(None),
+            ),
+        )
+        .all()
+    )
+
+    def sort_key(row: QuickLabelEntry):
+        # created_at is NULL only for rows written by a backend that predates
+        # the server_default; treat those as oldest.
+        created = row.created_at.timestamp() if row.created_at else 0.0
+        return (SOURCE_PRIORITY.get(row.source, 1), -created, -row.id)
+
+    rows.sort(key=sort_key)
+    return [
+        QuickLabelEntryResponse(
+            id=row.id,
+            taxon_id=row.taxon_id,
+            display_name=row.display_name,
+            rank=row.rank,
+            source=row.source,
+            created_at=row.created_at,
+            owned=row.user_id == user_id,
+        )
+        for row in rows
+    ]
+
+
+@router.get(
+    "/{dataset_id}/quick-labels/mine",
+    response_model=List[QuickLabelEntryResponse],
+)
+def get_my_quick_labels(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Quick labels added at annotation time and visible to this user."""
+    _require_dataset(db, dataset_id)
+    return _visible_quick_label_entries(db, dataset_id, current_user.id)
+
+
+@router.post(
+    "/{dataset_id}/quick-labels/mine",
+    response_model=List[QuickLabelEntryResponse],
+)
+def add_my_quick_labels(
+    dataset_id: int,
+    body: QuickLabelEntryBatchCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Add labels to the caller's personal palette and return the full visible list.
+
+    Idempotent: a taxon_id already present is left exactly as it was, so the
+    original source and created_at survive a re-pick. Accepts a list because an
+    Ontology Engineering label space arrives all at once; a GBIF pick just
+    sends one item.
+    """
+    _require_dataset(db, dataset_id)
+
+    existing = {
+        taxon_id
+        for (taxon_id,) in db.query(QuickLabelEntry.taxon_id).filter(
+            QuickLabelEntry.dataset_id == dataset_id,
+            QuickLabelEntry.user_id == current_user.id,
+        )
+    }
+
+    seen_in_request = set()
+    for item in body.labels:
+        if item.taxon_id in existing or item.taxon_id in seen_in_request:
+            continue
+        seen_in_request.add(item.taxon_id)
+        # One savepoint per row so a concurrent insert of the same taxon_id
+        # loses only that row rather than the whole batch.
+        try:
+            with db.begin_nested():
+                db.add(
+                    QuickLabelEntry(
+                        dataset_id=dataset_id,
+                        user_id=current_user.id,
+                        taxon_id=item.taxon_id,
+                        display_name=item.display_name,
+                        rank=item.rank,
+                        source=item.source,
+                    )
+                )
+        except IntegrityError:
+            pass  # another request already inserted it; that row wins
+
+    db.commit()
+    return _visible_quick_label_entries(db, dataset_id, current_user.id)
+
+
+@router.delete("/{dataset_id}/quick-labels/mine", status_code=status.HTTP_204_NO_CONTENT)
+def delete_my_quick_label(
+    dataset_id: int,
+    taxon_id: str = Query(..., description="Namespaced taxon ID, e.g. gbif:2480932"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Remove one of the caller's own entries.
+
+    Dataset-wide entries are not deletable here — hiding those per user would
+    need a separate suppression table, which nothing currently needs.
+    """
+    _require_dataset(db, dataset_id)
+
+    deleted = (
+        db.query(QuickLabelEntry)
+        .filter(
+            QuickLabelEntry.dataset_id == dataset_id,
+            QuickLabelEntry.user_id == current_user.id,
+            QuickLabelEntry.taxon_id == taxon_id,
+        )
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Quick label not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
