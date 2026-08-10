@@ -60,9 +60,10 @@ def freeze_label_space(
     if conversation.status != ConversationStatus.IN_PROGRESS:
         raise CustomTaxonomyServiceError("Conversation is not in progress")
 
-    if conversation.team_id is None:
+    if conversation.team_id is None and conversation.dataset_id is None:
         raise CustomTaxonomyServiceError(
-            "This conversation has no team. Start the conversation with a team_id (or join a team) before freezing."
+            "This conversation has neither a team nor a dataset. Start it with a "
+            "team_id or dataset_id before freezing."
         )
     
     # Check if label_space has items
@@ -104,12 +105,14 @@ def freeze_label_space(
     custom_taxonomy = CustomTaxonomy(
         taxonomy_id=taxonomy_id,
         team_id=conversation.team_id,
+        dataset_id=conversation.dataset_id,
         created_by_user_id=user_id,
         name=name,
         description=description,
         taxonomy_data=taxonomy_data,
         status=TaxonomyStatus.ACTIVE,
-        is_global=False
+        is_global=False,
+        is_label_space_version=True
     )
     
     db.add(custom_taxonomy)
