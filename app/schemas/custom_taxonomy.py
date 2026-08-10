@@ -53,7 +53,8 @@ class CustomTaxonomyResponse(CustomTaxonomyBase):
     """Response schema for custom taxonomy"""
     id: int
     taxonomy_id: str = Field(..., description="Unique taxonomy identifier (e.g., 'custom:uuid')")
-    team_id: int
+    team_id: Optional[int] = Field(None, description="Team the label space belongs to (null for admin dataset-only label spaces)")
+    dataset_id: Optional[int] = Field(None, description="Dataset the label space is scoped to (null for team-only label spaces)")
     created_by_user_id: int
     taxonomy_data: Dict[str, Any]
     status: str
@@ -69,6 +70,11 @@ class CustomTaxonomyListResponse(BaseModel):
     """List response for custom taxonomies"""
     taxonomies: List[CustomTaxonomyResponse]
     total: int
+
+
+class PromoteLabelSpaceRequest(BaseModel):
+    """Request to promote a submitted label-space version to the team's active version"""
+    taxonomy_db_id: int = Field(..., description="Primary key (id) of the CustomTaxonomy version to make active")
 
 
 class TaxonResolution(BaseModel):

@@ -23,6 +23,14 @@ class Team(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False, index=True)
     description = Column(String, nullable=True)
+    # The single label-space version the team owner has promoted as active. All team
+    # members read this version; it is chosen from the team's submitted CustomTaxonomy
+    # versions. Nullable: a team may have no active version yet.
+    active_custom_taxonomy_id = Column(
+        Integer,
+        ForeignKey("custom_taxonomies.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -30,6 +38,13 @@ class Team(Base):
     memberships = relationship("TeamMembership", back_populates="team", cascade="all, delete-orphan")
     datasets = relationship("Dataset", back_populates="team")
     invitations = relationship("TeamInvitation", back_populates="team", cascade="all, delete-orphan")
+    # post_update avoids an insert-order cycle: teams -> custom_taxonomies -> teams.
+    # foreign_keys is explicit because custom_taxonomies also FKs back to teams (team_id).
+    active_custom_taxonomy = relationship(
+        "CustomTaxonomy",
+        foreign_keys=[active_custom_taxonomy_id],
+        post_update=True,
+    )
 
 
 class TeamMembership(Base):

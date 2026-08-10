@@ -28,6 +28,8 @@ from app.schemas.taxonomy_conversation import (
     AddToLabelSpaceResponse,
     FreezeLabelSpaceRequest,
     FreezeLabelSpaceResponse,
+    SubmitLabelSpaceRequest,
+    SubmitLabelSpaceResponse,
     MessageResponse,
     ConversationListResponse,
     LabelSpaceResponse,
@@ -89,6 +91,10 @@ def start_conversation(
     (labels added from chat are mirrored into the dataset's quick_labels), and
     team_id is derived from the dataset's team when not given explicitly.
     """
+    # Admins create dataset-only label spaces: no team is derived or defaulted, so
+    # the label space stays scoped to the dataset alone.
+    is_admin = check_admin(current_user)
+
     # Resolve dataset_id: verify access and use it to derive team_id when needed
     dataset_id = request.dataset_id
     team_id = request.team_id
@@ -107,11 +113,13 @@ def start_conversation(
                 detail="You don't have access to this dataset"
             )
         # Derive team from the dataset when the caller didn't specify one
-        if team_id is None:
+        # (skipped for admins, whose label spaces are dataset-only).
+        if team_id is None and not is_admin:
             team_id = dataset.team_id
 
     # Resolve team_id: use provided/derived value, fall back to user's first team, or None for personal
-    if team_id is None:
+    # (the first-team fallback is skipped for admins so their label space stays teamless).
+    if team_id is None and not is_admin:
         first_membership = db.query(TeamMembership).filter(
             TeamMembership.user_id == current_user.id
         ).first()
@@ -137,6 +145,18 @@ def start_conversation(
             dataset_id=dataset_id,
             db=db,
         )
+        # Optionally seed the new label space from the team's active version so the
+        # user edits a copy of it (add/remove labels) rather than starting empty.
+        if request.seed_from_active and team_id is not None:
+            team = db.query(Team).filter(Team.id == team_id).first()
+            if team and team.active_custom_taxonomy_id:
+                active = team.active_custom_taxonomy
+                nodes = (active.taxonomy_data or {}).get("nodes") if active else None
+                if nodes:
+                    conversation.label_space = list(nodes)
+                    flag_modified(conversation, "label_space")
+                    db.commit()
+                    db.refresh(conversation)
         return conversation
     except Exception as e:
         raise HTTPException(
@@ -335,11 +355,11 @@ def freeze_label_space(
     require_conversation_access(current_user, conversation, db)
 
     try:
-        # Ensure we never hit a DB IntegrityError on NOT NULL team_id
-        if conversation.team_id is None:
+        # A label space must be scoped to a team or a dataset (admin dataset-only).
+        if conversation.team_id is None and conversation.dataset_id is None:
             raise CustomTaxonomyServiceError(
-                "This conversation has no team_id, so a team-scoped taxonomy cannot be created. "
-                "Start the conversation with a team_id (or ensure the user is a member of a team) and try again."
+                "This conversation has neither a team nor a dataset, so a label-space "
+                "taxonomy cannot be created. Start it with a team_id or dataset_id and try again."
             )
 
         from app.services.custom_taxonomy_service_freeze import freeze_label_space as freeze_func
@@ -368,6 +388,62 @@ def freeze_label_space(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to create taxonomy due to invalid/missing team_id for this conversation."
+        )
+
+
+@router.post("/chat/{conversation_id}/submit", response_model=SubmitLabelSpaceResponse)
+def submit_label_space(
+    conversation_id: int,
+    request: SubmitLabelSpaceRequest = SubmitLabelSpaceRequest(),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Finalize the label space as a submitted version for team-owner review.
+
+    Creates a CustomTaxonomy version (status=submitted), auto-named "Version N"
+    per team and attributed to the current user. The version is not usable for
+    annotation until the team owner promotes it via
+    PUT /teams/{team_id}/active-label-space.
+    """
+    conversation = custom_taxonomy_service.get_conversation_by_id(conversation_id, db)
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Conversation {conversation_id} not found"
+        )
+
+    require_conversation_access(current_user, conversation, db)
+
+    if conversation.team_id is None and conversation.dataset_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This conversation has neither a team nor a dataset, so a label-space version cannot be created."
+        )
+
+    try:
+        from app.services.label_space_versions import submit_label_space as submit_func
+
+        result = submit_func(
+            conversation_id=conversation_id,
+            user_id=current_user.id,
+            db=db,
+            description=request.description,
+        )
+        return SubmitLabelSpaceResponse(
+            conversation=result["conversation"],
+            taxonomy=CustomTaxonomyResponse.model_validate(result["taxonomy"]),
+        )
+    except CustomTaxonomyServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create label-space version due to invalid/missing team_id."
         )
 
 
