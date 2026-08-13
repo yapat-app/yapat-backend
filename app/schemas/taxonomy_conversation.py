@@ -40,6 +40,8 @@ class LabelSpaceItem(BaseModel):
     taxon_id: Optional[str] = Field(None, description="GBIF taxon ID if available (e.g., 'gbif:2482715')")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata (family, rank, etc.)")
     added_at: datetime = Field(..., description="When this item was added to the list")
+    added_by_user_id: Optional[int] = Field(None, description="ID of the user who added this label")
+    added_by_username: Optional[str] = Field(None, description="Username snapshot of who added this label (may be null for legacy items)")
 
 
 class ConversationResponse(BaseModel):
