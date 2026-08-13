@@ -1218,7 +1218,7 @@ class PAMActiveLearningService:
         do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
         dev = _resolve_device(body.device)
 
-        new_version = f"{parent_ckpt.version}_manual_{int(datetime.now(timezone.utc).timestamp())}"
+        new_version = f"manual_{int(datetime.now(timezone.utc).timestamp())}"
         new_ckpt = ALModelCheckpoint(
             dataset_id=parent_ckpt.dataset_id, model_family_name=parent_ckpt.model_family_name,
             version=new_version, checkpoint_path="", label_config_path=parent_ckpt.label_config_path,
@@ -1274,7 +1274,7 @@ class PAMActiveLearningService:
         if not label_order:
             raise ValueError(f"Parent checkpoint {parent_checkpoint_id} missing label_order.")
 
-        new_version = f"{parent_ckpt.version}_r{int(datetime.now(timezone.utc).timestamp())}"
+        new_version = f"r{int(datetime.now(timezone.utc).timestamp())}"
 
         new_ckpt = ALModelCheckpoint(
             dataset_id=parent_ckpt.dataset_id, model_family_name=parent_ckpt.model_family_name,
