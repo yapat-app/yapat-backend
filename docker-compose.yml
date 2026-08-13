@@ -166,9 +166,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 16G
+          memory: 64G
         reservations:
-          memory: 8G
+          memory: 16G
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
       - CELERY_BROKER_URL=redis://redis:6379/0
