@@ -152,8 +152,11 @@ def save_prediction_rows(
 
     Opens a fresh DB session for writes so that a stale/dead connection from
     the caller's long-running session (idle during forward pass + scoring) never
-    causes OperationalError.  Each chunk is committed independently so partial
-    progress survives a mid-run failure.
+    causes OperationalError.  Commits every commit_every_n_chunks chunks (not every
+    chunk) so partial progress still survives a mid-run failure, without paying a
+    WAL fsync round-trip per 5000 rows -- committing every chunk was the dominant
+    cost of this step on large datasets (e.g. ~11 of ~19 minutes for a 1.8M-row
+    upsert).
     """
     from app.database import SessionLocal
 
@@ -161,6 +164,7 @@ def save_prediction_rows(
     total = len(rows)
     chunk_size = 5000
     total_chunks = (total + chunk_size - 1) // chunk_size
+    commit_every_n_chunks = 15  # ~75k rows/commit; bounds crash-loss while cutting fsync overhead ~15x
 
     logger.info(
         "pam-al inference: saving %s prediction rows for checkpoint_id=%s in %s chunks (chunk_size=%s)",
@@ -235,7 +239,8 @@ def save_prediction_rows(
                 if to_add:
                     write_db.add_all(to_add)
 
-            write_db.commit()
+            if chunk_idx % commit_every_n_chunks == 0 or chunk_idx == total_chunks:
+                write_db.commit()
 
             logger.info(
                 "pam-al inference: upsert chunk %s/%s (rows=%s)",
