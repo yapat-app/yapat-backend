@@ -143,7 +143,7 @@ def build_inference_rows(
     )
     logger.info(
         "pam-al inference: composite min value = %.4f max value = %.4f",
-        composite_scores_u.min().item(), diversity_scores_u.max().item(),
+        composite_scores_u.min().item(), composite_scores_u.max().item(),
     )
 
     uncertainty_full = [None] * len(snippet_ids)
