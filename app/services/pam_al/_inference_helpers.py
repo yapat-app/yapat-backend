@@ -19,7 +19,7 @@ from app.models.snippet import Snippet
 from app.models.pam_active_learning import ALPrediction, ALSnippetAnnotation
 from app.schemas.pam_active_learning import ALInferenceRow
 
-from active_learning.samplers import composite, ALQueryScorer
+from active_learning.samplers import composite, zscore, ALQueryScorer
 from active_learning.config import (
     DEFAULT_INFERENCE_THRESHOLD,
     DEFAULT_DENSITY_K,
@@ -100,31 +100,36 @@ def build_inference_rows(
 
     # One scorer per cycle: caches z_u_np/z_l_np and the shared HNSW indices
     # so uncertainty()/diversity()/density() below don't each redo the same
-    # L2-normalize and index-build work. Each method returns z-scored output
-    # by default (zscored=True), matching what composite() expects.
+    # L2-normalize and index-build work. Each method is called once, raw
+    # (the scorer's default), and the z-scored version composite() needs is
+    # derived from that same raw tensor via zscore() rather than calling the
+    # method again -- avoids recomputing entropy (uncertainty isn't cached).
     scorer = ALQueryScorer(z_u, z_l)
 
-    uncertainty_scores_u = (
+    uncertainty_raw = (
         scorer.uncertainty(probs[unlabeled_indices])
         if unlabeled_indices
         else torch.empty(0, device=embeddings.device)
     )
+    uncertainty_z = zscore(uncertainty_raw)
     logger.info(
         "pam-al inference: uncertainty min value = %.4f max value = %.4f",
-        uncertainty_scores_u.min().item(), uncertainty_scores_u.max().item(),
+        uncertainty_raw.min().item(), uncertainty_raw.max().item(),
     )
 
     start = time.perf_counter()
-    diversity_scores_u = scorer.diversity()
+    diversity_raw = scorer.diversity()
+    diversity_z = zscore(diversity_raw)
     logger.info(
         "pam-al inference: diversity min value = %.4f max value = %.4f",
-        diversity_scores_u.min().item(), diversity_scores_u.max().item(),
+        diversity_raw.min().item(), diversity_raw.max().item(),
     )
     mid = time.perf_counter()
-    density_scores_u = scorer.density()
+    density_raw = scorer.density()
+    density_z = zscore(density_raw)
     logger.info(
         "pam-al inference: density min value = %.4f max value = %.4f",
-        density_scores_u.min().item(), density_scores_u.max().item(),
+        density_raw.min().item(), density_raw.max().item(),
     )
     end = time.perf_counter()
     logger.info(
@@ -134,16 +139,16 @@ def build_inference_rows(
         end - start,
     )
     composite_scores_u = composite(
-        uncertainty_scores=uncertainty_scores_u,
-        diversity_scores=diversity_scores_u,
-        density_scores=density_scores_u,
+        uncertainty_scores=uncertainty_z,
+        diversity_scores=diversity_z,
+        density_scores=density_z,
         wu=wu,
         wd=wd,
         wr=wr,
     )
     logger.info(
         "pam-al inference: composite min value = %.4f max value = %.4f",
-        composite_scores_u.min().item(), diversity_scores_u.max().item(),
+        composite_scores_u.min().item(), composite_scores_u.max().item(),
     )
 
     uncertainty_full = [None] * len(snippet_ids)
@@ -152,9 +157,9 @@ def build_inference_rows(
     composite_full = [None] * len(snippet_ids)
 
     if unlabeled_indices:
-        uncertainty_values = uncertainty_scores_u.detach().cpu().numpy()
-        diversity_values = diversity_scores_u.detach().cpu().numpy()
-        density_values = density_scores_u.detach().cpu().numpy()
+        uncertainty_values = uncertainty_raw.detach().cpu().numpy()
+        diversity_values = diversity_raw.detach().cpu().numpy()
+        density_values = density_raw.detach().cpu().numpy()
         composite_values = composite_scores_u.detach().cpu().numpy()
 
         for pos, idx in enumerate(unlabeled_indices):

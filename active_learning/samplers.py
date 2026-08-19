@@ -295,7 +295,7 @@ class ALQueryScorer:
                 self._nearest_ref_dist = np.sqrt(np.maximum(distances[:, 0], 0.0))
         return self._nearest_ref_dist
 
-    def diversity(self, zscored: bool = True, k: int | None = None, update_k: int | None = None) -> torch.Tensor:
+    def diversity(self, zscored: bool = False, k: int | None = None, update_k: int | None = None) -> torch.Tensor:
         if self.n_u == 0:
             return torch.empty(0, device=self.device)
 
@@ -316,7 +316,7 @@ class ALQueryScorer:
 
         return zscore(self._diversity_raw) if zscored else self._diversity_raw
 
-    def density(self, k: int | None = None, zscored: bool = True, q_low: float = 0.05, q_high: float = 0.95) -> torch.Tensor:
+    def density(self, k: int | None = None, zscored: bool = False, q_low: float = 0.05, q_high: float = 0.95) -> torch.Tensor:
 
         if self.n_u == 0:
             return torch.empty(0, device=self.device)
@@ -358,7 +358,7 @@ class ALQueryScorer:
         #return zscore(clipped)
         return zscore(self._density_raw)
 
-    def uncertainty(self, P: torch.Tensor, zscored: bool = True) -> torch.Tensor:
+    def uncertainty(self, P: torch.Tensor, zscored: bool = False) -> torch.Tensor:
 
         if P.numel() == 0:
             return torch.empty(0, device=P.device)
