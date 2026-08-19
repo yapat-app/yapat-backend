@@ -7,6 +7,7 @@ decoupled from the service class and are independently testable.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -329,18 +330,48 @@ def resolve_checkpoint_label_order(checkpoint: ALModelCheckpoint) -> List[str]:
     raise ValueError(f"Checkpoint {checkpoint.id} missing label_order ({detail}).")
 
 
+# POSIX NAME_MAX. Each retrain appends "_r<timestamp>" (or "_manual_<timestamp>")
+# onto the parent's version, so a long-lived lineage grows ~12-18 chars per
+# generation and eventually overflows the filename -- torch.save then fails with
+# "[enforce fail at inline_container.cc:747] . open file failed with strerror:
+# File name too long". The version stays intact on the checkpoint row; only its
+# copy inside the filename gets condensed.
+_NAME_MAX = 255
+_VERSION_DIGEST_LEN = 12
+
+
+def _bounded_basename(family_name: str, version: str, suffix: str) -> str:
+    """Build ``<family>_<version><suffix>``, condensing the version if it overflows."""
+    basename = f"{family_name}_{version}{suffix}"
+    if len(basename.encode()) <= _NAME_MAX:
+        return basename
+
+    # Keep a readable head of the version plus a digest of the whole thing, so
+    # sibling lineages that share a prefix still get distinct filenames.
+    digest = hashlib.blake2b(version.encode(), digest_size=_VERSION_DIGEST_LEN // 2).hexdigest()
+    fixed = len(f"{family_name}__{digest}{suffix}".encode())
+    head_budget = _NAME_MAX - fixed
+    if head_budget < 0:
+        # Even without the version it does not fit; the id in the suffix is
+        # unique on its own, so drop the family name too.
+        return f"{digest}{suffix}"[-_NAME_MAX:]
+
+    head = version.encode()[:head_budget].decode(errors="ignore")
+    return f"{family_name}_{head}_{digest}{suffix}"
+
+
 def make_checkpoint_path(dataset_id: int, family_name: str, version: str, ckpt_id: int) -> str:
     checkpoint_dir = ensure_dir(
         os.path.join(settings.PAM_CHECKPOINTS_DIR, "pam_active_learning", str(dataset_id))
     )
-    return os.path.join(checkpoint_dir, f"{family_name}_{version}_ckpt_{ckpt_id}.pt")
+    return os.path.join(checkpoint_dir, _bounded_basename(family_name, version, f"_ckpt_{ckpt_id}.pt"))
 
 
 def make_label_config_path(dataset_id: int, family_name: str, version: str, ckpt_id: int) -> str:
     checkpoint_dir = ensure_dir(
         os.path.join(settings.PAM_CHECKPOINTS_DIR, "pam_active_learning", str(dataset_id))
     )
-    return os.path.join(checkpoint_dir, f"{family_name}_{version}_labels_{ckpt_id}.json")
+    return os.path.join(checkpoint_dir, _bounded_basename(family_name, version, f"_labels_{ckpt_id}.json"))
 
 CheckpointLayout = Literal["linear", "mlp", "unknown"]
 
