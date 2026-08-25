@@ -156,6 +156,14 @@ class ALPredictionResponse(BaseModel):
     diversity: Optional[float] = None
     density: Optional[float] = None
     composite_score: Optional[float] = None
+    confidence: Optional[float] = Field(
+        default=None,
+        description=(
+            "Noisy-OR aggregate confidence over the response's label_scope. "
+            "Derived from predicted_probabilities rather than stored, so it "
+            "moves with the scope. None when there is no model behind the row."
+        ),
+    )
     created_at: Optional[datetime] = None
 
     class Config:
@@ -167,8 +175,17 @@ class ALPredictionResponse(BaseModel):
         prediction,
         recording_id: Optional[int] = None,
         duration_sec: Optional[float] = None,
+        confidence: Optional[float] = None,
     ) -> "ALPredictionResponse":
-        """Build response with an explicitly supplied recording_id."""
+        """
+        Build response with explicitly supplied recording_id and confidence.
+
+        confidence is passed in rather than computed here: it depends on the
+        request's effective label_scope, and importing the scorer from
+        app.services.pam_al would be circular (that package imports this one).
+        Callers must use inference_helpers.aggregate_confidence so every path
+        reports the same number.
+        """
         return cls(
             id=prediction.id,
             model_checkpoint_id=prediction.model_checkpoint_id,
@@ -181,17 +198,8 @@ class ALPredictionResponse(BaseModel):
             diversity=prediction.diversity,
             density=prediction.density,
             composite_score=prediction.composite_score,
+            confidence=confidence,
             created_at=prediction.created_at,
-        )
-
-    @classmethod
-    def from_orm_with_snippet(cls, pred) -> "ALPredictionResponse":
-        """Build response from a prediction with an eagerly-loaded snippet relation."""
-        snippet = getattr(pred, "snippet", None)
-        return cls.from_prediction(
-            pred,
-            recording_id=snippet.recording_id if snippet else None,
-            duration_sec=(snippet.end_time - snippet.start_time) if snippet else None,
         )
 
 

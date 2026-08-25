@@ -44,7 +44,6 @@ from app.schemas.pam_active_learning import (
 
 from app.utils.pam_training_paths import resolve_pam_training_paths
 from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
-from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
 from active_learning.config import (
     DEFAULT_INFERENCE_THRESHOLD,
     DEFAULT_DENSITY_K,
@@ -94,12 +93,6 @@ def _bulk_snippet_meta(
     rec_ids = {row[0]: row[1] for row in rows if row[1] is not None}
     durations = {row[0]: row[2] for row in rows if row[2] is not None}
     return rec_ids, durations
-
-
-def _bulk_recording_ids(db: Session, snippet_ids: list[int]) -> dict[int, int]:
-    """Return {snippet_id: recording_id} for a list of snippet IDs in one query."""
-    rec_ids, _ = _bulk_snippet_meta(db, snippet_ids)
-    return rec_ids
 
 
 class PAMActiveLearningService:
@@ -902,23 +895,29 @@ class PAMActiveLearningService:
             )
             self.db.commit()
 
-        # When no label_scope is requested, default to the species the model was
-        # actually trained on (used_species). This gives a semantically correct
-        # noisy-OR confidence — "how likely is any trained species present?" —
-        # rather than falling back to max(p) which ignores the training context.
-        hyper = model_ckpt.hyperparameters or {}
-        effective_scope = body.label_scope or hyper.get("used_species") or None
+        # With no explicit label scope, confidence is the model's strongest
+        # predicted probability. Do not substitute all trained species here:
+        # noisy-OR over a full label list quickly saturates near 1 and provides
+        # little useful separation for ranking or thresholding.
+        effective_scope = body.label_scope or None
 
         if not body.sample_suggestion:
             predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(
                 self.db, model_ckpt.id, body.snippet_set_id,
             )
+            # Confidence is derived from predicted_probabilities against the
+            # effective scope. Compute it once per row and reuse it for both the
+            # min_confidence filter and the payload, so the number the client
+            # renders is exactly the one the filter was applied to.
+            confidence_by_pred_id = {
+                p.id: inf_h.aggregate_confidence(p.predicted_probabilities, effective_scope)
+                for p in predictions
+            }
             if body.min_confidence is not None:
                 predictions = [
                     p
                     for p in predictions
-                    if inf_h.aggregate_confidence(p.predicted_probabilities or {}, effective_scope)
-                    >= body.min_confidence
+                    if confidence_by_pred_id[p.id] >= body.min_confidence
                 ]
             recording_id_by_snippet, duration_by_snippet = _bulk_snippet_meta(self.db, [p.snippet_id for p in predictions])
             rows = [
@@ -926,6 +925,7 @@ class PAMActiveLearningService:
                     p,
                     recording_id=recording_id_by_snippet.get(p.snippet_id),
                     duration_sec=duration_by_snippet.get(p.snippet_id),
+                    confidence=confidence_by_pred_id[p.id],
                 )
                 for p in predictions
             ]
@@ -945,6 +945,9 @@ class PAMActiveLearningService:
             model_ckpt.id,
             body.snippet_set_id,
         )
+        # min_confidence is applied inside the ranking so it selects the top k
+        # snippets that clear the threshold, rather than truncating an already
+        # chosen top k down to whichever of them happen to clear it.
         ranked = inf_h.get_top_prediction_suggestions(
             self.db,
             model_ckpt.dataset_id,
@@ -953,15 +956,8 @@ class PAMActiveLearningService:
             strategy,
             k,
             label_scope=effective_scope,
+            min_confidence=body.min_confidence,
         )
-
-        if body.min_confidence is not None:
-            ranked = [
-                p
-                for p in ranked
-                if inf_h.aggregate_confidence(p.predicted_probabilities or {}, effective_scope)
-                >= body.min_confidence
-            ]
 
         recording_id_by_snippet, duration_by_snippet = _bulk_snippet_meta(self.db, [p.snippet_id for p in ranked])
         rows = [
@@ -969,6 +965,7 @@ class PAMActiveLearningService:
                 p,
                 recording_id=recording_id_by_snippet.get(p.snippet_id),
                 duration_sec=duration_by_snippet.get(p.snippet_id),
+                confidence=inf_h.aggregate_confidence(p.predicted_probabilities, effective_scope),
             )
             for p in ranked
         ]

@@ -2,7 +2,7 @@
 Redis-backed cache for confidence-ranked feed results.
 
 The confidence strategy in get_top_prediction_suggestions must load all
-unannotated predictions into Python and sort by noisy-OR score — O(n) work
+unannotated predictions into Python and sort by aggregate confidence — O(n) work
 over 100k+ records. This module caches the sorted (pred_id, snippet_id, score)
 list so that only the first call after new inference is slow; all subsequent
 calls (any user, any label_scope variant) are served in milliseconds.
@@ -45,7 +45,10 @@ def _redis() -> redis.Redis | None:
 
 def _scope_hash(label_scope: list[str] | None) -> str:
     if not label_scope:
-        return "all"
+        # Version the no-scope key because its meaning changed from noisy-OR
+        # across every trained label to max(predicted_probabilities). This also
+        # prevents old 24-hour cache entries from surviving that behavior change.
+        return "none-max-v2"
     return hashlib.md5("|".join(sorted(label_scope)).encode()).hexdigest()[:12]
 
 

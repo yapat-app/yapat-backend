@@ -309,8 +309,7 @@ def get_or_create_predictions(
                 payload_cacheable = not body.sample_suggestion
                 effective_scope = None
                 if payload_cacheable:
-                    hyper = model_ckpt.hyperparameters or {}
-                    effective_scope = body.label_scope or hyper.get("used_species") or None
+                    effective_scope = body.label_scope or None
                     cached_json = inference_feed_cache.get_cached_full_payload(
                         model_ckpt.id,
                         body.snippet_set_id,

@@ -31,8 +31,12 @@ from active_learning.config import (
 logger = logging.getLogger(__name__)
 
 
+def _clamp01(value: float) -> float:
+    return min(1.0, max(0.0, float(value)))
+
+
 def aggregate_confidence(
-    predicted_probabilities: dict[str, float],
+    predicted_probabilities: dict[str, float] | None,
     label_scope: list[str] | None = None,
 ) -> float:
     """
@@ -44,13 +48,18 @@ def aggregate_confidence(
         - If None or empty, falls back to max(predicted_probabilities.values())
           to avoid the inflation artefact that occurs when many low-probability
           labels are combined without a meaningful scope.
+
+    This is the single definition of confidence: ranking, min_confidence
+    filtering and the frontend mirror (utils/aggregateConfidence.ts) must all
+    agree, otherwise a threshold means different things on different paths.
     """
+    probs = predicted_probabilities or {}
     if not label_scope:
         # No scope → avoid noisy-OR inflation; use max as a conservative fallback.
-        return max(predicted_probabilities.values(), default=0.0)
+        return _clamp01(max(probs.values(), default=0.0))
 
     return 1.0 - math.prod(
-        1.0 - predicted_probabilities.get(label, 0.0)
+        1.0 - _clamp01(probs.get(label, 0.0))
         for label in label_scope
     )
 
@@ -78,7 +87,6 @@ def build_inference_rows(
     snippet_ids: Sequence[int],
     labeled_snippet_ids: set[int],
     label_order: List[str],
-    density_k: int, #TODO delete this k. It is not configurable from config file
     wu: float,
     wd: float,
     wr: float,
@@ -425,7 +433,6 @@ def run_and_store_inference(
         snippet_ids=snippet_ids,
         labeled_snippet_ids=labeled_snippet_ids,
         label_order=label_order,
-        density_k=density_k,
         wu=wu,
         wd=wd,
         wr=wr,
@@ -530,30 +537,65 @@ def count_predictions_for_checkpoint_and_snippet_set(
     return int(count or 0)
 
 
-def _noisy_or_confidence(
-    predicted_probabilities: dict | None,
-    label_scope: list[str] | None,
-) -> float:
-    """
-    Aggregate confidence over a label scope using noisy-OR:
-        P(any species present) = 1 - prod(1 - p_i  for i in scope)
+def _snippet_load_options():
+    return selectinload(ALPrediction.snippet).load_only(
+        Snippet.start_time, Snippet.end_time, Snippet.recording_id
+    )
 
-    Falls back to max probability when no scope is given, or 0 if no
-    probabilities are available.
+
+def _passes_min_confidence(
+    prediction: ALPrediction,
+    label_scope: list[str] | None,
+    min_confidence: float | None,
+) -> bool:
+    if min_confidence is None:
+        return True
+    return (
+        aggregate_confidence(prediction.predicted_probabilities, label_scope)
+        >= min_confidence
+    )
+
+
+# Page size for the confidence-filtered scan below. Large enough that a loose
+# threshold is satisfied by a single round trip, small enough that a strict one
+# doesn't pull the whole checkpoint into memory at once.
+_CONFIDENCE_SCAN_PAGE = 2000
+
+
+def _take_k_passing(
+    ordered_query,
+    k: int,
+    label_scope: list[str] | None,
+    min_confidence: float,
+) -> list[ALPrediction]:
     """
-    probs = predicted_probabilities or {}
-    if not probs:
-        return 0.0
-    if label_scope:
-        scope_probs = [probs.get(s, 0.0) for s in label_scope]
-    else:
-        scope_probs = list(probs.values())
-    if not scope_probs:
-        return 0.0
-    result = 1.0
-    for p in scope_probs:
-        result *= 1.0 - max(0.0, min(1.0, float(p)))
-    return 1.0 - result
+    Walk a deterministically-ordered query in pages, keeping rows that clear
+    min_confidence, until k of them are collected.
+
+    Confidence is a noisy-OR over a JSON column, so it cannot be expressed in
+    SQL and cannot join the ORDER BY ... LIMIT. Filtering has to happen in
+    Python, but it must happen *before* the cut to k — otherwise a threshold
+    silently truncates the result instead of reaching further down the ranking.
+    Paging keeps that scan bounded.
+
+    The caller's ordering must be total (score plus an id tiebreak), or OFFSET
+    paging can repeat and skip rows between round trips.
+    """
+    collected: list[ALPrediction] = []
+    offset = 0
+    while len(collected) < k:
+        page = ordered_query.limit(_CONFIDENCE_SCAN_PAGE).offset(offset).all()
+        if not page:
+            break
+        offset += len(page)
+        for pred in page:
+            if _passes_min_confidence(pred, label_scope, min_confidence):
+                collected.append(pred)
+                if len(collected) == k:
+                    break
+        if len(page) < _CONFIDENCE_SCAN_PAGE:
+            break  # exhausted the candidate set
+    return collected
 
 
 def get_top_prediction_suggestions(
@@ -564,6 +606,7 @@ def get_top_prediction_suggestions(
     strategy: str,
     k: int,
     label_scope: list[str] | None = None,
+    min_confidence: float | None = None,
 ) -> list[ALPrediction]:
     annotated_exists = (
         db.query(ALSnippetAnnotation.id)
@@ -585,16 +628,27 @@ def get_top_prediction_suggestions(
     )
 
     if strategy == "random":
-        return (
-            query.order_by(func.random())
-            .limit(k)
-            .options(
-                selectinload(ALPrediction.snippet).load_only(
-                    Snippet.start_time, Snippet.end_time, Snippet.recording_id
-                )
-            )
-            .all()
-        )
+        random_query = query.order_by(func.random()).options(_snippet_load_options())
+        if min_confidence is None:
+            return random_query.limit(k).all()
+
+        # ORDER BY random() re-rolls on every query, so OFFSET paging would both
+        # repeat and skip rows. Draw one oversampled batch instead and filter it:
+        # a uniform random subset, filtered, is still a uniform sample of the
+        # passing rows. Only fall back to an unbounded draw if that came up short
+        # of k while candidates remained.
+        draw_size = max(k * 8, 200)
+        rows = random_query.limit(draw_size).all()
+        passing = [
+            p for p in rows if _passes_min_confidence(p, label_scope, min_confidence)
+        ]
+        if len(passing) >= k or len(rows) < draw_size:
+            return passing[:k]
+
+        rows = random_query.all()
+        return [
+            p for p in rows if _passes_min_confidence(p, label_scope, min_confidence)
+        ][:k]
 
     # confidence: noisy-OR over label_scope — must be computed in Python since
     # predicted_probabilities is a JSON column.
@@ -622,20 +676,17 @@ def get_top_prediction_suggestions(
                     ALPrediction.model_checkpoint_id == model_checkpoint_id,
                     Snippet.snippet_set_id == snippet_set_id,
                 )
-                .options(
-                    selectinload(ALPrediction.snippet).load_only(
-                        Snippet.start_time, Snippet.end_time, Snippet.recording_id
-                    )
-                )
+                .options(_snippet_load_options())
                 .all()
             )
             scored = [
-                (p, _noisy_or_confidence(p.predicted_probabilities, label_scope))
+                (p, aggregate_confidence(p.predicted_probabilities, label_scope))
                 for p in all_preds
             ]
             scored.sort(key=lambda x: x[1], reverse=True)
-            all_preds = [p for p, _ in scored]
             ranked_triples = [(p.id, p.snippet_id, s) for p, s in scored]
+            # Cache the *unfiltered* ranking: min_confidence is not part of the
+            # cache key, so the stored list has to serve every threshold.
             set_cached_confidence_ranking(model_checkpoint_id, snippet_set_id, label_scope, ranked_triples)
 
             # Filter out already-annotated snippets using the pre-sorted objects.
@@ -645,7 +696,12 @@ def get_top_prediction_suggestions(
                     ALSnippetAnnotation.dataset_id == dataset_id,
                 ).all()
             }
-            candidates = [p for p in all_preds if p.snippet_id not in annotated_exists_set]
+            candidates = [
+                p
+                for p, score in scored
+                if p.snippet_id not in annotated_exists_set
+                and (min_confidence is None or score >= min_confidence)
+            ]
             return candidates[:k]
 
         # Cache hit: filter annotated IDs and fetch only the top-k full objects.
@@ -657,8 +713,9 @@ def get_top_prediction_suggestions(
         }
         top_k_pred_ids = [
             pred_id
-            for pred_id, snippet_id, _ in ranked_triples
+            for pred_id, snippet_id, score in ranked_triples
             if snippet_id not in annotated_snippet_ids
+            and (min_confidence is None or score >= min_confidence)
         ][:k]
 
         if not top_k_pred_ids:
@@ -668,25 +725,11 @@ def get_top_prediction_suggestions(
         objs = (
             db.query(ALPrediction)
             .filter(ALPrediction.id.in_(top_k_pred_ids))
-            .options(
-                selectinload(ALPrediction.snippet).load_only(
-                    Snippet.start_time, Snippet.end_time, Snippet.recording_id
-                )
-            )
+            .options(_snippet_load_options())
             .all()
         )
         objs.sort(key=lambda p: id_to_rank[p.id])
         return objs
-
-    if strategy == "confidence":
-        # Noisy-OR is label_scope-specific and cannot be pushed into a JSONB SQL
-        # expression, so we always sort in Python.
-        candidates = query.all()
-        candidates.sort(
-            key=lambda p: aggregate_confidence(p.predicted_probabilities or {}, label_scope),
-            reverse=True,
-        )
-        return candidates[:k]
 
     score_columns = {
         "uncertainty": ALPrediction.uncertainty,
@@ -698,47 +741,10 @@ def get_top_prediction_suggestions(
         raise ValueError(f"Unsupported suggestion strategy '{strategy}'.")
 
     score_column = score_columns[strategy]
-    return (
+    ordered = (
         query.order_by(score_column.desc().nullslast(), ALPrediction.id.asc())
-        .limit(k)
-        .options(
-            selectinload(ALPrediction.snippet).load_only(
-                Snippet.start_time, Snippet.end_time, Snippet.recording_id
-            )
-        )
-        .all()
+        .options(_snippet_load_options())
     )
-
-
-def rank_prediction_suggestions(
-    db: Session,
-    dataset_id: int,
-    snippet_set_id: int,
-    predictions: list[ALPrediction],
-    strategy: str,
-    annotated_ids: set[int],
-    label_scope: list[str] | None = None,
-) -> list[ALPrediction]:
-    candidates = [p for p in predictions if p.snippet_id not in annotated_ids]
-
-    if strategy == "random":
-        import random
-        candidates = candidates[:]
-        random.shuffle(candidates)
-        return candidates
-
-    key_map = {
-        "uncertainty": lambda p: p.uncertainty if p.uncertainty is not None else float("-inf"),
-        "diversity": lambda p: p.diversity if p.diversity is not None else float("-inf"),
-        "density": lambda p: p.density if p.density is not None else float("-inf"),
-        "composite": lambda p: p.composite_score if p.composite_score is not None else float("-inf"),
-        "confidence": lambda p: aggregate_confidence(
-            p.predicted_probabilities or {},
-            label_scope,
-        ),
-    }
-
-    if strategy not in key_map:
-        raise ValueError(f"Unsupported suggestion strategy '{strategy}'.")
-
-    return sorted(candidates, key=key_map[strategy], reverse=True)
+    if min_confidence is None:
+        return ordered.limit(k).all()
+    return _take_k_passing(ordered, k, label_scope, min_confidence)

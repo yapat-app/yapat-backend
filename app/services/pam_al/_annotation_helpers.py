@@ -421,24 +421,6 @@ def get_label_details_by_snippet(
     }
 
 
-def get_annotated_snippet_ids_for_snippet_set(
-    db: Session,
-    dataset_id: int,
-    snippet_set_id: int,
-) -> set[int]:
-    rows = (
-        db.query(ALSnippetAnnotation.snippet_id)
-        .join(Snippet, Snippet.id == ALSnippetAnnotation.snippet_id)
-        .filter(
-            ALSnippetAnnotation.dataset_id == dataset_id,
-            Snippet.snippet_set_id == snippet_set_id,
-        )
-        .distinct()
-        .all()
-    )
-    return {row[0] for row in rows}
-
-
 def build_multihot_from_annotations(
     snippet_ids: list[int],
     label_order: list[str],
