@@ -14,6 +14,7 @@ from sqlalchemy import and_, func
 from app.api.deps import get_db, get_current_active_user, get_current_admin_user
 from app.models.user import User, UserRole
 from app.models.annotation import Annotation as AnnotationModel
+from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
 from app.models.snippet import Snippet
 from app.models.recording import Recording
 from app.models.embedding import SnippetSet, SnippetSetStatus
@@ -390,41 +391,47 @@ def export_dataset_annotations(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # Build query with joins
+    # Export USER-provided annotations from the active-learning store
+    # (al_snippet_annotation). This is the same source the annotate feed reads
+    # and writes, so removals made in the feed are reflected here — unlike the
+    # canonical `annotations` table, which can retain stale rows. Only USER
+    # source is exported (ground-truth imports are excluded). The AL store keeps
+    # a single `label` (species code) rather than a taxon_id + resolved name, so
+    # both columns are populated from it and `confidence` is not available.
     query = (
         db.query(
-            AnnotationModel.id.label('annotation_id'),
+            ALSnippetAnnotation.id.label('annotation_id'),
             Recording.dataset_id.label('dataset_id'),
-            AnnotationModel.snippet_id,
-            AnnotationModel.taxon_id,
-            AnnotationModel.resolved_name_snapshot,
-            AnnotationModel.confidence,
-            AnnotationModel.created_at,
-            AnnotationModel.user_id.label('created_by'),
+            ALSnippetAnnotation.snippet_id,
+            ALSnippetAnnotation.label.label('taxon_id'),
+            ALSnippetAnnotation.label.label('resolved_name_snapshot'),
+            ALSnippetAnnotation.created_at,
+            ALSnippetAnnotation.user_id.label('created_by'),
             Recording.file_name.label('recording_file_name'),
             Recording.file_path.label('recording_file_path'),
             Snippet.start_time.label('snippet_start_time'),
             Snippet.end_time.label('snippet_end_time'),
             Snippet.duration.label('snippet_duration'),
         )
-        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
+        .join(Snippet, ALSnippetAnnotation.snippet_id == Snippet.id)
         .join(Recording, Snippet.recording_id == Recording.id)
         .filter(Recording.dataset_id == dataset_id)
+        .filter(ALSnippetAnnotation.source == ALAnnotationSource.USER)
     )
-    
+
     # Apply filters
     if taxon_id:
-        query = query.filter(AnnotationModel.taxon_id == taxon_id)
+        query = query.filter(ALSnippetAnnotation.label == taxon_id)
     if user_id:
-        query = query.filter(AnnotationModel.user_id == user_id)
+        query = query.filter(ALSnippetAnnotation.user_id == user_id)
     if created_after:
-        query = query.filter(AnnotationModel.created_at >= created_after)
+        query = query.filter(ALSnippetAnnotation.created_at >= created_after)
     if created_before:
-        query = query.filter(AnnotationModel.created_at <= created_before)
-    
+        query = query.filter(ALSnippetAnnotation.created_at <= created_before)
+
     # Execute query
     results = query.all()
-    
+
     # Convert to dict for easy processing
     annotations_data = [
         {
@@ -433,7 +440,7 @@ def export_dataset_annotations(
             'snippet_id': row.snippet_id,
             'taxon_id': row.taxon_id,
             'resolved_name_snapshot': row.resolved_name_snapshot,
-            'confidence': row.confidence,
+            'confidence': None,
             'created_at': row.created_at.isoformat() if row.created_at else None,
             'created_by': row.created_by,
             'recording_file_name': row.recording_file_name,
