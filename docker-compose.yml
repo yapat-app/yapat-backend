@@ -52,6 +52,14 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      # Pools are per process and the API runs 4 uvicorn workers (see
+      # docker-compose.override.yml), so this is 4 x (12 + 3) = 60 connections.
+      # Keep the whole stack's worst case under Postgres max_connections (100).
+      - DB_POOL_SIZE=${API_DB_POOL_SIZE:-12}
+      - DB_MAX_OVERFLOW=${API_DB_MAX_OVERFLOW:-3}
+      # Matched to the per-process pool so sync endpoints queue for a thread
+      # rather than pile up waiting on a connection that will never arrive.
+      - API_THREADPOOL_LIMIT=${API_THREADPOOL_LIMIT:-15}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
@@ -113,6 +121,8 @@ services:
           memory: 1G
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - DB_POOL_SIZE=${WORKER_DB_POOL_SIZE:-2}
+      - DB_MAX_OVERFLOW=${WORKER_DB_MAX_OVERFLOW:-2}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
@@ -171,6 +181,8 @@ services:
           memory: 16G
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - DB_POOL_SIZE=${WORKER_DB_POOL_SIZE:-2}
+      - DB_MAX_OVERFLOW=${WORKER_DB_MAX_OVERFLOW:-2}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
@@ -200,6 +212,8 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - DB_POOL_SIZE=${WORKER_DB_POOL_SIZE:-1}
+      - DB_MAX_OVERFLOW=${WORKER_DB_MAX_OVERFLOW:-1}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-secret-key-change-in-production}
