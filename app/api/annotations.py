@@ -428,55 +428,96 @@ def get_all_datasets_annotation_stats(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Get annotation statistics for all datasets.
-    
+    Get annotation statistics for the datasets the caller can access.
+
+    Scoped the same way as GET /datasets: admins see everything, everyone else
+    sees datasets from teams they belong to plus any granted directly by
+    invitation.
+
     Returns a list of annotation statistics for each dataset including:
     - Total number of snippets in each dataset
     - Number of annotated snippets (with at least one annotation)
     - Number of not annotated snippets (with zero annotations)
     - Annotation percentage
     - Total number of annotations
+
+    Counts span both label stores -- the canonical `annotations` table and the
+    AL store (USER source only) -- because neither is a superset of the other:
+    mirroring between them only began in June 2026, and AL-mode feedback still
+    writes rows that never reach the canonical table. Counting one store alone
+    understates every dataset that predates the mirror or uses AL mode. The
+    union deduplicates on (snippet, label, user), so a mirrored annotation
+    counts once, matching what the export reports.
     """
-    # Get all datasets
-    datasets = db.query(Dataset).all()
-    
+    # Not db.query(Dataset).all(): that leaked every dataset's name and counts
+    # to any authenticated user. limit follows the convention in wssed.py --
+    # high enough not to truncate in practice.
+    datasets = DatasetService(db).list_datasets(current_user, skip=0, limit=10_000)
+    if not datasets:
+        return AllDatasetsAnnotationStats(datasets=[], total_datasets=0)
+
+    visible_dataset_ids = [dataset.id for dataset in datasets]
+
+    canonical_labels = (
+        db.query(
+            Recording.dataset_id.label('dataset_id'),
+            AnnotationModel.snippet_id.label('snippet_id'),
+            AnnotationModel.resolved_name_snapshot.label('label'),
+            AnnotationModel.user_id.label('user_id'),
+        )
+        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(Recording.dataset_id.in_(visible_dataset_ids))
+    )
+    al_labels = (
+        db.query(
+            Recording.dataset_id.label('dataset_id'),
+            ALSnippetAnnotation.snippet_id.label('snippet_id'),
+            ALSnippetAnnotation.label.label('label'),
+            ALSnippetAnnotation.user_id.label('user_id'),
+        )
+        .join(Snippet, ALSnippetAnnotation.snippet_id == Snippet.id)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(ALSnippetAnnotation.source == ALAnnotationSource.USER)
+        .filter(Recording.dataset_id.in_(visible_dataset_ids))
+    )
+    # UNION (not UNION ALL) is what performs the dedupe.
+    labels = canonical_labels.union(al_labels).subquery()
+
+    # One grouped query each, rather than three per dataset in a loop.
+    annotation_counts = {
+        row.dataset_id: (row.total_annotations, row.annotated_snippets)
+        for row in db.query(
+            labels.c.dataset_id,
+            func.count().label('total_annotations'),
+            func.count(func.distinct(labels.c.snippet_id)).label('annotated_snippets'),
+        ).group_by(labels.c.dataset_id).all()
+    }
+    snippet_counts = {
+        dataset_id: count
+        for dataset_id, count in db.query(
+            Recording.dataset_id, func.count(Snippet.id)
+        )
+        .join(Snippet, Snippet.recording_id == Recording.id)
+        .filter(Recording.dataset_id.in_(visible_dataset_ids))
+        .group_by(Recording.dataset_id)
+        .all()
+    }
+
     dataset_stats_list = []
-    
+
     for dataset in datasets:
         dataset_id = dataset.id
-        
-        # Count total snippets for this dataset
-        total_snippets = (
-            db.query(func.count(Snippet.id))
-            .join(Recording)
-            .filter(Recording.dataset_id == dataset_id)
-            .scalar()
-        ) or 0
-        
-        # Count snippets with at least one annotation
-        annotated_snippets = (
-            db.query(func.count(func.distinct(Snippet.id)))
-            .join(Recording)
-            .join(AnnotationModel, AnnotationModel.snippet_id == Snippet.id)
-            .filter(Recording.dataset_id == dataset_id)
-            .scalar()
-        ) or 0
-        
-        # Count total annotations
-        total_annotations = (
-            db.query(func.count(AnnotationModel.id))
-            .join(Snippet)
-            .join(Recording)
-            .filter(Recording.dataset_id == dataset_id)
-            .scalar()
-        ) or 0
-        
+
+        total_snippets = snippet_counts.get(dataset_id, 0)
+        total_annotations, annotated_snippets = annotation_counts.get(dataset_id, (0, 0))
+
         # Calculate not annotated snippets
         not_annotated_snippets = total_snippets - annotated_snippets
-        
+
         # Calculate percentage
         annotation_percentage = (annotated_snippets / total_snippets * 100) if total_snippets > 0 else 0.0
-        
+
         dataset_stats_list.append(
             DatasetAnnotationStats(
                 dataset_id=dataset_id,
