@@ -86,14 +86,18 @@ class AnnotationExport(BaseModel):
     snippet_id: int
     taxon_id: str
     resolved_name_snapshot: str
-    confidence: Optional[float]
     created_at: datetime
     created_by: int
-    
+    # Which table the row came from: 'al_snippet_annotation' or 'annotations'.
+    # `annotation_id` is only unique within a source table, so the two together
+    # form the identity of an exported row. Admin-only: omitted entirely for
+    # everyone else, which is why this is optional.
+    source_table: Optional[str] = None
+
     # Recording metadata
     recording_file_name: str
-    recording_file_path: str
-    
+
+
     # Snippet metadata
     snippet_start_time: float
     snippet_end_time: float
