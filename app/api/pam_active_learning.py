@@ -13,11 +13,13 @@ import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from app.api.deps import get_db, get_current_active_user
 from app.models.annotation import Annotation as AnnotationModel
+from app.models.embedding import SnippetSet
 from app.models.pam_active_learning import ALAnnotationSource, ALSnippetAnnotation
 from app.models.user import User
 from app.schemas.pam_active_learning import (
@@ -213,41 +215,78 @@ def get_or_create_predictions(
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Return cached predictions for the active checkpoint, or run inference if
-    none exist yet (or force_refresh=true).
+    Return stored predictions for the active checkpoint, or enqueue exactly one
+    inference job if predictions do not exist yet (or force_refresh=true).
     """
     service = PAMActiveLearningService(db)
     try:
-        # Fast path: if predictions exist and no refresh requested, return them immediately.
-        if not body.force_refresh:
-            try:
-                return service.get_or_create_predictions(body)
-            except ValueError:
-                db.rollback()
-                raise
-            except Exception as fast_err:
-                # Sync path failed (OOM, timeout, DB error, etc.) — roll back so the
-                # async fallback below can use the same session.
-                db.rollback()
-                logger.warning(
-                    "Sync inference fast path failed for dataset_id=%s model_family=%s; "
-                    "falling back to async job: %s",
-                    body.dataset_id,
-                    body.model_family_name,
-                    fast_err,
-                    exc_info=True,
-                )
-
-        # Async path: create a job record and let the pam_al worker handle inference.
+        # Resolve and validate the inference scope before deciding whether the
+        # request can use stored predictions or needs a background job.
         from datetime import datetime, timezone
 
         from app.models.pam_active_learning import ALRetrainJob, ALRetrainStatus
         from app.services.pam_al import _checkpoint_helpers as ckpt_h
+        from app.services.pam_al import _inference_helpers as inf_h
 
         model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(db, body.dataset_id, body.model_family_name)
         if model_ckpt is None:
             # No checkpoint: keep previous behavior (random suggestions).
             return service.get_or_create_predictions(body)
+
+        snippet_set = db.query(SnippetSet).filter(SnippetSet.id == body.snippet_set_id).one_or_none()
+        if snippet_set is None:
+            raise ValueError(f"snippet_set_id={body.snippet_set_id} does not exist.")
+        if snippet_set.dataset_id != body.dataset_id:
+            raise ValueError(
+                f"snippet_set_id={body.snippet_set_id} belongs to dataset_id={snippet_set.dataset_id}, "
+                f"not dataset_id={body.dataset_id}."
+            )
+
+        def predictions_exist() -> bool:
+            return inf_h.predictions_exist_for_checkpoint_and_snippet_set(
+                db,
+                model_ckpt.id,
+                body.snippet_set_id,
+            )
+
+        # Never interpret a ranking/serialization failure as a reason to rerun
+        # model inference. If predictions exist, errors should surface normally.
+        if not body.force_refresh and predictions_exist():
+            return service.get_or_create_predictions(body)
+
+        # Serialize job creation across all API workers. Without this lock, each
+        # concurrent request can observe "no predictions", create its own job,
+        # and force the 1M+ snippet inference to run again. The transaction-level
+        # lock is released by the commit below and requires no schema migration.
+        if db.get_bind().dialect.name == "postgresql":
+            db.execute(
+                text("SELECT pg_advisory_xact_lock(:namespace, :checkpoint_id)"),
+                {"namespace": 1346457161, "checkpoint_id": model_ckpt.id},
+            )
+
+        # Another worker may have completed inference while this request waited.
+        if not body.force_refresh and predictions_exist():
+            return service.get_or_create_predictions(body)
+
+        active_job = (
+            db.query(ALRetrainJob)
+            .filter(
+                ALRetrainJob.model_checkpoint_id == model_ckpt.id,
+                ALRetrainJob.dataset_id == body.dataset_id,
+                ALRetrainJob.trigger == "inference",
+                ALRetrainJob.status.in_([ALRetrainStatus.PENDING, ALRetrainStatus.RUNNING]),
+            )
+            .order_by(ALRetrainJob.created_at.desc(), ALRetrainJob.id.desc())
+            .first()
+        )
+        if active_job is not None:
+            db.commit()  # release the advisory transaction lock immediately
+            return ALJobDispatch(
+                job_id=active_job.id,
+                checkpoint_id=model_ckpt.id,
+                status=active_job.status,
+                message=f"Inference job {active_job.id} is already in progress.",
+            )
 
         job = ALRetrainJob(
             model_checkpoint_id=model_ckpt.id,
@@ -263,7 +302,14 @@ def get_or_create_predictions(
 
         from app.tasks.pam_al_tasks import pam_al_create_predictions
 
-        pam_al_create_predictions.delay(job_id=job.id, inference_body=body.model_dump())
+        try:
+            pam_al_create_predictions.delay(job_id=job.id, inference_body=body.model_dump())
+        except Exception as dispatch_error:
+            job.status = ALRetrainStatus.FAILED
+            job.completed_at = datetime.now(timezone.utc)
+            job.error_message = f"Celery dispatch failed: {dispatch_error}"
+            db.commit()
+            raise
 
         return ALJobDispatch(
             job_id=job.id,

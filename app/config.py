@@ -13,6 +13,21 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://yapat_user:yapat_password@localhost/yapat"
 
+    # Connection pool, per process. Every uvicorn worker and every Celery child
+    # gets its own pool, so the ceiling is (processes x (size + overflow)) and
+    # must stay under Postgres max_connections. Defaults are deliberately small;
+    # docker-compose sets a real value per service.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 5
+    DB_POOL_TIMEOUT: int = 30
+    # Upper bound on FastAPI's threadpool, which runs every sync `def` endpoint.
+    # Left unset it defaults to 40 per worker, which lets far more requests race
+    # for connections than the pool can serve: the surplus blocks in
+    # pool.connect() and dies at DB_POOL_TIMEOUT. Matching it to the pool makes
+    # them queue for a thread instead, which costs latency rather than errors.
+    # None = leave AnyIO's default alone.
+    API_THREADPOOL_LIMIT: Optional[int] = None
+
     # Security
     SECRET_KEY: str = "your-secret-key-change-in-production"
     ALGORITHM: str = "HS256"
@@ -105,6 +120,10 @@ class Settings(BaseSettings):
     # 16GB worker at ~20k points, so it stays conservative.
     FPV_TSNE_MAX_POINTS: int = 50_000
     FPV_ISOMAP_MAX_POINTS: int = 15_000
+    # Overall ceiling: datasets with more embeddings than this skip FPV generation
+    # entirely (the callers 413 / skip auto-FPV) rather than queuing a job that
+    # would OOM the worker. Defaults to the largest per-method cap.
+    FPV_MAX_POINTS: int = 100_000
 
     # PAM Active Learning
     PAM_AUTO_RETRAIN_THRESHOLD: int = 5  # Auto-retrain after N feedback events

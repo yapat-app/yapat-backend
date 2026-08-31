@@ -29,6 +29,7 @@ class ConversationCreate(BaseModel):
     """Schema for creating a conversation"""
     team_id: Optional[int] = Field(None, description="Team ID for the conversation. If not provided, the user's first team is used (or derived from dataset_id).")
     dataset_id: Optional[int] = Field(None, description="Dataset ID to associate the label space with. Labels added from chat are mirrored into this dataset's quick_labels. When provided, team_id is derived from the dataset's team if not given explicitly.")
+    seed_from_active: bool = Field(False, description="When true, pre-populate the new label space with the team's current active label-space version so the user edits a copy of it.")
 
 
 class LabelSpaceItem(BaseModel):
@@ -39,6 +40,8 @@ class LabelSpaceItem(BaseModel):
     taxon_id: Optional[str] = Field(None, description="GBIF taxon ID if available (e.g., 'gbif:2482715')")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata (family, rank, etc.)")
     added_at: datetime = Field(..., description="When this item was added to the list")
+    added_by_user_id: Optional[int] = Field(None, description="ID of the user who added this label")
+    added_by_username: Optional[str] = Field(None, description="Username snapshot of who added this label (may be null for legacy items)")
 
 
 class ConversationResponse(BaseModel):
@@ -95,6 +98,17 @@ class FreezeLabelSpaceResponse(BaseModel):
     taxonomy: "CustomTaxonomyResponse" = Field(..., description="Created custom taxonomy")
 
 
+class SubmitLabelSpaceRequest(BaseModel):
+    """Request for finalizing (submitting) a label space version to the team owner"""
+    description: Optional[str] = Field(None, description="Optional description of this label-space version")
+
+
+class SubmitLabelSpaceResponse(BaseModel):
+    """Response after finalizing/submitting a label space version"""
+    conversation: ConversationResponse = Field(..., description="Finalized conversation")
+    taxonomy: "CustomTaxonomyResponse" = Field(..., description="Created (submitted) label-space version")
+
+
 class ConversationListResponse(BaseModel):
     """List response for conversations"""
     conversations: List[ConversationResponse]
@@ -114,5 +128,6 @@ def _rebuild_models():
     """Rebuild models to resolve forward references"""
     from app.schemas.custom_taxonomy import CustomTaxonomyResponse
     FreezeLabelSpaceResponse.model_rebuild()
+    SubmitLabelSpaceResponse.model_rebuild()
 
 _rebuild_models()

@@ -246,7 +246,14 @@ def add_to_label_space(
     
     if conversation.status != ConversationStatus.IN_PROGRESS:
         raise CustomTaxonomyServiceError("Conversation is not in progress")
-    
+
+    # Resolve the adder's username once so each new label can be attributed to the
+    # person who contributed it. Stored as a snapshot so it survives the user later
+    # leaving the team or being deleted.
+    from app.models.user import User
+    adder = db.get(User, user_id)
+    adder_username = adder.username if adder else None
+
     # Find the target assistant message
     if message_id:
         # Get specific message by ID
@@ -334,7 +341,9 @@ def add_to_label_space(
                 "kingdom": node.get("kingdom") or node_meta.get("kingdom"),
                 **node_meta
             },
-            "added_at": datetime.utcnow().isoformat()
+            "added_at": datetime.utcnow().isoformat(),
+            "added_by_user_id": user_id,
+            "added_by_username": adder_username,
         }
         conversation.label_space.append(new_item)
         if taxon_id:
@@ -369,20 +378,6 @@ def add_to_label_space(
     db.commit()
     db.refresh(conversation)
 
-    # Mirror the newly added items into the associated dataset's quick_labels so
-    # they show up in GET /api/datasets/{id}/quick-labels for annotation.
-    if conversation.dataset_id:
-        try:
-            sync_items_to_dataset_quick_labels(conversation.dataset_id, added_items, db)
-            db.refresh(conversation)
-        except Exception:
-            # Quick-label mirroring is best-effort; never fail the add because of it.
-            logger.exception(
-                "Failed to sync label space to dataset %s quick_labels (conversation %s)",
-                conversation.dataset_id,
-                conversation_id,
-            )
-            db.rollback()
 
     logger.info(f"Added %d item(s) to label space in conversation {conversation_id}", len(added_items))
     return {

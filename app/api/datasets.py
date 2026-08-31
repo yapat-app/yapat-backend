@@ -14,6 +14,7 @@ from sqlalchemy import and_, func
 from app.api.deps import get_db, get_current_active_user, get_current_admin_user
 from app.models.user import User, UserRole
 from app.models.annotation import Annotation as AnnotationModel
+from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
 from app.models.snippet import Snippet
 from app.models.recording import Recording
 from app.models.embedding import SnippetSet, SnippetSetStatus
@@ -362,6 +363,135 @@ def delete_dataset(
     return None
 
 
+EXPORT_CSV_HEADERS = [
+    'annotation_id', 'dataset_id', 'snippet_id', 'taxon_id',
+    'resolved_name_snapshot', 'created_at', 'created_by',
+    'recording_file_name', 'snippet_start_time',
+    'snippet_end_time', 'snippet_duration',
+]
+
+# `source_table` is diagnostic — it exposes which of the two label stores a row
+# came from, which is an internal detail annotators have no use for. Admins get
+# it because it is what makes `annotation_id` unambiguous across the two tables.
+EXPORT_ADMIN_ONLY_FIELDS = ['source_table']
+
+
+def _collect_export_rows(
+        db: Session,
+        dataset_id: int,
+        taxon_id: Optional[str] = None,
+        user_id: Optional[int] = None,
+        created_after: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
+) -> List[dict]:
+    """
+    Collect a dataset's USER annotations from both label stores.
+
+    Annotations live in two places and neither is a superset of the other:
+    `al_snippet_annotation` (written by AL-mode feedback, and by the annotate
+    feed) and the canonical `annotations` table (written by the classic hub).
+    Mirroring between them only started in June 2026, so an export from either
+    one alone silently drops history. This unions both, the same way the feed's
+    filters do.
+
+    Rows are deduplicated on (snippet_id, label, user) because the mirroring
+    means most rows are present in both stores. The canonical row wins that tie:
+    it carries a real taxon_id, where the AL store only keeps a single label
+    string doing duty as both. Deduplication also collapses AL rows that differ
+    only by model_checkpoint_id, which the AL-only export emitted more than once.
+
+    Every row carries `source_table`; callers decide whether to expose it.
+    """
+    al_query = (
+        db.query(
+            ALSnippetAnnotation.id.label('annotation_id'),
+            Recording.dataset_id.label('dataset_id'),
+            ALSnippetAnnotation.snippet_id,
+            ALSnippetAnnotation.label.label('taxon_id'),
+            ALSnippetAnnotation.label.label('resolved_name_snapshot'),
+            ALSnippetAnnotation.created_at,
+            ALSnippetAnnotation.user_id.label('created_by'),
+            Recording.file_name.label('recording_file_name'),
+            Snippet.start_time.label('snippet_start_time'),
+            Snippet.end_time.label('snippet_end_time'),
+            Snippet.duration.label('snippet_duration'),
+        )
+        .join(Snippet, ALSnippetAnnotation.snippet_id == Snippet.id)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(Recording.dataset_id == dataset_id)
+        .filter(ALSnippetAnnotation.source == ALAnnotationSource.USER)
+    )
+    if taxon_id:
+        al_query = al_query.filter(ALSnippetAnnotation.label == taxon_id)
+    if user_id:
+        al_query = al_query.filter(ALSnippetAnnotation.user_id == user_id)
+    if created_after:
+        al_query = al_query.filter(ALSnippetAnnotation.created_at >= created_after)
+    if created_before:
+        al_query = al_query.filter(ALSnippetAnnotation.created_at <= created_before)
+
+    canonical_query = (
+        db.query(
+            AnnotationModel.id.label('annotation_id'),
+            Recording.dataset_id.label('dataset_id'),
+            AnnotationModel.snippet_id,
+            AnnotationModel.taxon_id,
+            AnnotationModel.resolved_name_snapshot,
+            AnnotationModel.created_at,
+            AnnotationModel.user_id.label('created_by'),
+            Recording.file_name.label('recording_file_name'),
+            Snippet.start_time.label('snippet_start_time'),
+            Snippet.end_time.label('snippet_end_time'),
+            Snippet.duration.label('snippet_duration'),
+        )
+        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(Recording.dataset_id == dataset_id)
+    )
+    if taxon_id:
+        # The AL store keeps a display label where the canonical table keeps a
+        # namespaced id plus a resolved name, so accept a match on either.
+        canonical_query = canonical_query.filter(
+            (AnnotationModel.taxon_id == taxon_id)
+            | (AnnotationModel.resolved_name_snapshot == taxon_id)
+        )
+    if user_id:
+        canonical_query = canonical_query.filter(AnnotationModel.user_id == user_id)
+    if created_after:
+        canonical_query = canonical_query.filter(AnnotationModel.created_at >= created_after)
+    if created_before:
+        canonical_query = canonical_query.filter(AnnotationModel.created_at <= created_before)
+
+    def _row_to_dict(row, source_table: str) -> dict:
+        return {
+            'annotation_id': row.annotation_id,
+            'dataset_id': row.dataset_id,
+            'snippet_id': row.snippet_id,
+            'taxon_id': row.taxon_id,
+            'resolved_name_snapshot': row.resolved_name_snapshot,
+            'created_at': row.created_at.isoformat() if row.created_at else None,
+            'created_by': row.created_by,
+            'recording_file_name': row.recording_file_name,
+            'snippet_start_time': row.snippet_start_time,
+            'snippet_end_time': row.snippet_end_time,
+            'snippet_duration': row.snippet_duration,
+            'source_table': source_table,
+        }
+
+    merged: dict[tuple, dict] = {}
+    for row in al_query.all():
+        key = (row.snippet_id, row.resolved_name_snapshot, row.created_by)
+        merged.setdefault(key, _row_to_dict(row, 'al_snippet_annotation'))
+    for row in canonical_query.all():
+        key = (row.snippet_id, row.resolved_name_snapshot, row.created_by)
+        merged[key] = _row_to_dict(row, 'annotations')
+
+    return sorted(
+        merged.values(),
+        key=lambda item: (item['snippet_id'], item['resolved_name_snapshot'] or ''),
+    )
+
+
 @router.get("/{dataset_id}/annotations/export")
 def export_dataset_annotations(
         dataset_id: int,
@@ -375,98 +505,52 @@ def export_dataset_annotations(
 ):
     """
     Export all annotations for a dataset with recording and snippet metadata.
-    
+
+    Unions the AL label store and the canonical annotations table (USER labels
+    only; ground-truth imports are excluded), deduplicated per
+    (snippet, label, user). See `_collect_export_rows`.
+
     Supports filtering by:
-    - taxon_id: Filter by specific taxon
+    - taxon_id: Filter by specific taxon (matches an AL label, or a canonical
+      taxon_id or resolved name)
     - user_id: Filter by annotation creator
     - created_after: Filter annotations created after datetime
     - created_before: Filter annotations created before datetime
-    
-    Returns either JSON (default) or CSV format.
+
+    Returns either JSON (default) or CSV format. Admins additionally get a
+    `source_table` column; see EXPORT_ADMIN_ONLY_FIELDS.
     """
     # Verify dataset exists
     svc = DatasetService(db)
     dataset = svc.get_dataset(dataset_id)
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    
-    # Build query with joins
-    query = (
-        db.query(
-            AnnotationModel.id.label('annotation_id'),
-            Recording.dataset_id.label('dataset_id'),
-            AnnotationModel.snippet_id,
-            AnnotationModel.taxon_id,
-            AnnotationModel.resolved_name_snapshot,
-            AnnotationModel.confidence,
-            AnnotationModel.created_at,
-            AnnotationModel.user_id.label('created_by'),
-            Recording.file_name.label('recording_file_name'),
-            Recording.file_path.label('recording_file_path'),
-            Snippet.start_time.label('snippet_start_time'),
-            Snippet.end_time.label('snippet_end_time'),
-            Snippet.duration.label('snippet_duration'),
-        )
-        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
-        .join(Recording, Snippet.recording_id == Recording.id)
-        .filter(Recording.dataset_id == dataset_id)
+
+    annotations_data = _collect_export_rows(
+        db,
+        dataset_id,
+        taxon_id=taxon_id,
+        user_id=user_id,
+        created_after=created_after,
+        created_before=created_before,
     )
-    
-    # Apply filters
-    if taxon_id:
-        query = query.filter(AnnotationModel.taxon_id == taxon_id)
-    if user_id:
-        query = query.filter(AnnotationModel.user_id == user_id)
-    if created_after:
-        query = query.filter(AnnotationModel.created_at >= created_after)
-    if created_before:
-        query = query.filter(AnnotationModel.created_at <= created_before)
-    
-    # Execute query
-    results = query.all()
-    
-    # Convert to dict for easy processing
-    annotations_data = [
-        {
-            'annotation_id': row.annotation_id,
-            'dataset_id': row.dataset_id,
-            'snippet_id': row.snippet_id,
-            'taxon_id': row.taxon_id,
-            'resolved_name_snapshot': row.resolved_name_snapshot,
-            'confidence': row.confidence,
-            'created_at': row.created_at.isoformat() if row.created_at else None,
-            'created_by': row.created_by,
-            'recording_file_name': row.recording_file_name,
-            'recording_file_path': row.recording_file_path,
-            'snippet_start_time': row.snippet_start_time,
-            'snippet_end_time': row.snippet_end_time,
-            'snippet_duration': row.snippet_duration,
-        }
-        for row in results
-    ]
-    
+
+    is_admin = current_user.role == UserRole.ADMIN
+    if not is_admin:
+        for row in annotations_data:
+            for field in EXPORT_ADMIN_ONLY_FIELDS:
+                row.pop(field, None)
+
+    headers = EXPORT_CSV_HEADERS + (EXPORT_ADMIN_ONLY_FIELDS if is_admin else [])
+
     # Return based on format
     if format == "csv":
-        # Generate CSV
-        if not annotations_data:
-            # Return empty CSV with headers
-            csv_headers = [
-                'annotation_id', 'dataset_id', 'snippet_id', 'taxon_id', 
-                'resolved_name_snapshot', 'confidence', 'created_at', 'created_by',
-                'recording_file_name', 'recording_file_path', 'snippet_start_time',
-                'snippet_end_time', 'snippet_duration'
-            ]
-            output = StringIO()
-            writer = csv.DictWriter(output, fieldnames=csv_headers)
-            writer.writeheader()
-            csv_content = output.getvalue()
-        else:
-            output = StringIO()
-            writer = csv.DictWriter(output, fieldnames=annotations_data[0].keys())
-            writer.writeheader()
-            writer.writerows(annotations_data)
-            csv_content = output.getvalue()
-        
+        output = StringIO()
+        writer = csv.DictWriter(output, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(annotations_data)
+        csv_content = output.getvalue()
+
         return Response(
             content=csv_content,
             media_type="text/csv",
@@ -475,8 +559,12 @@ def export_dataset_annotations(
             }
         )
     else:
-        # Return JSON (using Pydantic for validation)
-        return [AnnotationExport(**data) for data in annotations_data]
+        # Validate through the schema, then drop unset keys so non-admins get no
+        # `source_table` at all rather than an explicit null.
+        return [
+            AnnotationExport(**data).model_dump(exclude_none=True)
+            for data in annotations_data
+        ]
 
 
 # ── Quick Labels ────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 Team endpoints
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import List
 from sqlalchemy import func
@@ -22,6 +22,12 @@ from app.models.dataset import Dataset as DatasetModel, user_datasets
 from app.models.recording import Recording
 from app.core.permissions import require_team_owner, require_team_member
 from app.utils.dataset_response import dataset_to_dict
+from app.models.custom_taxonomy import CustomTaxonomy as CustomTaxonomyModel, TaxonomyStatus
+from app.schemas.custom_taxonomy import (
+    CustomTaxonomyResponse, CustomTaxonomyListResponse, PromoteLabelSpaceRequest,
+)
+from app.services.custom_taxonomy_service import CustomTaxonomyServiceError
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 router = APIRouter()
@@ -310,6 +316,105 @@ def get_team_members(
         ))
     
     return members
+
+
+# ── Team label-space versions ───────────────────────────────────────────────
+
+@router.get("/{team_id}/label-space/submissions", response_model=CustomTaxonomyListResponse)
+def list_label_space_submissions(
+    team_id: int,
+    status_filter: Optional[str] = Query(
+        "submitted",
+        alias="status",
+        description="Version status to return: 'submitted' (default), 'active', "
+                    "'archived', or 'all' for every version regardless of status.",
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    List label-space versions for a team (team owner or platform admin).
+
+    By default returns versions awaiting review (status='submitted'). Pass
+    ?status=all to get every version (submitted + active + archived) so the UI
+    can render one table and flag the active one. Each version includes
+    created_by_user_id ("who made it") and its name ("Version N"). Use
+    PUT /teams/{team_id}/active-label-space to promote one.
+    """
+    require_team_owner(current_user, team_id, db)  # admin-bypasses inside
+
+    # Only genuine label-space versions (submit/freeze), never the internal
+    # per-label taxonomies auto-created by Active Learning.
+    query = db.query(CustomTaxonomyModel).filter(
+        CustomTaxonomyModel.team_id == team_id,
+        CustomTaxonomyModel.is_label_space_version.is_(True),
+    )
+    if status_filter and status_filter.lower() != "all":
+        query = query.filter(CustomTaxonomyModel.status == status_filter.lower())
+
+    versions = query.order_by(CustomTaxonomyModel.created_at.desc()).all()
+    return CustomTaxonomyListResponse(
+        taxonomies=[CustomTaxonomyResponse.model_validate(v) for v in versions],
+        total=len(versions),
+    )
+
+
+@router.get("/{team_id}/active-label-space", response_model=Optional[CustomTaxonomyResponse])
+def get_active_label_space(
+    team_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Return the team's active label-space version (any team member).
+
+    Returns null when the team owner has not promoted a version yet.
+    """
+    require_team_member(current_user, team_id, db)
+
+    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+    if not team.active_custom_taxonomy_id:
+        return None
+
+    active = (
+        db.query(CustomTaxonomyModel)
+        .filter(CustomTaxonomyModel.id == team.active_custom_taxonomy_id)
+        .first()
+    )
+    if not active:
+        return None
+    return CustomTaxonomyResponse.model_validate(active)
+
+
+@router.put("/{team_id}/active-label-space", response_model=CustomTaxonomyResponse)
+def promote_active_label_space(
+    team_id: int,
+    request: PromoteLabelSpaceRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Promote a submitted label-space version to the team's active version (owner only).
+
+    Marks the chosen version ACTIVE (making it usable for annotation), points
+    teams.active_custom_taxonomy_id at it, and demotes the previously-active
+    version back to SUBMITTED.
+    """
+    require_team_owner(current_user, team_id, db)
+
+    from app.services.label_space_versions import promote_label_space
+
+    try:
+        active = promote_label_space(
+            team_id=team_id,
+            taxonomy_db_id=request.taxonomy_db_id,
+            db=db,
+        )
+        return CustomTaxonomyResponse.model_validate(active)
+    except CustomTaxonomyServiceError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 @router.post("/{team_id}/invitations", response_model=TeamInvitation, status_code=status.HTTP_201_CREATED)

@@ -407,6 +407,59 @@ class WSSEDService:
             .first()
         )
 
+    def list_training_jobs(self, dataset_id: int) -> List[Dict[str, Any]]:
+        """
+        Every WSSED training job for a dataset, newest first, annotated with the
+        Active Learning registration state the model picker needs.
+        """
+        jobs = (
+            self.db.query(WSSEDTrainingJob)
+            .filter(WSSEDTrainingJob.dataset_id == dataset_id)
+            .order_by(WSSEDTrainingJob.id.desc())
+            .all()
+        )
+        if not jobs:
+            return []
+
+        # A job is "active" when its registered checkpoint is the one its model
+        # family currently points at -- that is the model Active Learning uses.
+        active_checkpoint_ids = {
+            row.active_model_checkpoint_id
+            for row in self.db.query(ALModelFamilyState)
+            .filter(ALModelFamilyState.dataset_id == dataset_id)
+            .all()
+            if row.active_model_checkpoint_id is not None
+        }
+
+        summaries: List[Dict[str, Any]] = []
+        for job in jobs:
+            metrics = job.training_metrics or {}
+            progress = job.progress or {}
+            checkpoint_id = metrics.get("al_checkpoint_id")
+            if not isinstance(checkpoint_id, int):
+                checkpoint_id = None
+
+            summaries.append({
+                "job_id": job.id,
+                "dataset_id": job.dataset_id,
+                "status": job.status.value,
+                "model_name": job.model_name,
+                "model_path": job.model_path,
+                "model_paths": job.model_paths,
+                "created_at": job.created_at,
+                "completed_at": job.completed_at,
+                "total_epochs": progress.get("total_epochs"),
+                "current_epoch": progress.get("current_epoch"),
+                "metrics": metrics or None,
+                "al_checkpoint_id": checkpoint_id,
+                "al_model_family_name": metrics.get("al_model_family_name"),
+                "is_active": checkpoint_id is not None
+                and checkpoint_id in active_checkpoint_ids,
+                "error": job.error_message,
+            })
+
+        return summaries
+
     def get_latest_training_job(self, dataset_id: int) -> Optional[WSSEDTrainingJob]:
         """Most recent WSSED training job for a dataset (by id)."""
         return (
@@ -479,8 +532,19 @@ class WSSEDService:
     # ------------------------------------------------------------------ #
 
     async def register_training_job_for_al(self, job_id: int) -> Dict[str, Any]:
-        """Sync job status from GPU, copy checkpoint locally, register for PAM-AL."""
-        job = await self.update_training_status(job_id)
+        """Sync job status from GPU (when needed), copy checkpoint locally, register for PAM-AL."""
+        job = self._get_training_job(job_id)
+        if job is None:
+            raise ValueError(f"Training job {job_id} not found")
+
+        # Selecting an already-finished job -- e.g. picking an older model out of
+        # the dataset's model list -- needs no GPU round-trip: the DB already
+        # holds its final status and checkpoint paths. Only probe the remote
+        # server when something is still missing, so activating an old model
+        # keeps working after the GPU server has forgotten that job.
+        if job.status != TrainingStatus.COMPLETED or not self._select_preferred_checkpoint_path(job):
+            job = await self.update_training_status(job_id)
+
         if job.status != TrainingStatus.COMPLETED:
             raise ValueError(
                 f"Training job {job_id} is {job.status.value}; only COMPLETED jobs can be registered"
@@ -816,7 +880,24 @@ class WSSEDService:
         job: WSSEDTrainingJob,
         source_path: str,
     ) -> Optional[str]:
-        """Copy GPU checkpoint into PAM_CHECKPOINTS_DIR when the source file is reachable."""
+        """
+        Copy the GPU checkpoint into a job-specific path under PAM_CHECKPOINTS_DIR,
+        decoupling it from the GPU server's shared per-dataset output directory
+        (which a later training run for the same dataset will overwrite in place).
+
+        Re-registering a job (e.g. re-activating an older model from the WSSED
+        picker) must keep working even after that overwrite -- so an existing
+        materialized copy is reused whenever the live GPU-side source is no
+        longer reachable, instead of failing.
+        """
+        dest_dir = (
+            Path(settings.PAM_CHECKPOINTS_DIR)
+            / "wssed_active_learning"
+            / str(job.dataset_id)
+            / f"job_{job.id}"
+        )
+        dest_file = dest_dir / "best_micro_model_segment.pt"
+
         source_file: Optional[Path] = None
         for candidate in self._checkpoint_source_candidates(job, source_path):
             if candidate.is_file():
@@ -824,17 +905,9 @@ class WSSEDService:
                 break
 
         if source_file is None:
-            return None
+            return str(dest_file.resolve()) if dest_file.is_file() else None
 
-        dest_dir = (
-            Path(settings.PAM_CHECKPOINTS_DIR)
-            / "wssed_active_learning"
-            / str(job.dataset_id)
-            / f"job_{job.id}"
-        )
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_file = dest_dir / "best_micro_model_segment.pt"
-
         if not dest_file.exists() or dest_file.stat().st_mtime < source_file.stat().st_mtime:
             shutil.copy2(source_file, dest_file)
 

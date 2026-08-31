@@ -333,6 +333,8 @@ class SnippetService:
             query = query.filter(Snippet.recording_id == recording_id)
 
         status = (annotation_status or "any").lower()
+        # A snippet is "annotated" if it has an AL row (ground-truth import or
+        # AL-mode feedback) OR a canonical annotations row (classic hub).
         has_annotation = (
             self.db.query(ALSnippetAnnotation.id)
             .filter(
@@ -341,6 +343,10 @@ class SnippetService:
                     [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
                 ),
             )
+            .exists()
+        ) | (
+            self.db.query(Annotation.id)
+            .filter(Annotation.snippet_id == Snippet.id)
             .exists()
         )
         if status == "annotated":
@@ -387,6 +393,8 @@ class SnippetService:
         if species:
             wanted_species = {s.strip() for s in species.split(",") if s.strip()}
             if wanted_species:
+                # Match AL rows (ground-truth / AL feedback) OR canonical
+                # annotations by resolved species name.
                 species_match = (
                     self.db.query(ALSnippetAnnotation.id)
                     .filter(
@@ -395,6 +403,13 @@ class SnippetService:
                             [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
                         ),
                         ALSnippetAnnotation.label.in_(wanted_species),
+                    )
+                    .exists()
+                ) | (
+                    self.db.query(Annotation.id)
+                    .filter(
+                        Annotation.snippet_id == Snippet.id,
+                        Annotation.resolved_name_snapshot.in_(wanted_species),
                     )
                     .exists()
                 )

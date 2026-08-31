@@ -123,6 +123,48 @@ class PAMActiveLearningService:
             )
             raise
 
+    def _finalize_retrain_success(
+        self,
+        job_id: int,
+        dataset_id: int,
+        model_family_name: str,
+        checkpoint_id: int,
+        result_metrics: dict,
+    ) -> None:
+        """
+        Mark the retrain job COMPLETED and promote the new checkpoint, on a fresh
+        session.
+
+        ``self.db`` has been held open across the entire train + inference window and run_and_store_inference() commits
+        on it partway through, expiring every ORM attribute.  Finalizing on that
+        session fails with "Can't reconnect until invalid transaction is rolled
+        back", which leaves the job stuck RUNNING and the new checkpoint never
+        promoted even though training, scoring and the prediction writes all
+        succeeded.  save_prediction_rows() already writes on its own session for
+        the same reason.
+        """
+        from app.database import SessionLocal
+
+        try:
+            self.db.rollback()
+        except Exception:
+            logger.warning(
+                "Could not roll back stale retrain session job_id=%d", job_id, exc_info=True
+            )
+
+        final_db = SessionLocal()
+        try:
+            job = final_db.query(ALRetrainJob).filter(ALRetrainJob.id == job_id).one()
+            job.status = ALRetrainStatus.COMPLETED
+            job.completed_at = datetime.now(timezone.utc)
+            job.result_metrics = result_metrics
+            ckpt_h.set_active_family_checkpoint(
+                final_db, dataset_id, model_family_name, checkpoint_id
+            )
+            final_db.commit()
+        finally:
+            final_db.close()
+
     # ==================================================================
     # Checkpoint management
     # ==================================================================
@@ -1262,7 +1304,7 @@ class PAMActiveLearningService:
         do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
         dev = _resolve_device(body.device)
 
-        new_version = f"{parent_ckpt.version}_manual_{int(datetime.now(timezone.utc).timestamp())}"
+        new_version = f"manual_{int(datetime.now(timezone.utc).timestamp())}"
         new_ckpt = ALModelCheckpoint(
             dataset_id=parent_ckpt.dataset_id, model_family_name=parent_ckpt.model_family_name,
             version=new_version, checkpoint_path="", label_config_path=parent_ckpt.label_config_path,
@@ -1318,7 +1360,7 @@ class PAMActiveLearningService:
         if not label_order:
             raise ValueError(f"Parent checkpoint {parent_checkpoint_id} missing label_order.")
 
-        new_version = f"{parent_ckpt.version}_r{int(datetime.now(timezone.utc).timestamp())}"
+        new_version = f"r{int(datetime.now(timezone.utc).timestamp())}"
 
         new_ckpt = ALModelCheckpoint(
             dataset_id=parent_ckpt.dataset_id, model_family_name=parent_ckpt.model_family_name,
@@ -1504,6 +1546,12 @@ class PAMActiveLearningService:
             cp = ckpt_h.make_checkpoint_path(dataset_id, new_ckpt.model_family_name, new_ckpt.version, new_ckpt.id)
             ckpt_h.save_classifier_checkpoint(model, cp, hd, do, label_order)
 
+            # Read now, while the session is still usable: run_and_store_inference()
+            # commits on self.db, which expires every ORM attribute, and re-reading
+            # one afterwards issues a query on a connection that has been held open
+            # across the whole train + inference window.
+            family_name = new_ckpt.model_family_name
+
             new_ckpt.checkpoint_path = cp
             new_ckpt.status = ALModelStatus.AVAILABLE
             new_ckpt.hyperparameters = {**(new_ckpt.hyperparameters or {}),
@@ -1523,16 +1571,16 @@ class PAMActiveLearningService:
                     hyper.get("composite_wu"), hyper.get("composite_wd"), hyper.get("composite_wr"))
                 logger.info("Completed post-retrain inference checkpoint_id=%d", checkpoint_id)
 
-            job.status = ALRetrainStatus.COMPLETED
-            job.completed_at = datetime.now(timezone.utc)
-            job.result_metrics = {"new_checkpoint_id": new_ckpt.id, "new_checkpoint_path": cp,
-                                  "train_samples": int(X_train.shape[0]), "num_classes": int(y_train.shape[1]),
-                                  "excluded_species": excluded_species, "class_counts": class_counts,
-                                  "inference_metrics": inference_metrics, **train_metrics}
-
-            ckpt_h.set_active_family_checkpoint(self.db, dataset_id, new_ckpt.model_family_name, new_ckpt.id)
-            self.db.commit()
-            self.db.refresh(new_ckpt)
+            self._finalize_retrain_success(
+                job_id=job_id,
+                dataset_id=dataset_id,
+                model_family_name=family_name,
+                checkpoint_id=checkpoint_id,
+                result_metrics={"new_checkpoint_id": checkpoint_id, "new_checkpoint_path": cp,
+                                "train_samples": int(X_train.shape[0]), "num_classes": int(y_train.shape[1]),
+                                "excluded_species": excluded_species, "class_counts": class_counts,
+                                "inference_metrics": inference_metrics, **train_metrics},
+            )
             logger.info("Retrain execution completed checkpoint_id=%d job_id=%d", checkpoint_id, job_id)
             return new_ckpt
 

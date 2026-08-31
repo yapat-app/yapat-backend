@@ -52,11 +52,19 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      # Pools are per process and the API runs 4 uvicorn workers (see
+      # docker-compose.override.yml), so this is 4 x (12 + 3) = 60 connections.
+      # Keep the whole stack's worst case under Postgres max_connections (100).
+      - DB_POOL_SIZE=${API_DB_POOL_SIZE:-12}
+      - DB_MAX_OVERFLOW=${API_DB_MAX_OVERFLOW:-3}
+      # Matched to the per-process pool so sync endpoints queue for a thread
+      # rather than pile up waiting on a connection that will never arrive.
+      - API_THREADPOOL_LIMIT=${API_THREADPOOL_LIMIT:-15}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
       - ALGORITHM=HS256
-      - ACCESS_TOKEN_EXPIRE_MINUTES=30
+      - ACCESS_TOKEN_EXPIRE_MINUTES=10080
       - API_STR=/api
       - PROJECT_NAME=YAPAT Backend
       - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}
@@ -67,15 +75,21 @@ services:
       - PAM_CHECKPOINTS_DIR=/app/models_AL/pam/checkpoints
       - PAM_DEFAULT_DEVICE=${PAM_DEFAULT_DEVICE:-cpu}
       - OE_YAPAT_TIMEOUT=120
+      - WSSED_FOCAL_DATA_ROOT=/wssed-focal-data
     ports:
       - "8000:8000"
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - /srv/demos/shared/datasets/AnuraSet:/srv/demos/shared/datasets/AnuraSet:ro
+      - /srv/demos/shared/datasets/FNJV/578_:/srv/demos/shared/datasets/FNJV/578_:ro
+      - /srv/demos/apps/yapat-tool/WSSED-YAPAT/focal-data:/wssed-focal-data:ro
+      - /data/bioacoustics:/data/monitora:ro
       # Mount host directory for species models (read-write so retraining can save checkpoints)
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
       - ${HOST_MODELS_AL:-./models_AL}:/app/assets/models/single_species_models:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
   # Celery worker for asynchronous task processing
   celery-worker:
     build:
@@ -107,6 +121,8 @@ services:
           memory: 1G
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - DB_POOL_SIZE=${WORKER_DB_POOL_SIZE:-2}
+      - DB_MAX_OVERFLOW=${WORKER_DB_MAX_OVERFLOW:-2}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
@@ -132,10 +148,16 @@ services:
       - SCAN_TASK_SOFT_TIME_LIMIT=${SCAN_TASK_SOFT_TIME_LIMIT:-86400}
       # run_embedding's chord fan-out chunk size (see app/tasks/embedding_tasks.py).
       - EMBEDDING_CHORD_CHUNK_SIZE=${EMBEDDING_CHORD_CHUNK_SIZE:-25}
+      - WSSED_FOCAL_DATA_ROOT=/wssed-focal-data
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/bioacoustics:/data/monitora:ro
+      - /srv/demos/shared/datasets/FNJV/578_:/srv/demos/shared/datasets/FNJV/578_:ro
+      - /srv/demos/apps/yapat-tool/WSSED-YAPAT/focal-data:/wssed-focal-data:ro
       # Read-write so Celery worker can save checkpoints when retraining
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # Dedicated Celery worker for PAM Active Learning (training is CPU/GPU-intensive)
@@ -154,11 +176,13 @@ services:
     deploy:
       resources:
         limits:
-          memory: 16G
+          memory: 64G
         reservations:
-          memory: 8G
+          memory: 16G
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - DB_POOL_SIZE=${WORKER_DB_POOL_SIZE:-2}
+      - DB_MAX_OVERFLOW=${WORKER_DB_MAX_OVERFLOW:-2}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
@@ -168,6 +192,7 @@ services:
       - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/bioacoustics:/data/monitora:ro
       # Read-write: worker saves new checkpoint files here after retraining
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
@@ -187,6 +212,8 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://yapat_user:yapat_password@db/yapat
+      - DB_POOL_SIZE=${WORKER_DB_POOL_SIZE:-1}
+      - DB_MAX_OVERFLOW=${WORKER_DB_MAX_OVERFLOW:-1}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY:-secret-key-change-in-production}
@@ -196,7 +223,10 @@ services:
       - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/bioacoustics:/data/monitora:ro
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # Flower monitoring dashboard for Celery

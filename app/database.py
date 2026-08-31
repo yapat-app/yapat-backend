@@ -11,22 +11,11 @@ from app.config import settings
 engine = create_engine(
     settings.DATABASE_URL,
     pool_pre_ping=True,
-    # Per-process pool sized so all DB-connected processes together stay under
-    # Postgres max_connections (100). With the API run at 4 workers plus the 3
-    # celery processes (worker, pam-al worker, beat), 7 processes x 10 = 70,
-    # leaving headroom for admin/psql sessions. Do not raise without checking
-    # (worker_count + 3) * (pool_size + max_overflow) <= max_connections.
-    pool_size=5,   # Connections maintained per process
-    max_overflow=5,  # Extra connections created on demand per process
-    pool_timeout=30,  # Seconds to wait before giving up on getting a connection
+    pool_size=settings.DB_POOL_SIZE,  # per process
+    max_overflow=settings.DB_MAX_OVERFLOW,  # per process
+    pool_timeout=settings.DB_POOL_TIMEOUT,  # Seconds to wait before giving up on getting a connection
     pool_recycle=3600,  # Recycle connections after 1 hour
-    # Safety net against connection leaks: Postgres terminates any session left
-    # idle inside an open transaction beyond this window, returning it to the
-    # pool. Without it, a request that opens a transaction (e.g. the auth user
-    # lookup) but is then stalled leaves the connection checked out forever;
-    # enough of these exhaust the pool and require a manual restart. Legitimate
-    # transactions complete in milliseconds, so 60s only ever reaps leaks.
-    connect_args={"options": "-c idle_in_transaction_session_timeout=60000"},
+    connect_args={"options": "-c idle_in_transaction_session_timeout=60000"},  # Postgres auto-terminates leaked idle-in-transaction sessions after 60s
     echo=False  # Set to True for SQL query logging
 )
 
