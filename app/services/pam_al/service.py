@@ -62,8 +62,6 @@ from app.services.pam_al import _inference_helpers as inf_h
 from app.services.pam_al import _feedback_helpers as fb_h
 from benchmarks.stage_timer import stage_timer
 
-from active_learning.config import NO_EVENT_LABEL
-
 
 logger = logging.getLogger(__name__)
 
@@ -202,18 +200,18 @@ class PAMActiveLearningService:
             metadata_path = None
             label_config_path = None
 
-            annotations_by_snippet = ann_h.get_trusted_annotations(self.db, body.dataset_id)
+            annotations_by_snippet = ann_h.get_trusted_annotations(
+                self.db,
+                body.dataset_id,
+            )
+
             if not annotations_by_snippet:
                 raise ValueError("No user annotations available for bootstrap training.")
 
-            # Exclude the reserved no-event sentinel from the trainable label
-            # space -- confirmed-negative snippets are retained as explicit
-            # all-zero rows below, not as a real class.
             species_list = sorted({
                 label
                 for labels in annotations_by_snippet.values()
                 for label in labels
-                if label != fb_h.NO_EVENT_LABEL
             })
 
             if not species_list:
@@ -221,6 +219,7 @@ class PAMActiveLearningService:
 
         model = ckpt_h.make_model(body.model_type)
 
+        # Hyperparameters not valid for linear classifiers
         is_mlp = body.model_type == ALModelType.PAM_MLP_MULTILABEL
         hidden_dim = body.hidden_dim if is_mlp else None
         dropout = body.dropout if is_mlp else None
@@ -259,51 +258,37 @@ class PAMActiveLearningService:
             self.db.commit()
 
             X, snippet_rows = data_h.load_embeddings(self.db, snippet_set_id, body.embedding_model_id)
-
             if use_metadata_labels:
                 gt_index = data_h.load_ground_truth_metadata(metadata_path, species_list, allowed_subsets=["train"])
-                X_full, y_full, aligned_snippet_ids = data_h.align_embeddings_and_labels(X, snippet_rows, gt_index,
-                                                                                         species_list)
-
-                # Negatives here are structural: rows that matched ground truth
-                # but have all-zero species columns. No sentinel involved.
-                is_negative_mask = (y_full.sum(axis=1) == 0)
-
-                X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
-                    data_h.split_filter_reattach_negatives(
-                        X=X_full, y_full=y_full, snippet_ids=aligned_snippet_ids,
-                        species_candidates=species_list, model=model,
-                        min_samples_per_class=body.min_samples_per_class,
-                        max_samples_per_class=body.max_samples_per_class,
-                        is_negative_mask=is_negative_mask,
-                    )
-                )
+                X_train, y_train, used_snippet_ids = data_h.align_embeddings_and_labels(X, snippet_rows, gt_index, species_list)
             else:
                 snippet_ids = [row["snippet_id"] for row in snippet_rows]
-                keep_indices = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
+
+                keep_indices = [
+                    i for i, sid in enumerate(snippet_ids)
+                    if sid in annotations_by_snippet
+                ]
+
                 if not keep_indices:
                     raise ValueError("No embeddings found for user-annotated snippets.")
 
-                X_kept = X[keep_indices]
-                kept_sids = [snippet_ids[i] for i in keep_indices]
+                X_train = X[keep_indices]
+                used_snippet_ids = [snippet_ids[i] for i in keep_indices]
 
-                y_kept_full = ann_h.build_multihot_from_annotations(kept_sids, species_list, annotations_by_snippet)
-
-                # Negatives here are sentinel-based: an explicit NO_EVENT_LABEL
-                # row written via the feedback/annotation flow.
-                is_negative_mask = np.array([
-                    annotations_by_snippet.get(sid) == {fb_h.NO_EVENT_LABEL} for sid in kept_sids
-                ])
-
-                X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
-                    data_h.split_filter_reattach_negatives(
-                        X=X_kept, y_full=y_kept_full, snippet_ids=kept_sids,
-                        species_candidates=species_list, model=model,
-                        min_samples_per_class=body.min_samples_per_class,
-                        max_samples_per_class=body.max_samples_per_class,
-                        is_negative_mask=is_negative_mask,
-                    )
+                y_train = ann_h.build_multihot_from_annotations(
+                    used_snippet_ids,
+                    species_list,
+                    annotations_by_snippet,
                 )
+
+            X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
+                model.filter_and_balance_classes(
+                    X=X_train, y=y_train, snippet_ids=used_snippet_ids,
+                    species_list=species_list,
+                    min_samples_per_class=body.min_samples_per_class,
+                    max_samples_per_class=body.max_samples_per_class,
+                )
+            )
 
             if y_train.shape[0] == 0:
                 raise ValueError("No training samples remain after alignment.")
@@ -314,16 +299,18 @@ class PAMActiveLearningService:
             model.create_classifier(n_dim=n_dim, num_classes=num_classes, hidden_dim=hidden_dim, dropout=dropout)
             model.to(device)
 
-            train_metrics = model.fit(X=X_train, y=y_train, epochs=body.epochs, learning_rate=body.learning_rate,
-                                      batch_size=body.batch_size, device=device)
+            train_metrics = model.fit(X=X_train, y=y_train, epochs=body.epochs, learning_rate=body.learning_rate, batch_size=body.batch_size, device=device)
 
             checkpoint_path = ckpt_h.make_checkpoint_path(ds.id, body.model_family_name, body.version, model_ckpt.id)
             resolved_lcp = ckpt_h.make_label_config_path(ds.id, body.model_family_name, body.version, model_ckpt.id)
 
             ckpt_h.save_label_config(resolved_lcp, used_species)
             ckpt_h.save_classifier_checkpoint(
-                model=model, checkpoint_path=checkpoint_path,
-                hidden_dim=hidden_dim, dropout=dropout, label_order=used_species,
+                model=model,
+                checkpoint_path=checkpoint_path,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
+                label_order=used_species,
             )
 
             model_ckpt.checkpoint_path = checkpoint_path
@@ -335,8 +322,7 @@ class PAMActiveLearningService:
                 "train_samples": int(X_train.shape[0]), "label_order": used_species,
                 "used_species": used_species, "excluded_species": excluded_species, "class_counts": class_counts,
             }
-            ann_h.store_snippet_annotations(self.db, body.dataset_id, labeled_snippet_ids, y_train, used_species,
-                                            ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
+            ann_h.store_snippet_annotations(self.db, body.dataset_id, labeled_snippet_ids, y_train, used_species, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
 
             inference_metrics = None
             if body.run_inference:
@@ -350,7 +336,7 @@ class PAMActiveLearningService:
             job.completed_at = datetime.now(timezone.utc)
             job.result_metrics = {
                 "new_checkpoint_id": model_ckpt.id, "new_checkpoint_path": checkpoint_path,
-                "label_config_path": body.label_config_path,
+                "label_config_path": body.label_config_path, "aligned_snippet_count": len(used_snippet_ids),
                 "train_samples": int(X_train.shape[0]), "num_classes": int(num_classes),
                 "used_species": used_species, "excluded_species": excluded_species,
                 "class_counts": class_counts, **train_metrics,
@@ -403,12 +389,7 @@ class PAMActiveLearningService:
         self.db.add(feedback)
         self.db.flush()
 
-
-
         if action_value in {"ACCEPT", "MODIFY"} and final_labels:
-
-            if fb_h.is_no_event_feedback(final_labels):
-                final_labels = [NO_EVENT_LABEL]
             ann_h.replace_user_labels_for_snippet(
                 self.db, body.dataset_id, body.snippet_id, final_labels, model_ckpt.id, body.user_id,
             )
@@ -421,9 +402,21 @@ class PAMActiveLearningService:
                     notes=body.notes,
                 )
         elif action_value == "REJECT":
-        # Rejection means: do nothing and just record the feedback event. There will already be no labels in ALSnippetAnnotations table
-            pass
+            # Rejection means: remove the user's AL labels for this snippet so it
+            # becomes "unlabeled" again (no border) unless it has ground-truth.
+            ann_h.delete_user_labels_for_snippet(
+                self.db,
+                dataset_id=body.dataset_id,
+                snippet_id=body.snippet_id,
+                user_id=body.user_id,
+            )
+            self._delete_final_annotations_from_active_learning(
+                snippet_id=body.snippet_id,
+                user_id=body.user_id,
+            )
 
+        self.db.commit()
+        self.db.refresh(feedback)
 
         feedback_count = fb_h.feedback_count_since_retrain(self.db, model_ckpt.id)
         retrain_after = ckpt_h.get_retrain_threshold(self.db, body.dataset_id)
@@ -1083,25 +1076,20 @@ class PAMActiveLearningService:
 
         is_mlp = body.model_type == ALModelType.PAM_MLP_MULTILABEL
         device = _resolve_device(body.device)
+
         hidden_dim = body.hidden_dim if is_mlp else None
         dropout = body.dropout if is_mlp else None
-
-        use_metadata_labels = bool(body.metadata_path and body.label_config_path)
-        metadata_path = os.path.join(DATA_ROOT, body.metadata_path) if use_metadata_labels else None
-        label_config_path = os.path.join(DATA_ROOT, body.label_config_path) if use_metadata_labels else None
 
         model_ckpt = ALModelCheckpoint(
             dataset_id=body.dataset_id, model_family_name=body.model_family_name,
             version=body.version, checkpoint_path="",
-            label_config_path=label_config_path or "",
+            label_config_path=body.label_config_path,
             model_type=body.model_type.value if hasattr(body.model_type, "value") else body.model_type,
             hyperparameters={
-                "training_mode": "cold_start",
-                "use_metadata_labels": use_metadata_labels,
-                "embedding_model_id": body.embedding_model_id,
+                "training_mode": "cold_start", "embedding_model_id": body.embedding_model_id,
                 "snippet_set_id": snippet_set_id,
-                "metadata_path": metadata_path,
-                "label_config_path": label_config_path,
+                "metadata_path": os.path.join(DATA_ROOT, body.metadata_path),
+                "label_config_path": os.path.join(DATA_ROOT, body.label_config_path),
                 "min_samples_per_class": body.min_samples_per_class,
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs, "learning_rate": body.learning_rate,
@@ -1138,74 +1126,39 @@ class PAMActiveLearningService:
         hyper = model_ckpt.hyperparameters or {}
         ds = ckpt_h.get_pam_dataset(self.db, model_ckpt.dataset_id)
         snippet_set_id = hyper["snippet_set_id"]
-        use_metadata_labels = hyper.get("use_metadata_labels", True)  # default True for legacy checkpoints
+        species_list = ckpt_h.load_species_from_label_config(hyper["label_config_path"])
 
         try:
             logger.info(
-                "Starting cold-start execution checkpoint_id=%d job_id=%d dataset_id=%d snippet_set_id=%s use_metadata_labels=%s",
-                checkpoint_id, job_id, model_ckpt.dataset_id, snippet_set_id, use_metadata_labels,
+                "Starting cold-start execution checkpoint_id=%d job_id=%d dataset_id=%d snippet_set_id=%s",
+                checkpoint_id,
+                job_id,
+                model_ckpt.dataset_id,
+                snippet_set_id,
             )
             job.status = ALRetrainStatus.RUNNING
             self.db.commit()
 
             X, snippet_rows = data_h.load_embeddings(self.db, snippet_set_id, hyper["embedding_model_id"])
-            logger.info("Loaded embeddings for cold-start checkpoint_id=%d rows=%d", checkpoint_id, len(snippet_rows))
-
+            logger.info(
+                "Loaded embeddings for cold-start checkpoint_id=%d rows=%d",
+                checkpoint_id,
+                len(snippet_rows),
+            )
+            gt_index = data_h.load_ground_truth_metadata(hyper["metadata_path"], species_list, ["train"])
+            X_train, y_train, used_sids = data_h.align_embeddings_and_labels(X, snippet_rows, gt_index, species_list)
+            logger.info(
+                "Aligned training set for cold-start checkpoint_id=%d samples=%d classes=%d",
+                checkpoint_id,
+                int(y_train.shape[0]),
+                int(y_train.shape[1]),
+            )
             model = ckpt_h.make_model(model_ckpt.model_type)
-
-            if use_metadata_labels:
-                species_list = ckpt_h.load_species_from_label_config(hyper["label_config_path"])
-                gt_index = data_h.load_ground_truth_metadata(hyper["metadata_path"], species_list, ["train"])
-                X_full, y_full, aligned_sids = data_h.align_embeddings_and_labels(X, snippet_rows, gt_index,
-                                                                                  species_list)
-                logger.info(
-                    "Aligned training set for cold-start checkpoint_id=%d samples=%d classes=%d",
-                    checkpoint_id, int(y_full.shape[0]), int(y_full.shape[1]),
-                )
-                is_negative_mask = (y_full.sum(axis=1) == 0)
-
-                X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = (
-                    data_h.split_filter_reattach_negatives(
-                        X=X_full, y_full=y_full, snippet_ids=aligned_sids,
-                        species_candidates=species_list, model=model,
-                        min_samples_per_class=hyper.get("min_samples_per_class", 1),
-                        max_samples_per_class=hyper.get("max_samples_per_class"),
-                        is_negative_mask=is_negative_mask,
-                    )
-                )
-            else:
-                annotations_by_snippet = ann_h.get_trusted_annotations(self.db, model_ckpt.dataset_id)
-                if not annotations_by_snippet:
-                    raise ValueError("No user annotations available for bootstrap training.")
-
-                species_list = sorted({
-                    label for labels in annotations_by_snippet.values()
-                    for label in labels if label != fb_h.NO_EVENT_LABEL
-                })
-                if not species_list:
-                    raise ValueError("No labels found in user annotations.")
-
-                snippet_ids = [row["snippet_id"] for row in snippet_rows]
-                keep_indices = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
-                if not keep_indices:
-                    raise ValueError("No embeddings found for user-annotated snippets.")
-
-                X_kept = X[keep_indices]
-                kept_sids = [snippet_ids[i] for i in keep_indices]
-                y_kept_full = ann_h.build_multihot_from_annotations(kept_sids, species_list, annotations_by_snippet)
-                is_negative_mask = np.array([
-                    annotations_by_snippet.get(sid) == {fb_h.NO_EVENT_LABEL} for sid in kept_sids
-                ])
-
-                X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = (
-                    data_h.split_filter_reattach_negatives(
-                        X=X_kept, y_full=y_kept_full, snippet_ids=kept_sids,
-                        species_candidates=species_list, model=model,
-                        min_samples_per_class=hyper.get("min_samples_per_class", 1),
-                        max_samples_per_class=hyper.get("max_samples_per_class"),
-                        is_negative_mask=is_negative_mask,
-                    )
-                )
+            X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = model.filter_and_balance_classes(
+                X=X_train, y=y_train, snippet_ids=used_sids, species_list=species_list,
+                min_samples_per_class=hyper.get("min_samples_per_class", 1),
+                max_samples_per_class=hyper.get("max_samples_per_class"),
+            )
 
             if y_train.shape[0] == 0:
                 raise ValueError("No training samples remain.")
@@ -1214,6 +1167,7 @@ class PAMActiveLearningService:
 
             n_dim, num_classes = X_train.shape[1], y_train.shape[1]
             is_mlp = model_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or model_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
+
             hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
             do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
             dev = _resolve_device(hyper.get("device"))
@@ -1225,7 +1179,9 @@ class PAMActiveLearningService:
                                       batch_size=int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)), device=dev)
             logger.info(
                 "Finished cold-start model fit checkpoint_id=%d train_samples=%d num_classes=%d",
-                checkpoint_id, int(X_train.shape[0]), int(num_classes),
+                checkpoint_id,
+                int(X_train.shape[0]),
+                int(num_classes),
             )
 
             cp = ckpt_h.make_checkpoint_path(ds.id, model_ckpt.model_family_name, model_ckpt.version, model_ckpt.id)
@@ -1237,14 +1193,11 @@ class PAMActiveLearningService:
             model_ckpt.label_config_path = lcp
             model_ckpt.status = ALModelStatus.AVAILABLE
             model_ckpt.hyperparameters = {**(model_ckpt.hyperparameters or {}),
-                                          "resolved_snippet_set_id": snippet_set_id, "n_dim": n_dim,
-                                          "num_classes": num_classes,
-                                          "train_samples": int(X_train.shape[0]), "label_order": used_sp,
-                                          "used_species": used_sp, "excluded_species": excl_sp,
-                                          "class_counts": class_counts}
+                "resolved_snippet_set_id": snippet_set_id, "n_dim": n_dim, "num_classes": num_classes,
+                "train_samples": int(X_train.shape[0]), "label_order": used_sp,
+                "used_species": used_sp, "excluded_species": excl_sp, "class_counts": class_counts}
 
-            ann_h.store_snippet_annotations(self.db, model_ckpt.dataset_id, labeled_sids, y_train, used_sp,
-                                            ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
+            ann_h.store_snippet_annotations(self.db, model_ckpt.dataset_id, labeled_sids, y_train, used_sp, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
 
             inference_metrics = None
             if hyper.get("run_inference"):
@@ -1258,15 +1211,18 @@ class PAMActiveLearningService:
             job.status = ALRetrainStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
             job.result_metrics = {"new_checkpoint_id": model_ckpt.id, "new_checkpoint_path": cp,
-                                  "train_samples": int(X_train.shape[0]), "num_classes": int(num_classes),
-                                  "used_species": used_sp, "excluded_species": excl_sp,
-                                  "class_counts": class_counts, "inference_metrics": inference_metrics, **train_metrics}
+                "aligned_snippet_count": len(used_sids), "train_samples": int(X_train.shape[0]),
+                "num_classes": int(num_classes), "used_species": used_sp, "excluded_species": excl_sp,
+                "class_counts": class_counts, "inference_metrics": inference_metrics, **train_metrics}
 
-            ckpt_h.set_active_family_checkpoint(self.db, model_ckpt.dataset_id, model_ckpt.model_family_name,
-                                                model_ckpt.id)
+            ckpt_h.set_active_family_checkpoint(self.db, model_ckpt.dataset_id, model_ckpt.model_family_name, model_ckpt.id)
             self.db.commit()
             self.db.refresh(model_ckpt)
-            logger.info("Cold-start execution completed checkpoint_id=%d job_id=%d", checkpoint_id, job_id)
+            logger.info(
+                "Cold-start execution completed checkpoint_id=%d job_id=%d",
+                checkpoint_id,
+                job_id,
+            )
             return model_ckpt
 
         except Exception as e:
@@ -1463,10 +1419,7 @@ class PAMActiveLearningService:
             # full candidate list before min_samples_per_class filtering;
             # filter_and_balance_classes narrows it to `used_species` below,
             # which becomes the final, persisted label_order.
-            species_candidates = sorted({
-                lbl for labels in annotations_by_snippet.values() for lbl in labels
-                if lbl != fb_h.NO_EVENT_LABEL
-            })
+            species_candidates = sorted({lbl for labels in annotations_by_snippet.values() for lbl in labels})
             if not species_candidates:
                 raise ValueError(f"No labels found in trusted annotations for dataset_id={dataset_id}.")
 
@@ -1486,8 +1439,8 @@ class PAMActiveLearningService:
                 )
 
             X_train = X[keep]
-            kept_sids = [snippet_ids[i] for i in keep]
-            y_kept_full = ann_h.build_multihot_from_annotations(kept_sids, species_candidates, annotations_by_snippet)
+            train_sids = [snippet_ids[i] for i in keep]
+            y_train_full = ann_h.build_multihot_from_annotations(train_sids, species_candidates, annotations_by_snippet)
 
             is_mlp = new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
             hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
@@ -1496,27 +1449,22 @@ class PAMActiveLearningService:
 
             model = ckpt_h.make_model(new_ckpt.model_type)
 
-            is_negative_mask = np.array([
-                annotations_by_snippet.get(sid) == {fb_h.NO_EVENT_LABEL} for sid in kept_sids
-            ])
-
             X_train, y_train, labeled_sids, used_species, excluded_species, class_counts = (
-                data_h.split_filter_reattach_negatives(
-                    X=X_train, y_full=y_kept_full, snippet_ids=kept_sids,
+                model.filter_and_balance_classes(
+                    X=X_train, y=y_train_full, snippet_ids=train_sids,
                     species_list=species_candidates,
                     min_samples_per_class=int(hyper.get("min_samples_per_class", 1)),
                     max_samples_per_class=hyper.get("max_samples_per_class"),
-                    is_negative_mask=is_negative_mask,
                 )
             )
 
             if X_train.shape[0] == 0:
                 sample_labels = set()
-                for sid in kept_sids[:5]:
+                for sid in train_sids[:5]:
                     sample_labels.update(annotations_by_snippet.get(sid, set()))
                 raise ValueError(
                     f"No training rows remain after filtering "
-                    f"(train_sids={len(kept_sids)}, species_candidates={species_candidates}, "
+                    f"(train_sids={len(train_sids)}, species_candidates={species_candidates}, "
                     f"sample annotation labels={list(sample_labels)})."
                 )
             if y_train.shape[1] == 0:
@@ -1724,8 +1672,7 @@ class PAMActiveLearningService:
                 composite_wr=DEFAULT_COMPOSITE_WR,
             )
 
-            new_model_ckpt, new_job = self.setup_train_from_scratch(train_body)
-            new_ckpt = self.execute_train_from_scratch(checkpoint_id=new_model_ckpt.id, job_id=new_job.id)
+            new_ckpt = self.train_from_scratch(train_body)
             active_checkpoint_id = new_ckpt.id
 
         return {
