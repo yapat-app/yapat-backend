@@ -176,7 +176,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64G
+          memory: 160G
         reservations:
           memory: 16G
     environment:
