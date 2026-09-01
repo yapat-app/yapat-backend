@@ -365,7 +365,7 @@ def delete_dataset(
 
 EXPORT_CSV_HEADERS = [
     'annotation_id', 'dataset_id', 'snippet_id', 'taxon_id',
-    'resolved_name_snapshot', 'created_at', 'created_by',
+    'resolved_name_snapshot', 'in_scope', 'created_at', 'created_by',
     'recording_file_name', 'snippet_start_time',
     'snippet_end_time', 'snippet_duration',
 ]
@@ -376,10 +376,47 @@ EXPORT_CSV_HEADERS = [
 EXPORT_ADMIN_ONLY_FIELDS = ['source_table']
 
 
+def _resolve_scope_snippet_ids(
+        db: Session,
+        dataset_id: int,
+        labels: List[str],
+) -> set:
+    """
+    Snippet ids in the dataset carrying at least one of `labels`.
+
+    A label may be written three ways depending on which store it landed in: an
+    AL label string, a canonical namespaced taxon_id (`gbif:123`, `custom:uuid`)
+    or a canonical resolved name. Accept any of them, so callers can scope by
+    whatever spelling they have.
+    """
+    al_snippets = (
+        db.query(ALSnippetAnnotation.snippet_id)
+        .join(Snippet, ALSnippetAnnotation.snippet_id == Snippet.id)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(
+            Recording.dataset_id == dataset_id,
+            ALSnippetAnnotation.source == ALAnnotationSource.USER,
+            ALSnippetAnnotation.label.in_(labels),
+        )
+    )
+    canonical_snippets = (
+        db.query(AnnotationModel.snippet_id)
+        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(
+            Recording.dataset_id == dataset_id,
+            (AnnotationModel.taxon_id.in_(labels))
+            | (AnnotationModel.resolved_name_snapshot.in_(labels)),
+        )
+    )
+    return {row[0] for row in al_snippets.all()} | {row[0] for row in canonical_snippets.all()}
+
+
 def _collect_export_rows(
         db: Session,
         dataset_id: int,
         taxon_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
         user_id: Optional[int] = None,
         created_after: Optional[datetime] = None,
         created_before: Optional[datetime] = None,
@@ -401,7 +438,27 @@ def _collect_export_rows(
     only by model_checkpoint_id, which the AL-only export emitted more than once.
 
     Every row carries `source_table`; callers decide whether to expose it.
+
+    `labels` (or its single-value alias `taxon_id`) scopes the export at snippet
+    level: a snippet matching any requested label contributes *all* of its
+    annotations, with `in_scope` marking the rows that matched. Around one
+    snippet in ten here carries a species label alongside a recording condition
+    (wind, rain, stream, artefact), and a row-level filter would drop that
+    context. `user_id` and the date filters narrow the emitted rows only —
+    scope is resolved from labels alone, so "snippets labelled X, showing only
+    user Y's annotations" does not collapse into "snippets where Y applied X".
     """
+    scope_labels = [label for label in (labels or []) if label]
+    if taxon_id:
+        scope_labels.append(taxon_id)
+
+    scope_snippet_ids = (
+        _resolve_scope_snippet_ids(db, dataset_id, scope_labels)
+        if scope_labels else None
+    )
+    if scope_snippet_ids is not None and not scope_snippet_ids:
+        return []
+
     al_query = (
         db.query(
             ALSnippetAnnotation.id.label('annotation_id'),
@@ -421,8 +478,8 @@ def _collect_export_rows(
         .filter(Recording.dataset_id == dataset_id)
         .filter(ALSnippetAnnotation.source == ALAnnotationSource.USER)
     )
-    if taxon_id:
-        al_query = al_query.filter(ALSnippetAnnotation.label == taxon_id)
+    if scope_snippet_ids is not None:
+        al_query = al_query.filter(ALSnippetAnnotation.snippet_id.in_(scope_snippet_ids))
     if user_id:
         al_query = al_query.filter(ALSnippetAnnotation.user_id == user_id)
     if created_after:
@@ -448,12 +505,9 @@ def _collect_export_rows(
         .join(Recording, Snippet.recording_id == Recording.id)
         .filter(Recording.dataset_id == dataset_id)
     )
-    if taxon_id:
-        # The AL store keeps a display label where the canonical table keeps a
-        # namespaced id plus a resolved name, so accept a match on either.
+    if scope_snippet_ids is not None:
         canonical_query = canonical_query.filter(
-            (AnnotationModel.taxon_id == taxon_id)
-            | (AnnotationModel.resolved_name_snapshot == taxon_id)
+            AnnotationModel.snippet_id.in_(scope_snippet_ids)
         )
     if user_id:
         canonical_query = canonical_query.filter(AnnotationModel.user_id == user_id)
@@ -462,13 +516,21 @@ def _collect_export_rows(
     if created_before:
         canonical_query = canonical_query.filter(AnnotationModel.created_at <= created_before)
 
+    scope_set = set(scope_labels)
+
     def _row_to_dict(row, source_table: str) -> dict:
+        # With no scope every row is trivially in scope, which keeps the column
+        # — and so the CSV shape — the same for every export.
+        in_scope = not scope_set or bool(
+            {row.taxon_id, row.resolved_name_snapshot} & scope_set
+        )
         return {
             'annotation_id': row.annotation_id,
             'dataset_id': row.dataset_id,
             'snippet_id': row.snippet_id,
             'taxon_id': row.taxon_id,
             'resolved_name_snapshot': row.resolved_name_snapshot,
+            'in_scope': in_scope,
             'created_at': row.created_at.isoformat() if row.created_at else None,
             'created_by': row.created_by,
             'recording_file_name': row.recording_file_name,
@@ -496,7 +558,16 @@ def _collect_export_rows(
 def export_dataset_annotations(
         dataset_id: int,
         format: Literal["json", "csv"] = Query("json", description="Export format: json or csv"),
-        taxon_id: Optional[str] = Query(None, description="Filter by taxon_id"),
+        taxon_id: Optional[str] = Query(None, description="Single-label scope; alias for `labels`"),
+        labels: Optional[str] = Query(
+            None,
+            description=(
+                "Comma-separated label scope. Snippets matching any of these "
+                "labels are exported in full, including their other labels "
+                "(marked in_scope=false). Matches an AL label, a canonical "
+                "taxon_id, or a resolved species name."
+            ),
+        ),
         user_id: Optional[int] = Query(None, description="Filter by user_id (created_by)"),
         created_after: Optional[datetime] = Query(None, description="Filter annotations created after this datetime"),
         created_before: Optional[datetime] = Query(None, description="Filter annotations created before this datetime"),
@@ -511,8 +582,12 @@ def export_dataset_annotations(
     (snippet, label, user). See `_collect_export_rows`.
 
     Supports filtering by:
-    - taxon_id: Filter by specific taxon (matches an AL label, or a canonical
-      taxon_id or resolved name)
+    - labels: Comma-separated label scope, resolved at snippet level — a snippet
+      matching any of them is exported with all of its annotations, `in_scope`
+      marking which rows matched. Preserves co-occurring context (a species
+      alongside wind/rain/stream), which a row-level filter would drop.
+    - taxon_id: Single-label alias for `labels`; supplying both is rejected
+    - user_id: Filter by annotation creator
     - user_id: Filter by annotation creator
     - created_after: Filter annotations created after datetime
     - created_before: Filter annotations created before datetime
@@ -526,10 +601,20 @@ def export_dataset_annotations(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
+    if taxon_id and labels:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either `labels` or `taxon_id`, not both.",
+        )
+
+    scope_labels = [part.strip() for part in labels.split(",")] if labels else []
+    scope_labels = [part for part in scope_labels if part]
+
     annotations_data = _collect_export_rows(
         db,
         dataset_id,
         taxon_id=taxon_id,
+        labels=scope_labels,
         user_id=user_id,
         created_after=created_after,
         created_before=created_before,
