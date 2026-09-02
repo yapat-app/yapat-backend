@@ -518,6 +518,13 @@ def _collect_export_rows(
 
     scope_set = set(scope_labels)
 
+    # The two stores have independent id sequences, so a bare row id collides
+    # across them -- annotations 6..23 and al_snippet_annotation 6..23 are
+    # unrelated rows. Exports were emitting the same annotation_id twice for
+    # different labels, and `source_table` (the only disambiguator) is stripped
+    # for non-admins. Prefixing makes the id unique for every reader.
+    ID_PREFIXES = {'annotations': 'ann', 'al_snippet_annotation': 'al'}
+
     def _row_to_dict(row, source_table: str) -> dict:
         # With no scope every row is trivially in scope, which keeps the column
         # — and so the CSV shape — the same for every export.
@@ -525,7 +532,7 @@ def _collect_export_rows(
             {row.taxon_id, row.resolved_name_snapshot} & scope_set
         )
         return {
-            'annotation_id': row.annotation_id,
+            'annotation_id': f"{ID_PREFIXES[source_table]}:{row.annotation_id}",
             'dataset_id': row.dataset_id,
             'snippet_id': row.snippet_id,
             'taxon_id': row.taxon_id,
