@@ -628,6 +628,10 @@ class PAMActiveLearningService:
           that fit that constraint.
         - Creating a minimal CustomTaxonomy per code yields a valid, resolvable ID
           and keeps dataset stats consistent.
+
+        The row is reused per label code, scoped to the team when the dataset has
+        one and to the dataset itself when it does not. Reuse is the whole point:
+        a taxon id that changes per annotation is not an identifier.
         """
         code = (code or "").strip()
         if not code:
@@ -644,17 +648,27 @@ class PAMActiveLearningService:
                 .first()
             )
             team_id = membership.team_id if membership else None
-        # If we cannot associate this dataset/user with a team (e.g. admin-created
-        # dataset + user has no team memberships), we still return a valid custom
-        # taxon id so we can store canonical final annotations and dataset stats
-        # reflect AL progress. In that edge case, taxonomy resolution will not
-        # be available (no CustomTaxonomy row), but stats and exports work.
+
+        # A dataset with no team is a supported mode, not an edge case: an admin
+        # may create one (see `create_dataset`), and four of five datasets here
+        # are that shape. This used to return a fresh uuid per call, which meant
+        # every annotation of the same species got its own "taxon_id" resolving
+        # to nothing -- 768 ids for 9 labels on one dataset, and `group_by
+        # (taxon_id)` in any downstream analysis silently produced one group per
+        # row. Such labels are scoped to the dataset instead, which is what
+        # `custom_taxonomies.dataset_id` exists for.
         if team_id is None:
-            return f"custom:{uuid.uuid4()}"
+            scope = (CustomTaxonomy.team_id.is_(None),
+                     CustomTaxonomy.dataset_id == dataset_id)
+        else:
+            # Team-scoped labels stay team-wide (dataset_id NULL): a team's label
+            # code means the same thing across every dataset it owns.
+            scope = (CustomTaxonomy.team_id == team_id,
+                     CustomTaxonomy.dataset_id.is_(None))
 
         existing = (
             self.db.query(CustomTaxonomy)
-            .filter(CustomTaxonomy.team_id == team_id, CustomTaxonomy.name == code)
+            .filter(*scope, CustomTaxonomy.name == code)
             .first()
         )
         if existing:
@@ -676,6 +690,7 @@ class PAMActiveLearningService:
         row = CustomTaxonomy(
             taxonomy_id=taxonomy_id,
             team_id=team_id,
+            dataset_id=dataset_id if team_id is None else None,
             created_by_user_id=user_id,
             name=code,
             description=f"Auto-created label code from AL for dataset {dataset_id}",
