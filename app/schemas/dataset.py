@@ -135,3 +135,30 @@ class AvailableDatasetPathsResponse(BaseModel):
 class RecordingLocationsResponse(BaseModel):
     """Distinct site/locality values parsed from recording file names."""
     locations: List[str]
+
+
+class RecordingMetadataLocationCount(BaseModel):
+    """A distinct (original) location value in an uploaded CSV and its row count."""
+    name: str
+    count: int
+
+
+class RecordingMetadataPreview(BaseModel):
+    """Dry-run summary of a recording-metadata CSV upload (no DB writes)."""
+    total_rows: int
+    matched: int
+    affected_recordings: int
+    unmatched: int
+    unmatched_file_names: List[str]
+    columns_present: List[str]
+    unique_locations: List[RecordingMetadataLocationCount]
+    errors: List[str]
+
+
+class RecordingMetadataImportResult(BaseModel):
+    """Result of committing a recording-metadata CSV import."""
+    total_rows: int
+    matched: int
+    unmatched: int
+    unmatched_file_names: List[str]
+    errors: List[str]

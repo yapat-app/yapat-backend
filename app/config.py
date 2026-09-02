@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     FPV_TSNE_MAX_POINTS: int = 50_000
     FPV_ISOMAP_MAX_POINTS: int = 15_000
 
+    # Recording-metadata CSV import (app/api/datasets.py metadata endpoints)
+    RECORDING_METADATA_MAX_UPLOAD_BYTES: int = 20 * 1024 * 1024  # 20 MB
+    RECORDING_METADATA_MAX_ROWS: int = 200_000
+
     # PAM Active Learning
     PAM_AUTO_RETRAIN_THRESHOLD: int = 5  # Auto-retrain after N feedback events
     PAM_DEFAULT_DEVICE: str = "cpu"      # Override with PAM_DEFAULT_DEVICE=cuda on GPU deployments

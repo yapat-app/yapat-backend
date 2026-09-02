@@ -7,7 +7,19 @@ from datetime import datetime
 from io import StringIO
 import csv
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
+import json
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+    Query,
+    Response,
+    UploadFile,
+    File,
+    Form,
+)
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
 from sqlalchemy.exc import IntegrityError
@@ -28,6 +40,8 @@ from app.schemas.dataset import (
     AvailableDatasetPath,
     AvailableDatasetPathsResponse,
     RecordingLocationsResponse,
+    RecordingMetadataPreview,
+    RecordingMetadataImportResult,
     SpeciesFolder,
     AudioFile
 )
@@ -37,8 +51,13 @@ from app.schemas.quick_label import (
     QuickLabelEntryResponse,
 )
 from app.services.dataset_service import DatasetService
+from app.services.recording_metadata_import_service import (
+    RecordingMetadataImportService,
+)
+from app.utils.recording_metadata_csv import MetadataCsvError
 from app.utils.dataset_response import dataset_to_dict
 from app.tasks.processing_tasks import process_dataset
+from app.config import settings
 
 router = APIRouter()
 
@@ -478,6 +497,105 @@ def export_dataset_annotations(
     else:
         # Return JSON (using Pydantic for validation)
         return [AnnotationExport(**data) for data in annotations_data]
+
+
+# ── Recording metadata CSV import ─────────────────────────────────────────────
+
+def _read_metadata_upload(file: UploadFile) -> bytes:
+    """Shared validation for the two metadata-CSV endpoints. Returns the bytes."""
+    name = (file.filename or "").lower()
+    if not (name.endswith(".csv") or (file.content_type or "").startswith("text/")):
+        raise HTTPException(status_code=400, detail="Upload must be a .csv file")
+
+    file_bytes = file.file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(file_bytes) > settings.RECORDING_METADATA_MAX_UPLOAD_BYTES:
+        limit_mb = settings.RECORDING_METADATA_MAX_UPLOAD_BYTES / (1024 * 1024)
+        raise HTTPException(
+            status_code=400, detail=f"File exceeds the {limit_mb:.0f} MB upload limit"
+        )
+    return file_bytes
+
+
+def _require_dataset_access(
+    svc: DatasetService, dataset_id: int, current_user: User
+):
+    dataset = svc.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if not svc.user_can_access_dataset(current_user, dataset_id):
+        raise HTTPException(status_code=403, detail="Not authorized for this dataset")
+    return dataset
+
+
+@router.post(
+    "/{dataset_id}/recordings/metadata/preview",
+    response_model=RecordingMetadataPreview,
+)
+def preview_recording_metadata(
+    dataset_id: int,
+    file: UploadFile = File(..., description="Recording-metadata CSV to preview"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Dry-run a recording-metadata CSV: parse, match rows to recordings by
+    ``file_name``, and return counts + distinct locations. No DB writes.
+    """
+    svc = DatasetService(db)
+    _require_dataset_access(svc, dataset_id, current_user)
+
+    file_bytes = _read_metadata_upload(file)
+    import_svc = RecordingMetadataImportService(db)
+    try:
+        return import_svc.preview(dataset_id, file_bytes)
+    except MetadataCsvError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{dataset_id}/recordings/metadata/import",
+    response_model=RecordingMetadataImportResult,
+)
+def import_recording_metadata(
+    dataset_id: int,
+    file: UploadFile = File(..., description="Recording-metadata CSV to import"),
+    location_overrides: Optional[str] = Form(
+        None,
+        description='Optional JSON map of original location -> replacement, e.g. {"Alto Cuieiras":"Reserva Ducke"}',
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Commit a recording-metadata CSV: normalize + merge into
+    ``Recording.extra_metadata`` (merge, never replace), applying optional
+    location renames.
+    """
+    svc = DatasetService(db)
+    _require_dataset_access(svc, dataset_id, current_user)
+
+    overrides: dict = {}
+    if location_overrides:
+        try:
+            overrides = json.loads(location_overrides)
+        except (json.JSONDecodeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="location_overrides is not valid JSON"
+            )
+        if not isinstance(overrides, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="location_overrides must be a JSON object (original -> replacement)",
+            )
+
+    file_bytes = _read_metadata_upload(file)
+    import_svc = RecordingMetadataImportService(db)
+    try:
+        return import_svc.import_metadata(dataset_id, file_bytes, overrides)
+    except MetadataCsvError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── Quick Labels ────────────────────────────────────────────────────────────
