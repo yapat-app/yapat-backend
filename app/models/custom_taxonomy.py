@@ -2,7 +2,10 @@
 Custom Taxonomy models
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean, UniqueConstraint
+from sqlalchemy import (
+    Column, Integer, String, DateTime, ForeignKey, Text, Boolean,
+    UniqueConstraint, Index, text,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -26,6 +29,18 @@ class CustomTaxonomy(Base):
         # Naming is scoped per (team, dataset): a team-level label space and a
         # dataset-scoped (e.g. admin-created) one may independently use "Version N".
         UniqueConstraint("team_id", "dataset_id", "name", name="uq_custom_taxonomy_team_dataset_name"),
+        # The constraint above cannot police dataset-scoped rows: SQL treats
+        # NULLs as distinct, so (NULL, 4, "SCIALT") never collides with itself.
+        # AL reuses these rows per label code, and two concurrent annotations of
+        # a new code would otherwise each insert one -- reintroducing the
+        # per-annotation taxon ids this scoping exists to prevent.
+        Index(
+            "uq_custom_taxonomy_dataset_name",
+            "dataset_id", "name",
+            unique=True,
+            postgresql_where=text("team_id IS NULL"),
+            sqlite_where=text("team_id IS NULL"),
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)

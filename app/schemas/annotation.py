@@ -81,11 +81,15 @@ class Annotation(AnnotationBase):
 class AnnotationExport(BaseModel):
     """Annotation with recording and snippet metadata for export"""
     # Annotation fields
-    annotation_id: int
+    # Prefixed with its source table (`ann:12`, `al:12`) because the two label
+    # stores have independent id sequences -- a bare int collides across them.
+    annotation_id: str
     dataset_id: int
     snippet_id: int
-    taxon_id: str
-    resolved_name_snapshot: str
+    # The database calls this `resolved_name_snapshot` -- it records how the
+    # value was obtained. The export calls it what a reader wants it to be.
+    # `taxon_id` is not exported; see EXPORT_CSV_HEADERS for why.
+    label: str
     created_at: datetime
     created_by: int
     # Which table the row came from: 'al_snippet_annotation' or 'annotations'.
