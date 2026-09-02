@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.models.annotation import Annotation
+
 from app.models.pam_active_learning import (
     ALFeedbackAction,
     ALFeedbackEvent,
@@ -105,15 +107,50 @@ def sync_feedback_events_to_annotations(db: Session, checkpoint_id: int) -> int:
 
     # Events are ordered by created_at asc, so iterating in order means the
     # last assignment per (snippet_id, user_id) wins — correct for re-feedback.
+    # An event that clears the labels (REJECT, or an empty MODIFY) must be
+    # allowed to win too: skipping it here let an older labelled event stand,
+    # which resurrected labels annotators had deliberately removed.
     latest_by_snippet_user: dict[tuple[int, int | None], ALFeedbackEvent] = {}
     for event in events:
-        if event.action not in {ALFeedbackAction.ACCEPT, ALFeedbackAction.MODIFY}:
-            continue
-        if not (event.final_labels or []):
+        if event.action not in {
+            ALFeedbackAction.ACCEPT,
+            ALFeedbackAction.MODIFY,
+            ALFeedbackAction.REJECT,
+        }:
             continue
         latest_by_snippet_user[(event.snippet_id, event.user_id)] = event
 
-    for event in latest_by_snippet_user.values():
+    if not latest_by_snippet_user:
+        return len(events)
+
+    # The classic hub writes to `annotations` without producing feedback events,
+    # so a snippet relabelled there has no event recording the correction. The
+    # cutoff is the last completed retrain, which can be months back, and
+    # replaying those stale events over newer hub decisions silently reverted
+    # them. Anything the annotator touched more recently than the event wins.
+    latest_canonical: dict[tuple[int, int | None], datetime] = {}
+    rows = (
+        db.query(
+            Annotation.snippet_id,
+            Annotation.user_id,
+            func.max(Annotation.created_at),
+        )
+        .filter(Annotation.snippet_id.in_([sid for sid, _ in latest_by_snippet_user]))
+        .group_by(Annotation.snippet_id, Annotation.user_id)
+        .all()
+    )
+    for snippet_id, user_id, created_at in rows:
+        latest_canonical[(snippet_id, user_id)] = created_at
+
+    for key, event in latest_by_snippet_user.items():
+        canonical_at = latest_canonical.get(key)
+        if (
+            canonical_at is not None
+            and event.created_at is not None
+            and canonical_at > event.created_at
+        ):
+            continue
+
         replace_user_labels_for_snippet(
             db=db,
             dataset_id=event.dataset_id,
