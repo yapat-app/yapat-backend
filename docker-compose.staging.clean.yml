@@ -56,6 +56,8 @@ services:
       WSSED_GPU_SERVER_URL: ${WSSED_GPU_SERVER_URL:-http://172.17.0.1:8004}
       WSSED_TIMEOUT: ${WSSED_TIMEOUT:-300}
       DATA_ROOT: /data
+      FPV_UMAP_MAX_POINTS: 200000
+      NVIDIA_VISIBLE_DEVICES: all
       OE_YAPAT_SERVICE_URL: http://host.docker.internal:8002
       OE_YAPAT_TIMEOUT: 120
     ports:
@@ -63,6 +65,7 @@ services:
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/yapat-datasets:/data/bulk:ro
       - /srv/demos/apps/yapat-tool/WSSED-YAPAT/focal-data:/wssed-focal-data:ro
     restart: unless-stopped
     deploy:
@@ -91,11 +94,21 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       SECRET_KEY: ${SECRET_KEY}
       DATA_ROOT: /data
+      FPV_UMAP_MAX_POINTS: 200000
+      NVIDIA_VISIBLE_DEVICES: all
       OE_YAPAT_SERVICE_URL: http://host.docker.internal:8002
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/yapat-datasets:/data/bulk:ro
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   celery-worker-pam-al:
     build:
@@ -115,10 +128,12 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       SECRET_KEY: ${SECRET_KEY}
       DATA_ROOT: /data
+      NVIDIA_VISIBLE_DEVICES: all
       OE_YAPAT_SERVICE_URL: http://host.docker.internal:8002
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/yapat-datasets:/data/bulk:ro
     restart: unless-stopped
     deploy:
       resources:
@@ -150,6 +165,7 @@ services:
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - /data/yapat-datasets:/data/bulk:ro
     restart: unless-stopped
 
   flower:

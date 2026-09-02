@@ -25,9 +25,25 @@ RUN grep -v '^torch' requirements.txt > /tmp/req-base.txt && \
 # Install torch: CPU uses --no-deps to skip ~900 MB of NVIDIA CUDA runtime libs
 # that are unnecessary for CPU inference. GPU gets the full CUDA build.
 RUN if [ "$DEVICE" = "gpu" ]; then \
-        pip install torch --index-url https://download.pytorch.org/whl/cu121; \
+        pip install torch --index-url https://download.pytorch.org/whl/cu128; \
     else \
         pip install torch --no-deps --index-url https://download.pytorch.org/whl/cpu; \
+    fi
+
+# Install TensorFlow: GPU build ships CUDA kernels via tensorflow[and-cuda] wheels
+# (no host CUDA install required — all CUDA libs bundled). CPU build is ~1 GB lighter.
+RUN if [ "$DEVICE" = "gpu" ]; then \
+        pip install "tensorflow[and-cuda]"; \
+    else \
+        pip install tensorflow-cpu; \
+    fi
+
+# For GPU: register the pip-bundled CUDA libs with the dynamic linker so TF can
+# dlopen them without a hardcoded LD_LIBRARY_PATH. Computed dynamically so it
+# works regardless of Python version or package layout changes.
+RUN if [ "$DEVICE" = "gpu" ]; then \
+        python3 -c "import site,glob,os;paths=[p for sp in site.getsitepackages() for p in glob.glob(os.path.join(sp,'nvidia','*','lib'))];print('\n'.join(paths))" \
+            > /etc/ld.so.conf.d/nvidia-pip.conf && ldconfig; \
     fi
 
 # Copy application code
