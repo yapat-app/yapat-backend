@@ -16,6 +16,7 @@ from app.models.recording import Recording
 from app.models.user import User
 from app.schemas.snippet import Snippet
 from app.services.audio_service import audio_service
+from app.services.snippet_service import SnippetService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,8 +25,9 @@ router = APIRouter()
 @router.get("/", response_model=List[Snippet])
 def read_snippets(
     dataset_id: int,
-    snippet_set_id: int,
+    snippet_set_id: Optional[int] = None,
     recording_id: Optional[int] = None,
+    q: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
@@ -33,40 +35,57 @@ def read_snippets(
 ):
     """
     List snippets belonging to a dataset and a snippet_set.
-    Optionally filter further by recording.
+
+    Optionally filter further by recording, and search by snippet-ID prefix
+    via ``q`` (used by the annotation feed's "Search snippets by ID" tool).
+
+    - ``snippet_set_id`` may be omitted, in which case the dataset's default
+      snippet set is resolved and validated (the same resolution the feed uses).
+      When provided explicitly it must belong to the dataset and be READY.
+    - ``q`` matches ``Snippet.id`` cast to text with ``LIKE '<q>%'``; a
+      non-digit ``q`` returns ``[]``. Results with ``q`` are ordered by
+      ``Snippet.id`` ascending. The full ``Snippet`` schema is returned so the
+      frontend can build the feed with no follow-up request.
     """
 
-    # Validate snippet_set belongs to dataset and is READY
-    ss = (
-        db.query(SnippetSet)
-        .filter(
-            SnippetSet.id == snippet_set_id,
-            SnippetSet.dataset_id == dataset_id,
+    service = SnippetService(db)
+
+    if snippet_set_id is None:
+        # No explicit set: reuse the feed's default-set resolution (validates READY).
+        try:
+            snippet_set_id = service._resolve_and_validate_snippet_set(dataset_id, None)
+        except ValueError as e:
+            msg = str(e)
+            if "not found" in msg.lower():
+                raise HTTPException(status_code=404, detail=msg)
+            if "not ready" in msg.lower() or "pending" in msg.lower():
+                raise HTTPException(status_code=409, detail=msg)
+            raise HTTPException(status_code=400, detail=msg)
+    else:
+        # Explicit set: validate it belongs to the dataset and is READY.
+        ss = (
+            db.query(SnippetSet)
+            .filter(
+                SnippetSet.id == snippet_set_id,
+                SnippetSet.dataset_id == dataset_id,
+            )
+            .first()
         )
-        .first()
-    )
-    if not ss:
-        raise HTTPException(404, detail="SnippetSet not found for this dataset")
-    if ss.status != SnippetSetStatus.READY:
-        raise HTTPException(
-            400,
-            detail=f"SnippetSet is not READY (status: {ss.status.value}). Only READY SnippetSets can be queried."
-        )
+        if not ss:
+            raise HTTPException(404, detail="SnippetSet not found for this dataset")
+        if ss.status != SnippetSetStatus.READY:
+            raise HTTPException(
+                400,
+                detail=f"SnippetSet is not READY (status: {ss.status.value}). Only READY SnippetSets can be queried."
+            )
 
-    query = (
-        db.query(SnippetModel)
-        .join(SnippetModel.recording)
-        .filter(SnippetModel.snippet_set_id == snippet_set_id)
-    )
-
-    if recording_id is not None:
-        query = query.filter(SnippetModel.recording_id == recording_id)
-
-    return (
-        query.order_by(SnippetModel.start_time)
-        .offset(skip)
-        .limit(limit)
-        .all()
+    return service.list_snippets(
+        dataset_id=dataset_id,
+        snippet_set_id=snippet_set_id,
+        recording_id=recording_id,
+        q=q,
+        skip=skip,
+        limit=limit,
     )
 
 
