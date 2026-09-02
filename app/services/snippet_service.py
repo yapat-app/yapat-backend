@@ -4,6 +4,7 @@ Snippet retrieval and utility service (for SnippetSet-based architecture)
 
 import random
 from typing import List, Optional
+from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
 
 from app.models.snippet import Snippet
@@ -29,13 +30,22 @@ class SnippetService:
         dataset_id: int,
         snippet_set_id: int,
         recording_id: Optional[int] = None,
+        q: Optional[str] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> List[Snippet]:
         """
         Retrieve snippets belonging to a dataset and snippet_set.
 
-        Optionally filter by recording.
+        Optionally filter by recording and by snippet-ID prefix.
+
+        Args:
+            q: Optional snippet-ID prefix search. Casts ``Snippet.id`` to text
+                and matches ``LIKE '<q>%'``. A non-digit ``q`` matches nothing
+                (returns ``[]``). When ``q`` is provided, results are ordered by
+                ``Snippet.id`` ascending for a stable, predictable dropdown;
+                otherwise the default ``start_time`` ordering is preserved so
+                existing callers are unaffected.
         """
 
         query = (
@@ -49,7 +59,17 @@ class SnippetService:
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
 
-        return query.order_by(Snippet.start_time).offset(skip).limit(limit).all()
+        if q is not None:
+            # Snippet-ID prefix search. IDs are integers, so a non-digit query
+            # can never match -- short-circuit to an empty result.
+            if not q.isdigit():
+                return []
+            query = query.filter(cast(Snippet.id, String).like(f"{q}%"))
+            order_by = Snippet.id.asc()
+        else:
+            order_by = Snippet.start_time
+
+        return query.order_by(order_by).offset(skip).limit(limit).all()
 
     # ---------------------------------------------------------
     # Annotation Utility
