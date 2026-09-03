@@ -3,8 +3,9 @@ Snippet retrieval and utility service (for SnippetSet-based architecture)
 """
 
 import random
+from datetime import datetime, timezone
 from typing import List, Optional
-from sqlalchemy import String, cast
+from sqlalchemy import String, cast, case, func
 from sqlalchemy.orm import Session
 
 from app.models.snippet import Snippet
@@ -352,6 +353,11 @@ class SnippetService:
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
 
+        # Set below only for annotation_status='annotated' (optionally
+        # narrowed by species); None means default id-ascending order.
+        recency_order_by = None
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
         status = (annotation_status or "any").lower()
         # A snippet is "annotated" if it has an AL row (ground-truth import or
         # AL-mode feedback) OR a canonical annotations row (classic hub).
@@ -371,6 +377,32 @@ class SnippetService:
         )
         if status == "annotated":
             query = query.filter(has_annotation)
+
+            # Rank by most recent trusted annotation (any label); overridden
+            # below if `species` narrows this to specific labels.
+            latest_al_at = (
+                self.db.query(func.max(ALSnippetAnnotation.created_at))
+                .filter(
+                    ALSnippetAnnotation.snippet_id == Snippet.id,
+                    ALSnippetAnnotation.source.in_(
+                        [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
+                    ),
+                )
+                .correlate(Snippet)
+                .scalar_subquery()
+            )
+            latest_ann_at = (
+                self.db.query(func.max(Annotation.created_at))
+                .filter(Annotation.snippet_id == Snippet.id)
+                .correlate(Snippet)
+                .scalar_subquery()
+            )
+            al_latest = func.coalesce(latest_al_at, epoch)
+            ann_latest = func.coalesce(latest_ann_at, epoch)
+            recency_order_by = case(
+                (al_latest > ann_latest, al_latest),
+                else_=ann_latest,
+            ).desc()
         elif status == "unannotated":
             query = query.filter(~has_annotation)
         elif status not in ("any", ""):
@@ -435,9 +467,51 @@ class SnippetService:
                 )
                 query = query.filter(species_match)
 
-        all_snippets = query.all()
-        random.shuffle(all_snippets)
-        return all_snippets[skip:skip + limit]
+                # Rank by most recent annotation matching one of the
+                # requested species; more specific, so overrides the plain
+                # "annotated" ordering above.
+                latest_al_label_at = (
+                    self.db.query(func.max(ALSnippetAnnotation.created_at))
+                    .filter(
+                        ALSnippetAnnotation.snippet_id == Snippet.id,
+                        ALSnippetAnnotation.source.in_(
+                            [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
+                        ),
+                        ALSnippetAnnotation.label.in_(wanted_species),
+                    )
+                    .correlate(Snippet)
+                    .scalar_subquery()
+                )
+                latest_annotation_label_at = (
+                    self.db.query(func.max(Annotation.created_at))
+                    .filter(
+                        Annotation.snippet_id == Snippet.id,
+                        Annotation.resolved_name_snapshot.in_(wanted_species),
+                    )
+                    .correlate(Snippet)
+                    .scalar_subquery()
+                )
+                al_latest = func.coalesce(latest_al_label_at, epoch)
+                ann_latest = func.coalesce(latest_annotation_label_at, epoch)
+                latest_matching_label_at = case(
+                    (al_latest > ann_latest, al_latest),
+                    else_=ann_latest,
+                )
+                recency_order_by = latest_matching_label_at.desc()
+
+        # Deterministic order (no shuffle): id ascending by default, or
+        # recency-first when annotated/species set recency_order_by above.
+        order_by_clauses = (
+            (recency_order_by, Snippet.id.asc())
+            if recency_order_by is not None
+            else (Snippet.id.asc(),)
+        )
+        return (
+            query.order_by(*order_by_clauses)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
 
     def get_feed_similarity(
         self,
