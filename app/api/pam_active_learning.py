@@ -122,13 +122,26 @@ def get_checkpoint_species(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Return the species list stored in the checkpoint's label config file."""
+    """Return the species this checkpoint can actually predict.
+
+    ``hyperparameters.label_order`` is authoritative: it is the label set the
+    classifier head was trained against, recomputed on every retrain.  The label
+    config file is only a fallback for older checkpoints that predate it --
+    retrain inherits the parent's ``label_config_path`` without rewriting the
+    file, so that file can describe an ancestor's label set rather than this
+    checkpoint's.  This mirrors the precedence used at inference time.
+    """
     from app.services.pam_al._checkpoint_helpers import load_species_from_label_config
 
     svc = PAMActiveLearningService(db)
     ckpt = svc._get_checkpoint(checkpoint_id)
     if ckpt is None:
         raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found.")
+
+    label_order = (ckpt.hyperparameters or {}).get("label_order")
+    if label_order:
+        return [str(s) for s in label_order]
+
     if not ckpt.label_config_path:
         raise HTTPException(status_code=404, detail="Checkpoint has no label config path.")
     try:

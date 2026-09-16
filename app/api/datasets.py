@@ -758,18 +758,23 @@ def get_quick_labels(
     # Fallback: pre-populate from active checkpoint species list (read-only, not persisted)
     checkpoints = list_active_family_checkpoints(db, dataset_id=dataset_id)
     for ckpt in checkpoints:
-        if ckpt.label_config_path:
+        # hyperparameters.label_order is the label set the checkpoint was actually
+        # trained on; label_config_path is only a fallback for older checkpoints,
+        # since retrain inherits the parent's path without rewriting the file.
+        species = (ckpt.hyperparameters or {}).get("label_order")
+        if not species and ckpt.label_config_path:
             try:
                 species = load_species_from_label_config(ckpt.label_config_path)
-                return [
-                    {
-                        "taxon_id": f"local:{s.lower().replace(' ', '_')[:120]}",
-                        "display_name": s,
-                    }
-                    for s in species
-                ]
             except Exception:
                 continue
+        if species:
+            return [
+                {
+                    "taxon_id": f"local:{str(s).lower().replace(' ', '_')[:120]}",
+                    "display_name": str(s),
+                }
+                for s in species
+            ]
     return []
 
 
