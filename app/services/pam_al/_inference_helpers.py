@@ -312,6 +312,18 @@ def save_prediction_rows(
         )
 
 
+def _score_matrix(rows: Sequence[ALInferenceRow]) -> np.ndarray:
+    """[n, 4] float32 (uncertainty, diversity, density, composite); NaN = unscored."""
+    out = np.full((len(rows), 4), np.nan, dtype=np.float32)
+    for i, row in enumerate(rows):
+        if row.composite_score is None and row.uncertainty is None:
+            continue
+        for j, value in enumerate((row.uncertainty, row.diversity, row.density, row.composite_score)):
+            if value is not None:
+                out[i, j] = value
+    return out
+
+
 def _iter_batches(n: int, batch_size: int) -> Iterable[tuple[int, int]]:
     for start in range(0, n, batch_size):
         yield start, min(n, start + batch_size)
@@ -448,6 +460,20 @@ def run_and_store_inference(
         invalidate_inference_feed(model_ckpt.id)
     except Exception:
         pass
+
+    # Publish the explore-store model layer straight from the tensors, so the
+    # Annotation Hub never has to parse millions of JSON prediction rows.
+    from app.services.explore.hooks import publish_model_layer_from_inference
+
+    publish_model_layer_from_inference(
+        db,
+        checkpoint_id=model_ckpt.id,
+        snippet_ids=snippet_ids,
+        probs=probs.detach().cpu().numpy(),
+        preds=preds.detach().cpu().numpy(),
+        score_matrix=_score_matrix(rows),
+        label_order=label_order,
+    )
 
     logger.info(
         "pam-al inference: DB upsert done in %.2fs",

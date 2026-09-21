@@ -32,10 +32,14 @@ RUN if [ "$DEVICE" = "gpu" ]; then \
 
 # Install TensorFlow: GPU build ships CUDA kernels via tensorflow[and-cuda] wheels
 # (no host CUDA install required — all CUDA libs bundled). CPU build is ~1 GB lighter.
+# tensorflow-cpu only publishes x86_64 wheels; on arm64 (e.g. Apple Silicon
+# local builds) the regular tensorflow wheel is already CPU-only.
 RUN if [ "$DEVICE" = "gpu" ]; then \
         pip install "tensorflow[and-cuda]"; \
-    else \
+    elif [ "$(uname -m)" = "x86_64" ]; then \
         pip install tensorflow-cpu; \
+    else \
+        pip install tensorflow; \
     fi
 
 # For GPU: register the pip-bundled CUDA libs with the dynamic linker so TF can

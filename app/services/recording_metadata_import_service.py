@@ -110,6 +110,11 @@ class RecordingMetadataImportService:
         if pending:
             self.db.commit()
 
+        if updated_ids:
+            from app.services.explore.hooks import invalidate_dataset_base
+
+            invalidate_dataset_base(self.db, dataset_id)
+
         return {
             "total_rows": parsed.total_rows,
             "matched": len(updated_ids),

@@ -23,6 +23,7 @@ celery_app = Celery(
         "app.tasks.processing_tasks",
         "app.tasks.pam_al_tasks",
         "app.tasks.wssed_tasks",
+        "app.tasks.explore_tasks",
     ]
 )
 

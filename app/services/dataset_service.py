@@ -635,6 +635,9 @@ class DatasetService:
             updated += 1
         if updated:
             self.db.commit()
+            from app.services.explore.hooks import invalidate_dataset_base
+
+            invalidate_dataset_base(self.db, dataset_id)
         return updated
 
     def list_recording_locations(self, dataset_id: int) -> List[str]:

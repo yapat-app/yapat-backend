@@ -431,6 +431,9 @@ class VISService:
             invalidate_fpv(body.dataset_id, body.embedding_model_id)
         except Exception:
             pass
+        from app.services.explore.hooks import invalidate_projection
+
+        invalidate_projection(body.dataset_id, body.embedding_model_id)
 
         read_db = SessionLocal()
         try:

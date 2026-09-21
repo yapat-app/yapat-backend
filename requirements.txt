@@ -27,7 +27,7 @@ redis>=4.5.2,<5.0.0
 flower==2.0.1
 soundfile>=0.12
 librosa>=0.10.2
-matplotlib==3.8.2
+matplotlib>=3.9.2,<4  # 3.8.x wheels are built against NumPy 1.x
 setuptools>=65.0.0
 pytest
 # tensorflow installed conditionally by Dockerfile based on DEVICE (cpu/gpu)

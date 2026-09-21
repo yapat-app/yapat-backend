@@ -20,6 +20,7 @@ from app.api import (
     custom_taxonomy,
     datasets,
     embeddings,
+    explore,
     feed,
     invitations,
     pam_active_learning,
@@ -90,6 +91,7 @@ app.include_router(reference_links.router, prefix=f"{settings.API_STR}/reference
 app.include_router(visualisations.router, prefix=f"{settings.API_STR}/visualisations", tags=["visualisations"])
 app.include_router(wssed.router, prefix=f"{settings.API_STR}/wssed", tags=["wssed"])
 app.include_router(study_events.router, prefix=f"{settings.API_STR}/study-events", tags=["study-events"])
+app.include_router(explore.router, prefix=f"{settings.API_STR}/explore", tags=["explore"])
 
 
 @app.get("/")

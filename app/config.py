@@ -106,6 +106,22 @@ class Settings(BaseSettings):
     FPV_TSNE_MAX_POINTS: int = 50_000
     FPV_ISOMAP_MAX_POINTS: int = 15_000
 
+    # Server-side explore store (app/services/explore). Columnar numpy layers
+    # memory-mapped by every API worker so the feed, score histograms and
+    # projection are answered over the whole dataset without shipping it to
+    # the browser. The directory must be shared by the API and Celery
+    # containers (it lives under the mounted /app volume by default).
+    EXPLORE_CACHE_DIR: str = "models_AL/explore_cache"
+    # Build missing layers synchronously in the request instead of via
+    # Celery. For tests and local development without a worker only.
+    EXPLORE_BUILD_INLINE: bool = False
+    # Upper bound on projection points sent to the browser per method; above
+    # it a grid-stratified sample plus density grids are returned instead.
+    EXPLORE_PROJECTION_MAX_POINTS: int = 200_000
+    # How often (seconds) a worker re-checks the annotation-table fingerprint
+    # before trusting its cached labels layer.
+    EXPLORE_LABELS_RECHECK_SECONDS: float = 1.0
+
     # Recording-metadata CSV import (app/api/datasets.py metadata endpoints)
     RECORDING_METADATA_MAX_UPLOAD_BYTES: int = 20 * 1024 * 1024  # 20 MB
     RECORDING_METADATA_MAX_ROWS: int = 200_000
