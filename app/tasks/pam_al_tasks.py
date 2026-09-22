@@ -236,8 +236,10 @@ def pam_al_create_predictions(self, job_id: int, inference_body: dict):
 
         self.update_state(state="RUNNING", meta={"job_id": job_id})
 
-        # Force refresh so the job is deterministic.
-        inference_body = {**(inference_body or {}), "force_refresh": True}
+        # This task exists only to run inference, so ask for it explicitly. It is
+        # dispatched when predictions are missing or a caller set force_inference;
+        # in both cases re-running the model is the point of the job.
+        inference_body = {**(inference_body or {}), "force_inference": True}
 
         # Service method expects a request object with attribute access.
         from app.schemas.pam_active_learning import ALRunInferenceRequest

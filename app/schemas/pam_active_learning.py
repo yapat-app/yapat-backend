@@ -111,7 +111,20 @@ class ALRunInferenceRequest(BaseModel):
 
     force_refresh: bool = Field(
         default=False,
-        description="If true, rerun inference even if predictions already exist",
+        description=(
+            "If true, drop the cached response payload and rebuild it from the stored "
+            "predictions. Does NOT re-run the model -- use force_inference for that."
+        ),
+    )
+
+    force_inference: bool = Field(
+        default=False,
+        description=(
+            "If true, re-run model inference over the whole snippet set even when "
+            "predictions already exist. Expensive: a full pass over 3M snippets costs "
+            "~18 minutes. Only set this when the predictions themselves are stale "
+            "(changed hyperparameters, corrupted rows) -- not to refresh a cache."
+        ),
     )
 
     sample_suggestion: bool = Field(

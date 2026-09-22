@@ -813,7 +813,12 @@ class PAMActiveLearningService:
             body.snippet_set_id,
         )
 
-        if not predictions_exist or body.force_refresh:
+        # Only re-run the model when the predictions are actually missing, or when
+        # the caller explicitly asks for inference. `force_refresh` used to land
+        # here too, which meant a UI cache refresh triggered a full pass over the
+        # snippet set -- ~18 minutes at 3M snippets, for rows that already existed.
+        # See docs/superpowers/plans/2026-09-22-retrain-scaling-fixes.md (R1).
+        if not predictions_exist or body.force_inference:
             X, snippet_rows = data_h.load_embeddings(self.db, body.snippet_set_id, embedding_model_id)
 
             # End the read transaction now: load_model_from_checkpoint below is a

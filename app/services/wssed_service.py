@@ -676,7 +676,10 @@ class WSSEDService:
             "snippet_set_id": int(snippet_set_id),
             "device": "cpu",
             "threshold": hyperparameters.get("threshold", 0.5),
-            "force_refresh": True,
+            # A freshly trained WSSED checkpoint has no predictions yet, and any it
+            # inherits are from a different model — the point here is to run the
+            # model, not to refresh a cached payload.
+            "force_inference": True,
             "sample_suggestion": False,
         }
 

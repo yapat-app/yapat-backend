@@ -260,12 +260,17 @@ def get_or_create_predictions(
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Return cached predictions for the active checkpoint.
+    Return stored predictions for the active checkpoint.
 
-    If predictions are already cached and force_refresh=False, return them immediately
-    (sync, fast). If predictions are missing or force_refresh=True, dispatch an async
-    Celery job and return an ALJobDispatch so the client can poll for completion.
-    When no checkpoint exists, random snippet suggestions are returned immediately.
+    Predictions present -> served synchronously from the stored rows (fast).
+    Predictions missing, or force_inference=True -> an async Celery job is dispatched
+    and an ALJobDispatch returned for polling.
+    No checkpoint -> random snippet suggestions, immediately.
+
+    force_refresh only drops the cached response payload and rebuilds it from the
+    stored rows; it never re-runs the model. That distinction matters at scale: a
+    full inference pass over 3M snippets costs ~18 minutes, and the hub sends
+    force_refresh after every retrain.
     """
     service = PAMActiveLearningService(db)
     try:
@@ -292,14 +297,25 @@ def get_or_create_predictions(
                         ),
                     )
 
-        if not body.force_refresh and model_ckpt is not None:
+        if not body.force_inference and model_ckpt is not None:
             # Only use sync path when predictions are already cached — avoids blocking
             # the request thread on full ML inference over large datasets.
+            #
+            # `force_refresh` deliberately does NOT reach the async path: it means
+            # "my cached payload is stale", not "re-run the model". The hub sends it
+            # after every retrain (useHubALSession checkpoint poller), and routing it
+            # to inference made each retrain redo its own work — a second full pass
+            # over the snippet set, ~18 min at 3M, for predictions the retrain had
+            # just written. We drop the cached payload and rebuild it from the stored
+            # rows instead. See docs/superpowers/plans/2026-09-22-retrain-scaling-fixes.md.
             predictions_cached = inf_h.predictions_exist_for_checkpoint_and_snippet_set(
                 db, model_ckpt.id, body.snippet_set_id
             )
             if predictions_cached:
                 from app.services import inference_feed_cache
+
+                if body.force_refresh:
+                    inference_feed_cache.invalidate_inference_feed(model_ckpt.id)
 
                 # The whole-dataset prediction payload (sample_suggestion=False)
                 # is large and identical across users. Serve it straight from
@@ -311,11 +327,17 @@ def get_or_create_predictions(
                 if payload_cacheable:
                     hyper = model_ckpt.hyperparameters or {}
                     effective_scope = body.label_scope or hyper.get("used_species") or None
-                    cached_json = inference_feed_cache.get_cached_full_payload(
-                        model_ckpt.id,
-                        body.snippet_set_id,
-                        body.min_confidence,
-                        effective_scope,
+                    # Skip the read on force_refresh: we just invalidated it, and the
+                    # caller is telling us what it holds is stale.
+                    cached_json = (
+                        None
+                        if body.force_refresh
+                        else inference_feed_cache.get_cached_full_payload(
+                            model_ckpt.id,
+                            body.snippet_set_id,
+                            body.min_confidence,
+                            effective_scope,
+                        )
                     )
                     if cached_json is not None:
                         return Response(content=cached_json, media_type="application/json")
@@ -357,7 +379,7 @@ def get_or_create_predictions(
             # No checkpoint: return random snippet suggestions immediately.
             return service.get_or_create_predictions(body)
 
-        # Async path: predictions missing or force_refresh — dispatch to worker.
+        # Async path: predictions genuinely missing, or force_inference — dispatch to worker.
 
         job = ALRetrainJob(
             model_checkpoint_id=model_ckpt.id,
