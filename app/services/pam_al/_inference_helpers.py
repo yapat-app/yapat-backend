@@ -19,13 +19,14 @@ from app.models.snippet import Snippet
 from app.models.pam_active_learning import ALPrediction, ALSnippetAnnotation
 from app.schemas.pam_active_learning import ALInferenceRow
 
-from active_learning.samplers import composite, zscore, ALQueryScorer
 from active_learning.config import (
     DEFAULT_INFERENCE_THRESHOLD,
     DEFAULT_DENSITY_K,
     DEFAULT_COMPOSITE_WU,
     DEFAULT_COMPOSITE_WD,
     DEFAULT_COMPOSITE_WR,
+    DIVERSITY_NUM_CENTERS,
+    DIVERSITY_UPDATE_K,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,55 +83,79 @@ def build_inference_rows(
     wu: float,
     wd: float,
     wr: float,
+    ann_index=None,
 ) -> list[ALInferenceRow]:
     """
     Compute prediction rows for all snippets and attach acquisition scores
     for unlabeled snippets.
+
+    Neighbour lookups go through ``ann_index``, an HNSW index over *every*
+    snippet in the set (labelled included) -- see ``_ann_index_cache``. Scores
+    are unchanged: labelled hits are dropped from each result so density and
+    diversity still range over the unlabelled set only. Working in matrix-row
+    space also avoids the ``embeddings[unlabeled_indices]`` copy, which was
+    12.3 GB at 3M snippets and the largest single contributor to peak memory.
+
+    ``ann_index=None`` builds one for this call -- the same cost as before,
+    just not reused.
     """
+    from app.services.pam_al import _ann_index_cache, _scoring
 
-    unlabeled_indices = [i for i, sid in enumerate(snippet_ids) if sid not in labeled_snippet_ids]
-    labeled_indices = [i for i, sid in enumerate(snippet_ids) if sid in labeled_snippet_ids]
+    features = embeddings.detach().cpu().numpy()
+    n = features.shape[0]
 
-    z_u = embeddings[unlabeled_indices] if unlabeled_indices else torch.empty(
-        (0, embeddings.shape[1]), device=embeddings.device
-    )
-    z_l = embeddings[labeled_indices] if labeled_indices else torch.empty(
-        (0, embeddings.shape[1]), device=embeddings.device
-    )
+    ids_array = np.asarray(snippet_ids)
+    is_labeled = np.isin(ids_array, np.fromiter(labeled_snippet_ids, dtype=ids_array.dtype, count=len(labeled_snippet_ids))) \
+        if labeled_snippet_ids else np.zeros(n, dtype=bool)
+    unlabeled_rows = np.flatnonzero(~is_labeled).astype(np.int64)
+    labeled_rows = np.flatnonzero(is_labeled).astype(np.int64)
 
-    # One scorer per cycle: caches z_u_np/z_l_np and the shared HNSW indices
-    # so uncertainty()/diversity()/density() below don't each redo the same
-    # L2-normalize and index-build work. Each method is called once, raw
-    # (the scorer's default), and the z-scored version composite() needs is
-    # derived from that same raw tensor via zscore() rather than calling the
-    # method again -- avoids recomputing entropy (uncertainty isn't cached).
-    scorer = ALQueryScorer(z_u, z_l)
+    if ann_index is None:
+        ann_index = _ann_index_cache.build_transient_index(features)
 
-    uncertainty_raw = (
-        scorer.uncertainty(probs[unlabeled_indices])
-        if unlabeled_indices
-        else torch.empty(0, device=embeddings.device)
-    )
-    uncertainty_z = zscore(uncertainty_raw)
-    logger.info(
-        "pam-al inference: uncertainty min value = %.4f max value = %.4f",
-        uncertainty_raw.min().item(), uncertainty_raw.max().item(),
-    )
+    probs_np = probs.detach().cpu().numpy()
+    preds_np = preds.detach().cpu().numpy()
+
+    uncertainty_raw = _scoring.compute_uncertainty(probs_np[unlabeled_rows])
+    uncertainty_z = _scoring.zscore(uncertainty_raw)
+    if uncertainty_raw.size:
+        logger.info(
+            "pam-al inference: uncertainty min value = %.4f max value = %.4f",
+            float(uncertainty_raw.min()), float(uncertainty_raw.max()),
+        )
 
     start = time.perf_counter()
-    diversity_raw = scorer.diversity()
-    diversity_z = zscore(diversity_raw)
-    logger.info(
-        "pam-al inference: diversity min value = %.4f max value = %.4f",
-        diversity_raw.min().item(), diversity_raw.max().item(),
-    )
+    nearest_labeled = _scoring.compute_nearest_labeled(features, unlabeled_rows, labeled_rows)
+    if labeled_rows.size == 0:
+        # Cold start: nothing to be diverse *from*, so every point is equally
+        # uninformative on this axis and the greedy redundancy pass would only
+        # invent differences. Matches ALQueryScorer.diversity's n_l == 0 branch.
+        diversity_raw = np.ones(unlabeled_rows.shape[0], dtype=np.float32)
+    else:
+        diversity_raw = _scoring.compute_diversity(
+            ann_index,
+            features,
+            unlabeled_rows,
+            is_labeled,
+            nearest_labeled,
+            num_centers=DIVERSITY_NUM_CENTERS,
+            update_k=DIVERSITY_UPDATE_K,
+        )
+    diversity_z = _scoring.zscore(diversity_raw)
+    if diversity_raw.size:
+        logger.info(
+            "pam-al inference: diversity min value = %.4f max value = %.4f",
+            float(diversity_raw.min()), float(diversity_raw.max()),
+        )
+
     mid = time.perf_counter()
-    density_raw = scorer.density()
-    density_z = zscore(density_raw)
-    logger.info(
-        "pam-al inference: density min value = %.4f max value = %.4f",
-        density_raw.min().item(), density_raw.max().item(),
-    )
+    density_raw = _scoring.compute_density(ann_index, features, unlabeled_rows, is_labeled, density_k)
+    density_z = _scoring.zscore(density_raw)
+    if density_raw.size:
+        logger.info(
+            "pam-al inference: density min value = %.4f max value = %.4f",
+            float(density_raw.min()), float(density_raw.max()),
+        )
     end = time.perf_counter()
     logger.info(
         "pam-al inference: acquisition scoring diversity=%.4fs density=%.4fs total=%.4fs",
@@ -138,40 +163,30 @@ def build_inference_rows(
         end - mid,
         end - start,
     )
-    composite_scores_u = composite(
-        uncertainty_scores=uncertainty_z,
-        diversity_scores=diversity_z,
-        density_scores=density_z,
-        wu=wu,
-        wd=wd,
-        wr=wr,
+
+    composite_scores_u = _scoring.compute_composite(
+        uncertainty_z, diversity_z, density_z, wu=wu, wd=wd, wr=wr
     )
-    logger.info(
-        "pam-al inference: composite min value = %.4f max value = %.4f",
-        composite_scores_u.min().item(), composite_scores_u.max().item(),
-    )
+    if composite_scores_u.size:
+        logger.info(
+            "pam-al inference: composite min value = %.4f max value = %.4f",
+            float(composite_scores_u.min()), float(composite_scores_u.max()),
+        )
 
-    uncertainty_full = [None] * len(snippet_ids)
-    diversity_full = [None] * len(snippet_ids)
-    density_full = [None] * len(snippet_ids)
-    composite_full = [None] * len(snippet_ids)
+    uncertainty_full = np.full(n, np.nan, dtype=np.float64)
+    diversity_full = np.full(n, np.nan, dtype=np.float64)
+    density_full = np.full(n, np.nan, dtype=np.float64)
+    composite_full = np.full(n, np.nan, dtype=np.float64)
+    uncertainty_full[unlabeled_rows] = uncertainty_raw
+    diversity_full[unlabeled_rows] = diversity_raw
+    density_full[unlabeled_rows] = density_raw
+    composite_full[unlabeled_rows] = composite_scores_u
 
-    if unlabeled_indices:
-        uncertainty_values = uncertainty_raw.detach().cpu().numpy()
-        diversity_values = diversity_raw.detach().cpu().numpy()
-        density_values = density_raw.detach().cpu().numpy()
-        composite_values = composite_scores_u.detach().cpu().numpy()
-
-        for pos, idx in enumerate(unlabeled_indices):
-            uncertainty_full[idx] = float(uncertainty_values[pos])
-            diversity_full[idx] = float(diversity_values[pos])
-            density_full[idx] = float(density_values[pos])
-            composite_full[idx] = float(composite_values[pos])
+    def _score(values, i):
+        value = values[i]
+        return None if np.isnan(value) else float(value)
 
     rows: list[ALInferenceRow] = []
-    probs_np = probs.detach().cpu().numpy()
-    preds_np = preds.detach().cpu().numpy()
-
     for i, snippet_id in enumerate(snippet_ids):
         pred_indices = np.flatnonzero(preds_np[i] > 0)
         pred_labels = [label_order[j] for j in pred_indices]
@@ -185,10 +200,10 @@ def build_inference_rows(
                 embedding=None,
                 predicted_labels=pred_labels,
                 predicted_probabilities=prob_dict,
-                uncertainty=uncertainty_full[i],
-                diversity=diversity_full[i],
-                density=density_full[i],
-                composite_score=composite_full[i],
+                uncertainty=_score(uncertainty_full, i),
+                diversity=_score(diversity_full, i),
+                density=_score(density_full, i),
+                composite_score=_score(composite_full, i),
             )
         )
 
@@ -329,6 +344,59 @@ def _iter_batches(n: int, batch_size: int) -> Iterable[tuple[int, int]]:
         yield start, min(n, start + batch_size)
 
 
+def _acquisition_index(db: Session, model_ckpt, X, features, snippet_rows):
+    """The cached HNSW index for acquisition scoring, or None for a transient one.
+
+    The index is only cacheable when the space its neighbours live in is stable
+    across retrains. That holds when ``extract_features`` returns the input
+    embeddings unchanged (the linear classifier) and not when it returns
+    hidden-layer activations that move with the weights (the MLP). Rather than
+    branching on model_type, compare the two arrays -- exact, cheap, and still
+    correct if another architecture is added later.
+    """
+    from app.services.pam_al._ann_index_cache import load_or_build_index
+    from app.services.pam_al._embedding_cache import compute_embedding_fingerprint
+
+    try:
+        feats = features.detach().cpu().numpy()
+        if feats.shape != tuple(X.shape):
+            logger.info("ann index: feature space differs from embeddings; using transient index")
+            return None
+        probe = min(64, feats.shape[0])
+        if not np.array_equal(feats[:probe], np.asarray(X[:probe], dtype=feats.dtype)):
+            logger.info("ann index: features are not the stored embeddings; using transient index")
+            return None
+
+        hyper = getattr(model_ckpt, "hyperparameters", None) or {}
+        embedding_model_id = hyper.get("embedding_model_id")
+        if embedding_model_id is None or not snippet_rows:
+            return None
+
+        # All snippets in one inference run belong to one set, so the first row
+        # identifies it. Cheaper than threading the id through five call sites.
+        snippet_set_id = db.query(Snippet.snippet_set_id).filter(
+            Snippet.id == int(snippet_rows[0]["snippet_id"])
+        ).scalar()
+        if snippet_set_id is None:
+            return None
+
+        fingerprint = compute_embedding_fingerprint(db, int(snippet_set_id), int(embedding_model_id))
+        if fingerprint["count"] != int(X.shape[0]):
+            # The matrix is not the whole snippet set (a subset run, or the
+            # embeddings changed under us) -- a cached index would not line up
+            # with these row indices.
+            logger.info(
+                "ann index: matrix rows=%s != embeddings count=%s; using transient index",
+                X.shape[0], fingerprint["count"],
+            )
+            return None
+
+        return load_or_build_index(X, int(snippet_set_id), int(embedding_model_id), fingerprint)
+    except Exception:
+        logger.warning("ann index: could not resolve a cached index; using transient", exc_info=True)
+        return None
+
+
 def run_and_store_inference(
     db: Session,
     dataset_id: int,
@@ -430,6 +498,8 @@ def run_and_store_inference(
 
     t1 = time.perf_counter()
 
+    ann_index = _acquisition_index(db, model_ckpt, X, features, snippet_rows)
+
     rows = build_inference_rows(
         probs=probs,
         preds=preds,
@@ -441,6 +511,7 @@ def run_and_store_inference(
         wu=wu,
         wd=wd,
         wr=wr,
+        ann_index=ann_index,
     )
 
     logger.info(

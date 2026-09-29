@@ -38,3 +38,6 @@ models_AL/
 
 # All experiment files
 notebook*
+
+# Machine-specific deployment overrides (hardware sizing, GPU pinning)
+docker-compose.nova.yml
