@@ -65,6 +65,13 @@ class DatasetUpdate(BaseModel):
         return v
 
 
+class ActiveEmbeddingJob(BaseModel):
+    id: int
+    status: str
+    snippet_set_id: int
+    started_at: Optional[datetime] = None
+
+
 class Dataset(DatasetBase):
     id: int
     team_id: Optional[int] = None
@@ -80,6 +87,9 @@ class Dataset(DatasetBase):
     updated_at: Optional[datetime] = None
     recording_count: Optional[int] = None  # Number of recordings in this dataset
     is_ready_for_feed: bool = False  # True when default snippet set exists and is READY
+    # Newest pending/running embedding job, so the UI can show progress (and hide
+    # "Generate Embeddings") after a refresh without a per-card job-list call.
+    active_embedding_job: Optional[ActiveEmbeddingJob] = None
 
     class Config:
         from_attributes = True
@@ -162,3 +172,4 @@ class RecordingMetadataImportResult(BaseModel):
     unmatched: int
     unmatched_file_names: List[str]
     errors: List[str]
+

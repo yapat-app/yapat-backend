@@ -63,6 +63,20 @@ class EmbeddingJobResponse(BaseModel):
 # SnippetSet Schemas
 # ---------------------------------------------------------
 
+class EmbeddingJobProgress(BaseModel):
+    """Live progress of an embedding job (Redis counter, see services/embedding_progress)."""
+    embedding_job_id: int
+    dataset_id: int
+    status: str  # pending | running | completed | failed (EmbeddingJob.status)
+    stage: str  # segmenting | embedding | completed | failed | pending
+    done: Optional[int] = None  # snippets processed; None while segmenting/unknown
+    total: Optional[int] = None
+    percent: Optional[float] = None
+    stalled: bool = False  # RUNNING but no progress for STALL_AFTER_SECONDS
+    last_update: Optional[int] = None  # unix seconds of the last increment
+    error_message: Optional[str] = None
+
+
 class SnippetSet(BaseModel):
     """Schema for snippet set response."""
     id: int
