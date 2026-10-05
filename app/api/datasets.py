@@ -30,7 +30,12 @@ from app.models.quick_label_entry import QuickLabelEntry, SOURCE_PRIORITY
 from app.models.annotation import Annotation as AnnotationModel
 from app.models.snippet import Snippet
 from app.models.recording import Recording
-from app.models.embedding import SnippetSet, SnippetSetStatus
+from app.models.embedding import (
+    EmbeddingJob,
+    EmbeddingJobStatus,
+    SnippetSet,
+    SnippetSetStatus,
+)
 from app.schemas.dataset import (
     Dataset,
     DatasetCreate,
@@ -172,7 +177,33 @@ def read_datasets(
         ready_set_ids = {ss_id for (ss_id,) in ready_snippet_sets}
     else:
         ready_set_ids = set()
-    
+
+    # Newest pending/running embedding job per dataset (one small indexed query for
+    # the whole page), so cards can show progress without a per-card job-list call.
+    active_job_map: dict = {}
+    if dataset_ids:
+        active_jobs = (
+            db.query(EmbeddingJob)
+            .filter(
+                EmbeddingJob.dataset_id.in_(dataset_ids),
+                EmbeddingJob.status.in_(
+                    [EmbeddingJobStatus.PENDING, EmbeddingJobStatus.RUNNING]
+                ),
+            )
+            .order_by(EmbeddingJob.created_at.desc())
+            .all()
+        )
+        for job in active_jobs:
+            active_job_map.setdefault(
+                job.dataset_id,
+                {
+                    "id": job.id,
+                    "status": job.status.value,
+                    "snippet_set_id": job.snippet_set_id,
+                    "started_at": job.started_at,
+                },
+            )
+
     # Convert to schema and add recording_count and feed readiness
     result = []
     for dataset in datasets:
@@ -187,6 +218,7 @@ def read_datasets(
                     dataset,
                     recording_count=count_map.get(dataset.id, 0),
                     is_ready_for_feed=is_ready,
+                    active_embedding_job=active_job_map.get(dataset.id),
                 )
             )
         )

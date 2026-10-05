@@ -21,6 +21,7 @@ from app.models.dataset import Dataset
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.services.embedding_service import EmbeddingService, VectorStore
+from app.services import embedding_progress
 from app.schemas.visualisation import FPVDatasetRequest
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,11 @@ def generate_embeddings_for_recording(self, recording_id: int, snippet_ids: List
         if bulk_data:
             vector_store = VectorStore(db)
             inserted_count = vector_store.bulk_insert(bulk_data)
-        
+
+        # Progress counts snippets processed (incl. ones BirdNET returned None for),
+        # so the bar reaches 100% exactly when every recording task has run.
+        embedding_progress.incr_progress(job_id, len(snippets))
+
         return {
             "status": "success",
             "recording_id": recording_id,
@@ -200,6 +205,7 @@ def run_embedding(self, embedding_job_id: int):
             EmbeddingJobStatus.RUNNING,
             celery_task_id=self.request.id,
         )
+        embedding_progress.mark_started(job.id)
 
         snippet_set: SnippetSet = job.snippet_set
         model: EmbeddingModel = job.embedding_model
@@ -284,6 +290,8 @@ def run_embedding(self, embedding_job_id: int):
             ]
 
         db.commit()
+
+        embedding_progress.init_progress(job.id, total_snippets)
 
         # --- SnippetSet stays PENDING here on purpose ---
         # Segmentation completing does not mean embeddings exist yet — the actual
