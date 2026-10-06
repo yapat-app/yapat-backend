@@ -31,6 +31,8 @@ The API will be available at:
 
 Database migrations run automatically on startup.
 
+A default admin account (`admin` / `admin12345`) is created by the migrations if no admin exists yet, so you can log in without registering one via Swagger. Override it with the `DEFAULT_ADMIN_USERNAME` and `DEFAULT_ADMIN_PASSWORD` environment variables (they must be set in the environment of the process running `alembic upgrade head`, e.g. the `api` service), and always change the password for any deployment. Existing admins are never modified.
+
 To run in detached mode (background):
 ```bash
 docker compose up -d
