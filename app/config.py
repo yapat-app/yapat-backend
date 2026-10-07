@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
+    # First-run admin seeding (alembic migration 2026_10_07_seed_default_admin).
+    # Created only if no admin exists yet; change the password after first login.
+    DEFAULT_ADMIN_USERNAME: str = "admin"
+    DEFAULT_ADMIN_PASSWORD: str = "admin12345"
+
     # API
     API_STR: str = "/api"
     PROJECT_NAME: str = "YAPAT Backend"
