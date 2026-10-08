@@ -1,6 +1,6 @@
 fastapi>=0.115.0
 uvicorn[standard]==0.24.0
-sqlalchemy>=2.0.36
+sqlalchemy>=2.0.36,<2.1  # 2.1 makes psycopg (v3) the default driver for postgresql:// URLs; we ship psycopg2
 alembic==1.12.1
 psycopg2-binary>=2.9.9,<3.0.0
 pgvector>=0.2.4
