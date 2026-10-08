@@ -44,6 +44,8 @@ class Team(TeamBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     datasets: Optional[List[TeamDataset]] = None
+    # Read from the Team.is_ready model property: whether the team has an owner.
+    is_ready: bool = False
 
     class Config:
         from_attributes = True

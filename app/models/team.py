@@ -32,6 +32,15 @@ class Team(Base):
     invitations = relationship("TeamInvitation", back_populates="team", cascade="all, delete-orphan")
     reference_links = relationship("DatasetReferenceLink", back_populates="team", cascade="all, delete-orphan")
 
+    @property
+    def is_ready(self) -> bool:
+        """True once the team has at least one owner.
+
+        The frontend uses this to decide whether the next invitation is for an
+        owner (team not set up yet) or for regular members.
+        """
+        return any(m.role == TeamRole.OWNER for m in self.memberships)
+
 
 class TeamMembership(Base):
     __tablename__ = "team_memberships"
