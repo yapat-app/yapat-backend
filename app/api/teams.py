@@ -20,7 +20,7 @@ from app.models.team import (
 from app.models.user import User, User as UserModel, UserRole
 from app.models.dataset import Dataset as DatasetModel, user_datasets
 from app.models.recording import Recording
-from app.core.permissions import require_team_owner, require_team_member
+from app.core.permissions import require_admin, require_team_owner, require_team_member
 from app.utils.dataset_response import dataset_to_dict
 from datetime import datetime, timezone, timedelta
 
@@ -248,6 +248,67 @@ def read_teams(
     return teams
 
 
+@router.get("/{team_id}", response_model=Team)
+def read_team(
+    team_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Get a single team (team members and admins only).
+
+    Backs the Manage Team page, which loads the team before its members.
+    """
+    team = (
+        db.query(TeamModel)
+        .options(joinedload(TeamModel.datasets))
+        .filter(TeamModel.id == team_id)
+        .first()
+    )
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    require_team_member(current_user, team_id, db)
+    return team
+
+
+@router.patch("/{team_id}", response_model=Team)
+def update_team(
+    team_id: int,
+    team_in: TeamUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Update a team's name and/or description (team owner or admin only).
+
+    Only fields present in the request body are changed, so the client can
+    send a partial update.
+    """
+    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    require_team_owner(current_user, team_id, db)
+
+    updates = team_in.dict(exclude_unset=True)
+    # The name column is NOT NULL; reject a blank or null name explicitly
+    # instead of surfacing a database integrity error.
+    if "name" in updates:
+        name = (updates["name"] or "").strip()
+        if not name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Team name cannot be empty",
+            )
+        updates["name"] = name
+
+    for field, value in updates.items():
+        setattr(team, field, value)
+
+    db.commit()
+    db.refresh(team)
+    return team
+
+
 @router.get("/{team_id}/datasets", response_model=List[DatasetSchema])
 def get_team_datasets(
     team_id: int,
@@ -289,7 +350,10 @@ def get_team_members(
     team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    
+
+    # Member lists are visible to the team (owners included) and admins only.
+    require_team_member(current_user, team_id, db)
+
     # Get all memberships for this team with user information
     memberships = db.query(TeamMembershipModel).join(
         UserModel
@@ -354,7 +418,9 @@ def delete_team(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Delete a team (admin or team owner only).
+    """Delete a team (admin only).
+
+    Team owners cannot delete teams; only platform admins can.
 
     Datasets belonging to the team are unassigned (team_id set to NULL) rather
     than deleted, so recordings and annotations are preserved.
@@ -364,7 +430,7 @@ def delete_team(
     if not team:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
 
-    require_team_owner(current_user, team_id, db)
+    require_admin(current_user)
 
     # Unassign datasets via ORM so the relationship is properly tracked.
     # The datasets relationship has no delete cascade, so this simply nulls the FK.
@@ -373,6 +439,46 @@ def delete_team(
 
     db.flush()
     db.delete(team)
+    db.commit()
+    return None
+
+
+@router.delete("/{team_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_team_member(
+    team_id: int,
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Remove a member from a team (team owner or admin only).
+
+    Owners cannot be removed, matching the Manage Team page, which disables
+    removal for owner rows; this keeps every team manageable by its owner.
+    Only the membership is deleted: datasets and annotations stay untouched.
+    """
+    team = db.query(TeamModel).filter(TeamModel.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    require_team_owner(current_user, team_id, db)
+
+    membership = db.query(TeamMembershipModel).filter(
+        TeamMembershipModel.team_id == team_id,
+        TeamMembershipModel.user_id == user_id,
+    ).first()
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not a member of this team",
+        )
+
+    if membership.role == TeamRole.OWNER:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Team owners cannot be removed",
+        )
+
+    db.delete(membership)
     db.commit()
     return None
 
