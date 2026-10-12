@@ -62,6 +62,7 @@ from app.services.pam_al import _data_helpers as data_h
 from app.services.pam_al import _annotation_helpers as ann_h
 from app.services.pam_al import _inference_helpers as inf_h
 from app.services.pam_al import _feedback_helpers as fb_h
+from app.services.pam_al import _prediction_retention as retention_h
 
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,27 @@ class PAMActiveLearningService:
 
     def __init__(self, db: Session):
         self.db = db
+
+    def _prune_old_predictions(self, dataset_id: int, model_family_name: str) -> None:
+        """Drop superseded checkpoints' predictions after a successful training.
+
+        Best effort: the new checkpoint is already committed and active, so a
+        failure here is logged and must never turn a finished training into a
+        failed one. A later training retries the same pruning.
+        """
+        if not settings.PAM_PRUNE_OLD_PREDICTIONS:
+            return
+        try:
+            retention_h.prune_family_predictions(
+                self.db, dataset_id, model_family_name,
+                batch_size=settings.PAM_PREDICTION_PRUNE_BATCH_SIZE,
+            )
+        except Exception:
+            self.db.rollback()
+            logger.exception(
+                "Pruning old predictions failed dataset_id=%d family=%s",
+                dataset_id, model_family_name,
+            )
 
     def _cleanup_failed_training_checkpoint(
         self,
@@ -1394,6 +1416,7 @@ class PAMActiveLearningService:
                 checkpoint_id,
                 job_id,
             )
+            self._prune_old_predictions(model_ckpt.dataset_id, model_ckpt.model_family_name)
             return model_ckpt
 
         except Exception as e:
@@ -1721,6 +1744,7 @@ class PAMActiveLearningService:
             self.db.commit()
             self.db.refresh(new_ckpt)
             logger.info("Retrain execution completed checkpoint_id=%d job_id=%d", checkpoint_id, job_id)
+            self._prune_old_predictions(dataset_id, new_ckpt.model_family_name)
             return new_ckpt
 
         except Exception as e:

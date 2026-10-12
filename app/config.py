@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     PAM_DEFAULT_DEVICE: str = "cpu"      # Override with PAM_DEFAULT_DEVICE=cuda on GPU deployments
     PAM_BASE_MODEL_PATH: str = "models_AL/pam/base/base_pam_model.pt"  # Physical base model file
     PAM_CHECKPOINTS_DIR: str = "models_AL/pam/checkpoints"              # Versioned checkpoint storage
+    # After each successful training, delete the prediction rows of superseded
+    # checkpoints, keeping only the active, previous and first trained ones per
+    # dataset and model family (see services/pam_al/_prediction_retention.py).
+    PAM_PRUNE_OLD_PREDICTIONS: bool = True
+    PAM_PREDICTION_PRUNE_BATCH_SIZE: int = 50_000
 
     model_config = SettingsConfigDict(
         env_file=".env",
