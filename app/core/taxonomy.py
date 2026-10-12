@@ -18,6 +18,13 @@ TAXON_ID_PATTERN = re.compile(r'^([a-z]+):(\d+)$')
 TAXON_ID_ALNUM_PATTERN = re.compile(r'^([a-z]+):([a-zA-Z0-9_-]+)$')
 CUSTOM_TAXON_ID_PATTERN = re.compile(r'^(custom:[a-f0-9-]+)$')
 
+# GBIF species records change rarely, but every quick-label tooltip and every
+# saved annotation resolves its taxon through GBIF. Caching per process turns
+# repeated lookups into a dict read instead of one HTTP call each. Bounded so a
+# long-running worker cannot grow it without limit (oldest entry evicted).
+_GBIF_SPECIES_CACHE: Dict[str, Dict[str, Any]] = {}
+_GBIF_SPECIES_CACHE_MAX = 5000
+
 
 def parse_taxon_id(taxon_id: str) -> Optional[Dict[str, Any]]:
     """Parse a namespaced taxon ID (e.g., 'gbif:2420576', 'custom:uuid', 'local:species_slug') into namespace and key"""
@@ -171,6 +178,9 @@ def resolve_taxon_id(taxon_id: str, db_session=None) -> Optional[Dict[str, Any]]
     
     # Handle GBIF taxonomies
     if namespace == "gbif":
+        cached = _GBIF_SPECIES_CACHE.get(key)
+        if cached is not None:
+            return cached
         try:
             response = requests.get(
                 f"{GBIF_API_BASE}/species/{key}",
@@ -178,8 +188,8 @@ def resolve_taxon_id(taxon_id: str, db_session=None) -> Optional[Dict[str, Any]]
             )
             response.raise_for_status()
             data = response.json()
-            
-            return {
+
+            resolved = {
                 "taxon_id": taxon_id,
                 "canonical_name": data.get("canonicalName"),
                 "scientific_name": data.get("scientificName"),
@@ -199,6 +209,11 @@ def resolve_taxon_id(taxon_id: str, db_session=None) -> Optional[Dict[str, Any]]
                 "taxonomic_status": data.get("taxonomicStatus"),
                 "taxonomy_type": "gbif"
             }
+            # Only successful lookups are cached, so a GBIF outage is retried.
+            if len(_GBIF_SPECIES_CACHE) >= _GBIF_SPECIES_CACHE_MAX:
+                _GBIF_SPECIES_CACHE.pop(next(iter(_GBIF_SPECIES_CACHE)))
+            _GBIF_SPECIES_CACHE[key] = resolved
+            return resolved
         except requests.RequestException:
             return None
 
@@ -216,18 +231,21 @@ def resolve_taxon_id(taxon_id: str, db_session=None) -> Optional[Dict[str, Any]]
     return None
 
 
-def batch_resolve_taxon_ids(taxon_ids: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+def batch_resolve_taxon_ids(
+    taxon_ids: List[str], db_session=None
+) -> Dict[str, Optional[Dict[str, Any]]]:
     """Resolve multiple taxon IDs at once
-    
+
     Args:
         taxon_ids: List of namespaced IDs (e.g., ['gbif:2420576', 'gbif:2498293'])
-    
+        db_session: Optional database session; without it `custom:` IDs resolve to None
+
     Returns:
         Dict mapping taxon_id to resolved data (or None if failed)
     """
     results = {}
     for taxon_id in taxon_ids:
-        results[taxon_id] = resolve_taxon_id(taxon_id)
+        results[taxon_id] = resolve_taxon_id(taxon_id, db_session=db_session)
     return results
 
 

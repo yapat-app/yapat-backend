@@ -576,10 +576,40 @@ class PAMActiveLearningService:
             return
 
         resolved_items: list[dict[str, str]] = []
+
+        # Quick labels pair the button text (often a project code such as
+        # "HYLMER") with a namespaced taxon ID. Using that pairing first links
+        # the annotation to the real taxon instead of an auto-created code
+        # entry. `local:` IDs carry no taxonomy, so they fall through to the
+        # cases below.
+        ds = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        quick_label_taxa = {
+            str(item.get("display_name", "")).strip().lower(): str(item.get("taxon_id", ""))
+            for item in ((ds.quick_labels if ds else None) or [])
+            if isinstance(item, dict)
+            and item.get("taxon_id")
+            and not str(item["taxon_id"]).startswith("local:")
+        }
+
         for label in labels:
             label = (label or "").strip()
             if not label:
                 continue
+
+            # Case 0: label is a quick label linked to a taxon
+            linked_taxon_id = quick_label_taxa.get(label.lower())
+            if linked_taxon_id:
+                resolved = taxonomy.resolve_taxon_id(linked_taxon_id, db_session=self.db)
+                if resolved:
+                    resolved_items.append(
+                        {
+                            "taxon_id": linked_taxon_id,
+                            "resolved_name_snapshot": resolved.get("canonical_name")
+                            or resolved.get("scientific_name")
+                            or label,
+                        }
+                    )
+                    continue
 
             # Case 1: label already is a taxon_id
             if taxonomy.parse_taxon_id(label):
