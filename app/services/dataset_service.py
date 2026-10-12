@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
 
 
+class ReferenceMetadataNotFound(ValueError):
+    """A reference dataset's label CSV does not exist where the scanner will look."""
+
+    def __init__(self, expected_path: str):
+        super().__init__("reference_metadata_not_found")
+        self.expected_path = expected_path
+
+
 class DatasetService:
     def __init__(self, db: Session):
         self.db = db
@@ -51,11 +59,18 @@ class DatasetService:
             ValueError("duplicate_dataset") if the dataset already exists.
             ValueError("team_not_found") if team_id is invalid.
             ValueError("invalid_source_uri") if source_uri path does not exist.
+            ValueError("reference_admin_only") if a non-admin sets reference fields.
+            ReferenceMetadataNotFound if a reference dataset's label CSV is missing.
         """
 
         # Non-admin users MUST supply a team_id
         if current_user.role != UserRole.ADMIN and dataset_in.team_id is None:
             raise ValueError("team_id_required")
+
+        if (dataset_in.is_reference or dataset_in.reference_metadata_path) and (
+            current_user.role != UserRole.ADMIN
+        ):
+            raise ValueError("reference_admin_only")
 
         # Validate team
         if dataset_in.team_id is not None:
@@ -65,6 +80,11 @@ class DatasetService:
 
         # Validate source_uri path before committing
         self.validate_source_uri(dataset_in.source_uri)
+
+        if dataset_in.is_reference:
+            self.validate_reference_metadata(
+                dataset_in.source_uri, dataset_in.reference_metadata_path
+            )
 
         # Proactive duplicate check for (team_id, source_uri)
         duplicate = (
@@ -262,8 +282,26 @@ class DatasetService:
         if not data:
             return dataset
 
+        reference_fields_changed = any(
+            key in data and data[key] != getattr(dataset, key)
+            for key in ("is_reference", "reference_metadata_path")
+        )
+        if reference_fields_changed and current_user.role != UserRole.ADMIN:
+            raise ValueError("reference_admin_only")
+
         if "source_uri" in data and data["source_uri"] is not None:
             self.validate_source_uri(data["source_uri"])
+
+        # Re-check the label CSV whenever the change could move or enable it,
+        # using the values the dataset will have after this update.
+        next_is_reference = data.get("is_reference", dataset.is_reference)
+        if next_is_reference and (
+            reference_fields_changed or "source_uri" in data
+        ):
+            self.validate_reference_metadata(
+                data.get("source_uri") or dataset.source_uri,
+                data.get("reference_metadata_path", dataset.reference_metadata_path),
+            )
 
         next_f_min = data.get("spectrogram_f_min_hz", dataset.spectrogram_f_min_hz)
         next_f_max = data.get("spectrogram_f_max_hz", dataset.spectrogram_f_max_hz)
@@ -301,6 +339,28 @@ class DatasetService:
 
         if not os.path.isdir(dataset_path):
             raise ValueError("invalid_source_uri")
+
+    def validate_reference_metadata(
+        self, source_uri: str, reference_metadata_path: Optional[str]
+    ) -> None:
+        """
+        Require a reference dataset's label CSV to exist before it is saved.
+
+        Without it the scan falls back to registering every audio file with no
+        labels (see _filter_to_referenced_files), which silently produces a
+        useless reference pool. Uses the same path rules as the scanner.
+
+        Raises:
+            ReferenceMetadataNotFound with the expected path (relative to
+            DATA_ROOT) if the file is missing or resolves outside DATA_ROOT.
+        """
+        from app.utils.pam_training_paths import expected_pam_metadata_path
+
+        expected = expected_pam_metadata_path(source_uri, reference_metadata_path)
+        data_root_norm = os.path.normpath(settings.DATA_ROOT or "/data")
+        abs_path = os.path.normpath(os.path.join(data_root_norm, expected))
+        if not abs_path.startswith(data_root_norm + os.sep) or not os.path.isfile(abs_path):
+            raise ReferenceMetadataNotFound(expected)
 
     def _resolve_path_under_data_root(self, relative: Optional[str]) -> tuple[str, str, Optional[str]]:
         """

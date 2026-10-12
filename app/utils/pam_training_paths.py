@@ -9,12 +9,12 @@ _DEFAULT_METADATA = "pam_metadata.csv"
 _DEFAULT_LABEL_CONFIG = "pam_label_config.json"
 
 
-def _resolve_pam_file(
-    data_root: str,
+def _pam_file_rel_path(
     source_uri: str,
     user_path: Optional[str],
     default_name: str,
 ) -> str:
+    """Where a PAM file is expected, relative to DATA_ROOT (existence not checked)."""
     source_uri = (source_uri or "").strip().strip("/")
     if not source_uri:
         raise ValueError("dataset source_uri is required to resolve training paths")
@@ -26,7 +26,16 @@ def _resolve_pam_file(
 
     if "/" not in rel:
         rel = f"{source_uri}/{rel}"
+    return rel
 
+
+def _resolve_pam_file(
+    data_root: str,
+    source_uri: str,
+    user_path: Optional[str],
+    default_name: str,
+) -> str:
+    rel = _pam_file_rel_path(source_uri, user_path, default_name)
     abs_path = os.path.join(data_root, rel)
     if not os.path.isfile(abs_path):
         raise ValueError(f"Training file not found: {abs_path}")
@@ -40,6 +49,11 @@ def resolve_pam_metadata_path(
 ) -> str:
     """Resolve only PAM metadata, without requiring a label-config file."""
     return _resolve_pam_file(data_root, source_uri, metadata_path, _DEFAULT_METADATA)
+
+
+def expected_pam_metadata_path(source_uri: str, metadata_path: Optional[str] = None) -> str:
+    """Where the PAM metadata CSV is looked for, relative to DATA_ROOT."""
+    return _pam_file_rel_path(source_uri, metadata_path, _DEFAULT_METADATA)
 
 
 def resolve_pam_training_paths(

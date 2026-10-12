@@ -55,7 +55,7 @@ from app.schemas.quick_label import (
     QuickLabelEntryBatchCreate,
     QuickLabelEntryResponse,
 )
-from app.services.dataset_service import DatasetService
+from app.services.dataset_service import DatasetService, ReferenceMetadataNotFound
 from app.services.recording_metadata_import_service import (
     RecordingMetadataImportService,
 )
@@ -80,7 +80,16 @@ def create_dataset(
 
     try:
         dataset = svc.create_dataset(dataset_in, current_user)
+    except ReferenceMetadataNotFound as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Label file not found: {e.expected_path}",
+        )
     except ValueError as e:
+        if str(e) == "reference_admin_only":
+            raise HTTPException(
+                status_code=403, detail="Only admins can create reference datasets"
+            )
         if str(e) == "duplicate_dataset":
             raise HTTPException(status_code=409, detail="Dataset already exists")
         if str(e) == "team_not_found":
@@ -296,11 +305,16 @@ def update_dataset(
     svc = DatasetService(db)
     try:
         dataset = svc.update_dataset(dataset_id, update_in, current_user)
+    except ReferenceMetadataNotFound as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Label file not found: {e.expected_path}",
+        )
     except ValueError as e:
         code = str(e)
         if code == "not_found":
             raise HTTPException(status_code=404, detail="Dataset not found")
-        if code == "forbidden":
+        if code in ("forbidden", "reference_admin_only"):
             raise HTTPException(status_code=403, detail="Not allowed to update this dataset")
         if code in (
             "invalid_spectrogram_f_min",
