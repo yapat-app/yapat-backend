@@ -11,10 +11,17 @@ from app.models.dataset import Dataset
 from app.services.embedding_service import EmbeddingService
 from app.services.snippet_set_service import SnippetSetService
 from app.tasks.embedding_tasks import run_embedding
-from app.models.embedding import SnippetSet as SnippetSetModel, SnippetSetStatus
+from app.models.embedding import (
+    EmbeddingJob as EmbeddingJobModel,
+    SnippetSet as SnippetSetModel,
+    SnippetSetStatus,
+)
+from app.services.dataset_service import DatasetService
+from app.services.embedding_progress import get_progress
 from app.schemas.embedding import (
     EmbeddingModel,
     EmbeddingJobCreateRequest,
+    EmbeddingJobProgress,
     EmbeddingJobResponse,
     SnippetSet,
     SnippetSetWithStats,
@@ -172,6 +179,28 @@ def get_embedding_job(
         celery_task_id=job.celery_task_id,
         status=job.status.value,
     )
+
+
+@router.get("/embeddings/{job_id}/progress", response_model=EmbeddingJobProgress)
+def get_embedding_job_progress(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Live progress of an embedding job, polled by the dataset card.
+
+    Cheap to call repeatedly: it reads two Redis counters (see
+    services/embedding_progress), falling back to Postgres only when they are
+    missing or idle.
+    """
+    job = db.query(EmbeddingJobModel).filter(EmbeddingJobModel.id == job_id).first()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Embedding job not found")
+    if not DatasetService(db).user_can_access_dataset(current_user, job.dataset_id):
+        raise HTTPException(status_code=403, detail="Not allowed to view this job")
+
+    return EmbeddingJobProgress(**get_progress(db, job))
 
 
 # ---------------------------------------------------------
