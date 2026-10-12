@@ -24,6 +24,11 @@ class BirdNetEmbedder:
 
     SAMPLE_RATE = 48000
     WINDOW_SAMPLES = 144000  # 3 seconds
+    # Windows per model call. A whole long recording in one call (e.g. 822
+    # windows for a 41-minute file) exhausts GPU memory on shared GPUs and
+    # fails the entire recording; fixed-size chunks keep peak memory bounded
+    # regardless of recording length.
+    INFERENCE_BATCH_SIZE = 64
 
     @classmethod
     def _configure_gpu_memory_growth(cls):
@@ -165,16 +170,17 @@ class BirdNetEmbedder:
         if not batch_samples:
             return [None] * len(snippet_windows)
         
-        # 4. Stack into batch tensor: (N, 144000)
-        batch = np.stack(batch_samples, axis=0).astype(np.float32)
-        
-        # 5. Run batch inference
+        # 4–6. Run inference in fixed-size chunks of (chunk, 144000) and collect
+        # the embeddings in input order.
         model = cls.instance()
-        outputs = model(batch)
-        
-        # 6. Extract embeddings
-        embeddings = outputs["embeddings"].numpy()
-        
+        chunks = []
+        for start in range(0, len(batch_samples), cls.INFERENCE_BATCH_SIZE):
+            chunk = np.stack(
+                batch_samples[start:start + cls.INFERENCE_BATCH_SIZE], axis=0
+            ).astype(np.float32)
+            chunks.append(model(chunk)["embeddings"].numpy())
+        embeddings = np.concatenate(chunks, axis=0)
+
         # 7. Map results back to original order (insert None for failed snippets)
         results = [None] * len(snippet_windows)
         for batch_idx, original_idx in enumerate(valid_indices):
