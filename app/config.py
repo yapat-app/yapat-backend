@@ -81,7 +81,12 @@ class Settings(BaseSettings):
     # WSSED GPU Server
     WSSED_GPU_SERVER_URL: str = "http://localhost:8003"  # URL of GPU server running WSSED
     WSSED_TIMEOUT: int = 300  # seconds (5 minutes for long operations)
-    WSSED_POLL_INTERVAL: int = 10  # seconds between status polls
+    WSSED_POLL_INTERVAL: int = 10  # seconds before the status endpoint re-probes the GPU server
+    # Per-job Celery poll chain: started when a job is sent to the GPU server,
+    # re-schedules itself every N seconds until the job is COMPLETED/FAILED.
+    WSSED_TRAINING_POLL_INTERVAL: int = 30
+    # Beat safety net for TRAINING jobs whose poll chain was lost (e.g. worker restart).
+    WSSED_SYNC_SAFETY_INTERVAL: int = 300
     # Host path to WSSED focal-data outputs (for copying checkpoints into PAM_CHECKPOINTS_DIR)
     WSSED_FOCAL_DATA_ROOT: Optional[str] = None
     

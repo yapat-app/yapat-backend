@@ -8,11 +8,21 @@ from celery import shared_task
 from contextlib import contextmanager
 import logging
 
+from app.config import settings
 from app.database import SessionLocal
 from app.models.wssed import TrainingStatus, WSSEDTrainingJob
 from app.services.wssed_service import WSSEDService
 
 logger = logging.getLogger(__name__)
+
+TERMINAL_TRAINING_STATUSES = (TrainingStatus.COMPLETED, TrainingStatus.FAILED)
+
+
+def schedule_training_poll(job_id: int) -> None:
+    """Queue the next poll_training_status for a job sent to the GPU server."""
+    poll_training_status.apply_async(
+        args=[job_id], countdown=settings.WSSED_TRAINING_POLL_INTERVAL
+    )
 
 
 @contextmanager
@@ -47,7 +57,13 @@ def trigger_wssed_training(self, job_id: int):
             task_id = asyncio.run(service.trigger_remote_training(job_id))
             
             logger.info(f"WSSED training triggered for job {job_id}, task_id: {task_id}")
-            
+
+            try:
+                schedule_training_poll(job_id)
+            except Exception as e:
+                # The beat safety net still syncs the job, just less often.
+                logger.warning("Could not schedule status polling for WSSED job %s: %s", job_id, e)
+
             return {
                 "status": "success",
                 "job_id": job_id,
@@ -112,52 +128,42 @@ def trigger_wssed_detection(self, job_id: int, threshold: float = 0.5):
 
 @shared_task(bind=True, name="app.tasks.wssed_tasks.poll_training_status")
 def poll_training_status(self, job_id: int):
-    """
-    Poll GPU server for training status update.
-    
-    This task can be scheduled to periodically check training progress.
-    
-    Args:
-        job_id: Training job ID
-    
-    Returns:
-        Dict with current status
-    """
+    """Sync one job's status from the GPU server; re-queues itself until COMPLETED/FAILED."""
     with session_scope() as db:
         service = WSSEDService(db)
-        
+
         try:
             import asyncio
             job = asyncio.run(service.update_training_status(job_id))
-            
-            return {
+            status = job.status
+            result = {
                 "status": "success",
                 "job_id": job_id,
-                "training_status": job.status.value,
+                "training_status": status.value,
                 "model_path": job.model_path,
                 "model_paths": job.model_paths,
-                "completed": job.status in (TrainingStatus.COMPLETED, TrainingStatus.FAILED),
+                "completed": status in TERMINAL_TRAINING_STATUSES,
             }
-            
         except Exception as e:
             logger.error(f"Failed to poll training status for job {job_id}: {e}")
-            return {
+            # Keep polling through transient errors while the job is unfinished.
+            db.rollback()
+            job = db.query(WSSEDTrainingJob).filter(WSSEDTrainingJob.id == job_id).first()
+            status = job.status if job is not None else None
+            result = {
                 "status": "error",
                 "job_id": job_id,
                 "error": str(e)
             }
 
+    if status is not None and status not in TERMINAL_TRAINING_STATUSES:
+        schedule_training_poll(job_id)
+    return result
+
 
 @shared_task(name="app.tasks.wssed_tasks.sync_wssed_training_jobs")
 def sync_wssed_training_jobs():
-    """
-    Periodic beat task: poll GPU server for every job that is still TRAINING
-    and persist the latest status to the DB.
-
-    Scheduled every WSSED_POLL_INTERVAL seconds (default 10 s) via celery beat.
-    Keeps the DB fresh so the status endpoint never needs to hit the GPU server
-    directly on every frontend poll.
-    """
+    """Beat safety net: sync TRAINING jobs whose poll chain was lost (e.g. worker restart)."""
     from app.models.wssed import TrainingStatus
 
     with session_scope() as db:
