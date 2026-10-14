@@ -114,6 +114,9 @@ class Filters:
     annotation_status: str = "any"
     annotated_species: tuple[str, ...] = ()
     predicted_species: tuple[str, ...] = ()
+    # None: use the inference-time flags (pred_bits). A number: gate on the
+    # stored probabilities at query time (scoped confidence >= this value).
+    predicted_min_prob: float | None = None
     label_scope: tuple[str, ...] = ()
     locations: tuple[str, ...] = ()
     date_range: tuple[float, float] | None = None
@@ -123,11 +126,12 @@ class Filters:
     sticky_ids: tuple[int, ...] = ()
 
     def population_key(self) -> tuple:
-        return (self.predicted_species,)
+        return (self.predicted_species, self.predicted_min_prob)
 
     def non_score_key(self) -> tuple:
         return (
             self.predicted_species,
+            self.predicted_min_prob,
             self.annotation_status,
             self.annotated_species,
             self.label_scope,
@@ -256,13 +260,28 @@ def compute_population(
             positions = _species_positions(filters.predicted_species, model.label_order)
             rows = np.flatnonzero(mask)
             mrows = model.model_row[rows]
-            matches = _rows_with_any_bit(model.pred_bits, mrows, positions)
             mask[:] = False
-            kept = rows[matches]
+            if filters.predicted_min_prob is None:
+                matches = _rows_with_any_bit(model.pred_bits, mrows, positions)
+                kept = rows[matches]
+                scoped = (
+                    _noisy_or(model.probs, model.model_row[kept], positions)
+                    if positions.size and kept.size
+                    else np.empty(0, dtype=np.float32)
+                )
+            elif positions.size and rows.size:
+                # Query-time threshold over the stored probabilities.
+                all_scoped = _noisy_or(model.probs, mrows, positions)
+                with np.errstate(invalid="ignore"):
+                    matches = all_scoped >= filters.predicted_min_prob
+                kept = rows[matches]
+                scoped = all_scoped[matches]
+            else:
+                kept = rows[:0]
+                scoped = np.empty(0, dtype=np.float32)
             mask[kept] = True
-            if positions.size and kept.size:
+            if scoped.size:
                 confidence = confidence.copy()
-                scoped = _noisy_or(model.probs, model.model_row[kept], positions)
                 valid = ~np.isnan(scoped)
                 confidence[kept[valid]] = scoped[valid]
 
