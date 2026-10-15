@@ -290,6 +290,9 @@ class ALFeedbackResponse(BaseModel):
     last_retrain_failed: bool = False
     auto_retrain_checkpoint_id: Optional[int] = None
     auto_retrain_job_id: Optional[int] = None
+    # Set when the triggered retrain waits for an "add recordings" run on the
+    # dataset; it starts by itself when that run ends.
+    retrain_waiting_for_ingest_job_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -345,6 +348,8 @@ class ALRetrainJobResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: datetime
+    # PENDING retrain waiting for this "add recordings" run to finish.
+    waiting_for_ingest_job_id: Optional[int] = None
     new_checkpoint_id: Optional[int] = Field(
         default=None,
         description="New versioned checkpoint ID after a successful retrain",
@@ -439,6 +444,8 @@ class ALJobDispatch(BaseModel):
     checkpoint_id: int
     status: ALRetrainStatusSchema
     message: str
+    # Retrains only: PENDING but waiting for this "add recordings" run to finish.
+    waiting_for_ingest_job_id: Optional[int] = None
 
 
 class ALRetrainJobStatusResponse(BaseModel):
@@ -454,6 +461,8 @@ class ALRetrainJobStatusResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: datetime
+    # PENDING retrain waiting for this "add recordings" run to finish.
+    waiting_for_ingest_job_id: Optional[int] = None
 
     class Config:
         from_attributes = True

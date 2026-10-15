@@ -13,7 +13,8 @@ class Recording(Base):
     __tablename__ = "recordings"
 
     id = Column(Integer, primary_key=True, index=True)
-    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False)
+    # Indexed (ix_recordings_dataset_id): every per-dataset query filters on it.
+    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True)
 
     file_path = Column(String, nullable=False)
     file_name = Column(String, nullable=False)

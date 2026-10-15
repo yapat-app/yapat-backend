@@ -214,6 +214,8 @@ class EmbeddingService:
 
 
 class VectorStore:
+    BULK_INSERT_BATCH_ROWS = 1000
+
     def __init__(self, db):
         self.db = db
 
@@ -241,26 +243,47 @@ class VectorStore:
                 - vector: list[float]
         
         Returns:
-            Number of embeddings inserted
+            Number of embeddings inserted. Snippets that already have a vector
+            are skipped (ON CONFLICT (snippet_id) DO NOTHING), so re-embedding a
+            recording, or a retried chunk, never fails on the unique key.
         """
         if not embeddings:
             return 0
-        
-        vectors = [
-            EmbeddingVector(
-                snippet_id=emb["snippet_id"],
-                embedding_job_id=emb["job_id"],
-                embedding_model_id=emb["model_id"],
-                dim=len(emb["vector"]),
-                vector=emb["vector"],
-            )
+
+        rows = [
+            {
+                "snippet_id": emb["snippet_id"],
+                "embedding_job_id": emb["job_id"],
+                "embedding_model_id": emb["model_id"],
+                "dim": len(emb["vector"]),
+                "vector": emb["vector"],
+            }
             for emb in embeddings
         ]
-        
-        self.db.bulk_save_objects(vectors)
+
+        dialect = self.db.get_bind().dialect.name
+        if dialect == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as dialect_insert
+        elif dialect == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert as dialect_insert
+        else:  # pragma: no cover - only Postgres (prod) and SQLite (tests) are used
+            self.db.bulk_insert_mappings(EmbeddingVector, rows)
+            self.db.commit()
+            return len(rows)
+
+        # A multi-row VALUES binds 5 parameters per row; batch so a 24 h recording
+        # (~29k snippets) stays under Postgres' 65535 and SQLite's 32766 limits.
+        inserted = 0
+        for start in range(0, len(rows), self.BULK_INSERT_BATCH_ROWS):
+            batch = rows[start:start + self.BULK_INSERT_BATCH_ROWS]
+            stmt = dialect_insert(EmbeddingVector).values(batch).on_conflict_do_nothing(
+                index_elements=["snippet_id"]
+            )
+            result = self.db.execute(stmt)
+            inserted += max(int(result.rowcount or 0), 0)
         self.db.commit()
-        
-        return len(vectors)
+
+        return inserted
 
     def get(self, snippet_id: int, model_id: int):
         row = (

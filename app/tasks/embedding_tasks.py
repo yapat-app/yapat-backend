@@ -3,7 +3,7 @@ Celery tasks for the embedding pipeline (SnippetSet architecture).
 """
 import logging
 import os
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from celery import chord
 
@@ -90,16 +90,25 @@ def generate_embedding_for_snippet(self, snippet_id: int, model_id: int):
 # Generate embeddings for all snippets in a recording (BATCHED)
 # ----------------------------------------------------------------------
 @celery_app.task(bind=True, name="app.tasks.embedding.generate_embeddings_for_recording")
-def generate_embeddings_for_recording(self, recording_id: int, snippet_ids: List[int], model_id: int, job_id: int):
+def generate_embeddings_for_recording(
+    self,
+    recording_id: int,
+    snippet_ids: List[int],
+    model_id: int,
+    job_id: int,
+    ingest_job_id: Optional[int] = None,
+):
     """
     Generate embeddings for all snippets in a recording using batch processing.
-    
+
     Args:
         recording_id: Recording to process
         snippet_ids: List of snippet IDs to embed (must all belong to this recording)
         model_id: Embedding model ID
-        job_id: EmbeddingJob ID for tracking
-        
+        job_id: EmbeddingJob ID the vectors are attached to
+        ingest_job_id: set when called from the add-recordings pipeline; progress
+            then goes to that DatasetIngestJob instead of the (completed) EmbeddingJob
+
     Returns:
         dict with status and stats
     """
@@ -111,6 +120,7 @@ def generate_embeddings_for_recording(self, recording_id: int, snippet_ids: List
             return {
                 "status": "error",
                 "recording_id": recording_id,
+                "snippets_planned": len(snippet_ids),
                 "message": "recording_not_found"
             }
         
@@ -164,7 +174,12 @@ def generate_embeddings_for_recording(self, recording_id: int, snippet_ids: List
 
         # Progress counts snippets processed (incl. ones BirdNET returned None for),
         # so the bar reaches 100% exactly when every recording task has run.
-        embedding_progress.incr_progress(job_id, len(snippets))
+        if ingest_job_id is not None:
+            from app.services import ingest_progress
+
+            ingest_progress.incr(ingest_job_id, len(snippets))
+        else:
+            embedding_progress.incr_progress(job_id, len(snippets))
 
         return {
             "status": "success",
@@ -178,11 +193,108 @@ def generate_embeddings_for_recording(self, recording_id: int, snippet_ids: List
         return {
             "status": "error",
             "recording_id": recording_id,
-            "message": str(e)
+            # How many snippets this failure leaves without an embedding.
+            "snippets_planned": len(snippet_ids),
+            "message": f"{type(e).__name__}: {e}"
         }
     
     finally:
         db.close()
+
+
+# ----------------------------------------------------------------------
+# Segmentation (shared by run_embedding and the add-recordings pipeline)
+# ----------------------------------------------------------------------
+def segment_recordings(
+    db,
+    snippet_set: SnippetSet,
+    recordings,
+    *,
+    only_these_recordings: bool = False,
+) -> Tuple[Dict[int, List[int]], int]:
+    """Cut `recordings` (rows with .id and .duration) into the set's windows.
+
+    Existing snippets with the same (recording, start, end) are reused, so this
+    is safe to run again over recordings that were already segmented. Flushes
+    but does not commit.
+
+    only_these_recordings limits the existing-snippet lookup to `recordings`
+    instead of the whole set (the add-recordings pipeline passes a handful of
+    new recordings into a set of millions of snippets).
+
+    Returns ({recording_id: [snippet_id, ...]}, number_of_new_snippets).
+    """
+    window = snippet_set.window_size
+    step = snippet_set.step_size
+
+    # --- Check if snippets already exist for this snippet_set ---
+    existing_query = db.query(
+        Snippet.id, Snippet.recording_id, Snippet.start_time, Snippet.end_time
+    ).filter(Snippet.snippet_set_id == snippet_set.id)
+    if only_these_recordings:
+        existing_query = existing_query.filter(
+            Snippet.recording_id.in_([rec.id for rec in recordings])
+        )
+    existing_snippets = existing_query.all()
+
+    # Create a dictionary mapping (recording_id, start_time, end_time) -> snippet_id for O(1) lookup
+    existing_snippet_map = {
+        (s.recording_id, s.start_time, s.end_time): s.id
+        for s in existing_snippets
+    }
+
+    # --- Segmentation: Create snippets grouped by recording (only if they don't exist) ---
+    # Snippet objects for keys not already in existing_snippet_map are collected and
+    # flushed once at the end (instead of once per snippet) so a dataset with tens of
+    # thousands of recordings doesn't pay for a DB round-trip per snippet. Slots hold
+    # either an existing snippet_id (int) or the pending Snippet object itself, which is
+    # resolved to a real id right after the single flush below.
+    recording_snippet_map: Dict[int, List[Union[int, Snippet]]] = {}
+    new_snippets: List[Snippet] = []
+
+    for rec in recordings:
+        duration = rec.duration or 0.0
+        t = 0.0
+        recording_slots: List[Union[int, Snippet]] = []
+
+        while t + window <= duration:
+            snippet_key = (rec.id, t, t + window)
+
+            existing_id = existing_snippet_map.get(snippet_key)
+            if existing_id is not None:
+                # Reuse existing snippet
+                recording_slots.append(existing_id)
+            else:
+                # Create new snippet only if it doesn't exist
+                snippet = Snippet(
+                    recording_id=rec.id,
+                    snippet_set_id=snippet_set.id,
+                    start_time=t,
+                    end_time=t + window,
+                    duration=window,
+                )
+                new_snippets.append(snippet)
+                recording_slots.append(snippet)
+                # Avoid creating duplicates for the same key within this run
+                existing_snippet_map[snippet_key] = snippet
+
+            t += step
+
+        if recording_slots:
+            recording_snippet_map[rec.id] = recording_slots
+
+    # Single batched round-trip for every new snippet in this run instead of
+    # one flush per snippet.
+    if new_snippets:
+        db.add_all(new_snippets)
+        db.flush()
+
+    # Resolve pending Snippet objects to their now-populated ids.
+    resolved: Dict[int, List[int]] = {
+        rec_id: [slot.id if isinstance(slot, Snippet) else slot for slot in slots]
+        for rec_id, slots in recording_snippet_map.items()
+    }
+    return resolved, len(new_snippets)
 
 
 # ----------------------------------------------------------------------
@@ -210,9 +322,6 @@ def run_embedding(self, embedding_job_id: int):
         snippet_set: SnippetSet = job.snippet_set
         model: EmbeddingModel = job.embedding_model
 
-        window = snippet_set.window_size
-        step = snippet_set.step_size
-
         # --- Fetch dataset recordings (only the columns segmentation needs) ---
         recordings = db.query(
             Recording.id, Recording.duration
@@ -220,74 +329,8 @@ def run_embedding(self, embedding_job_id: int):
             Recording.dataset_id == job.dataset_id
         ).all()
 
-        # --- Check if snippets already exist for this snippet_set ---
-        existing_snippets = (
-            db.query(
-                Snippet.id, Snippet.recording_id, Snippet.start_time, Snippet.end_time
-            )
-            .filter(Snippet.snippet_set_id == snippet_set.id)
-            .all()
-        )
-
-        # Create a dictionary mapping (recording_id, start_time, end_time) -> snippet_id for O(1) lookup
-        existing_snippet_map = {
-            (s.recording_id, s.start_time, s.end_time): s.id
-            for s in existing_snippets
-        }
-
-        # --- Segmentation: Create snippets grouped by recording (only if they don't exist) ---
-        # Snippet objects for keys not already in existing_snippet_map are collected and
-        # flushed once at the end (instead of once per snippet) so a dataset with tens of
-        # thousands of recordings doesn't pay for a DB round-trip per snippet. Slots hold
-        # either an existing snippet_id (int) or the pending Snippet object itself, which is
-        # resolved to a real id right after the single flush below.
-        recording_snippet_map: Dict[int, List[Union[int, Snippet]]] = {}
-        new_snippets: List[Snippet] = []
-        total_snippets = 0
-
-        for rec in recordings:
-            duration = rec.duration or 0.0
-            t = 0.0
-            recording_slots: List[Union[int, Snippet]] = []
-
-            while t + window <= duration:
-                snippet_key = (rec.id, t, t + window)
-
-                existing_id = existing_snippet_map.get(snippet_key)
-                if existing_id is not None:
-                    # Reuse existing snippet
-                    recording_slots.append(existing_id)
-                else:
-                    # Create new snippet only if it doesn't exist
-                    snippet = Snippet(
-                        recording_id=rec.id,
-                        snippet_set_id=snippet_set.id,
-                        start_time=t,
-                        end_time=t + window,
-                        duration=window,
-                    )
-                    new_snippets.append(snippet)
-                    recording_slots.append(snippet)
-                    # Avoid creating duplicates for the same key within this run
-                    existing_snippet_map[snippet_key] = snippet
-
-                t += step
-
-            if recording_slots:
-                recording_snippet_map[rec.id] = recording_slots
-                total_snippets += len(recording_slots)
-
-        # Single batched round-trip for every new snippet in this run instead of
-        # one flush per snippet.
-        if new_snippets:
-            db.add_all(new_snippets)
-            db.flush()
-
-        # Resolve pending Snippet objects to their now-populated ids.
-        for rec_id, slots in recording_snippet_map.items():
-            recording_snippet_map[rec_id] = [
-                slot.id if isinstance(slot, Snippet) else slot for slot in slots
-            ]
+        recording_snippet_map, _new_count = segment_recordings(db, snippet_set, recordings)
+        total_snippets = sum(len(ids) for ids in recording_snippet_map.values())
 
         db.commit()
 
