@@ -6,7 +6,7 @@ from typing import Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field, field_validator
 
-from active_learning.config import DEFAULT_INFERENCE_THRESHOLD
+from active_learning.config import FOCUS_SPECIES_MIN_PROB
 from app.services.explore.query import Filters
 
 ScoreKey = Literal["uncertainty", "diversity", "density", "composite", "confidence"]
@@ -72,10 +72,12 @@ class ExploreFilters(BaseModel):
             annotation_status=self.annotation_status,
             annotated_species=tuple(_norm_strings(self.annotated_species)),
             predicted_species=tuple(_norm_strings(self.predicted_species)),
-            # Applied to the stored probabilities at query time, so editing the
-            # config threshold changes the feed without re-running inference.
+            # Applied to the stored probabilities at query time, so the focus
+            # gate can change without re-running inference. Deliberately not
+            # DEFAULT_INFERENCE_THRESHOLD: that value decides which labels are
+            # stored, and reusing it here made focusing hide every snippet below it.
             predicted_min_prob=(
-                float(DEFAULT_INFERENCE_THRESHOLD) if self.predicted_species else None
+                FOCUS_SPECIES_MIN_PROB if self.predicted_species else None
             ),
             label_scope=tuple(_norm_strings(self.label_scope)),
             locations=tuple(sorted(set(self.locations))),

@@ -12,6 +12,9 @@ with open(CONFIG_PATH, "r") as f:
 
 # Default values for active learning  inference
 DEFAULT_INFERENCE_THRESHOLD = _cfg["DEFAULT_INFERENCE_THRESHOLD"]
+# Query-time gate for "Focus on species"; independent of the storage threshold.
+# Falls back to 0.0 so a config file without the key keeps every snippet visible.
+FOCUS_SPECIES_MIN_PROB = float(_cfg.get("FOCUS_SPECIES_MIN_PROB", 0.0))
 DEFAULT_DENSITY_K = _cfg["DEFAULT_DENSITY_K"]
 DEFAULT_COMPOSITE_WU = _cfg["DEFAULT_COMPOSITE_WU"]
 DEFAULT_COMPOSITE_WD = _cfg["DEFAULT_COMPOSITE_WD"]

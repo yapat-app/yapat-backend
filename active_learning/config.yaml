@@ -12,6 +12,11 @@ DEFAULT_DROPOUT : 0.5
 # ~1.6 KB extra per row). Lower it again only once the storage threshold is
 # decoupled from the query-time filter in app/schemas/explore.py.
 DEFAULT_INFERENCE_THRESHOLD : 0.3
+# Minimum stored probability a snippet needs to stay in the feed when the user
+# focuses on species ("Focus on species"). Kept separate from the storage
+# threshold above: 0.0 hides nothing, so every snippet stays visible with its
+# confidence for the chosen species and the confidence slider does the narrowing.
+FOCUS_SPECIES_MIN_PROB : 0.0
 DEFAULT_DENSITY_K : 30
 DEFAULT_COMPOSITE_WU : 0.5
 DEFAULT_COMPOSITE_WD : 0.25
