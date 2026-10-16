@@ -6,7 +6,12 @@ DEFAULT_HIDDEN_DIM : 128
 DEFAULT_DROPOUT : 0.5
 
 # Default values for active learning inference
-DEFAULT_INFERENCE_THRESHOLD : 0.0
+# Kept at 0.3 rather than 0.0: inference also uses this value to decide which
+# labels to store in al_predictions.predicted_labels, and at 0.0 every class
+# passes for every snippet (e.g. all 82 species on a 1.9 M-snippet dataset,
+# ~1.6 KB extra per row). Lower it again only once the storage threshold is
+# decoupled from the query-time filter in app/schemas/explore.py.
+DEFAULT_INFERENCE_THRESHOLD : 0.3
 DEFAULT_DENSITY_K : 30
 DEFAULT_COMPOSITE_WU : 0.5
 DEFAULT_COMPOSITE_WD : 0.25
