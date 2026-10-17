@@ -24,6 +24,7 @@ celery_app = Celery(
         "app.tasks.pam_al_tasks",
         "app.tasks.wssed_tasks",
         "app.tasks.explore_tasks",
+        "app.tasks.ingest_tasks",
     ]
 )
 
@@ -40,6 +41,7 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.embedding_tasks.*": {"queue": "embeddings"},
         "app.tasks.processing_tasks.*": {"queue": "processing"},
+        "app.tasks.ingest_tasks.*": {"queue": "processing"},
         "app.tasks.pam_al_tasks.*": {"queue": "pam_al"},
     },
     task_default_queue="default",

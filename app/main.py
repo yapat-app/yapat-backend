@@ -18,6 +18,7 @@ from app.api import (
     annotations,
     auth,
     custom_taxonomy,
+    dataset_ingest,
     datasets,
     embeddings,
     explore,
@@ -77,6 +78,7 @@ async def log_requests(request: Request, call_next):
 app.include_router(auth.router, prefix=f"{settings.API_STR}/auth", tags=["auth"])
 app.include_router(teams.router, prefix=f"{settings.API_STR}/teams", tags=["teams"])
 app.include_router(datasets.router, prefix=f"{settings.API_STR}/datasets", tags=["datasets"])
+app.include_router(dataset_ingest.router, prefix=f"{settings.API_STR}/datasets", tags=["datasets"])
 app.include_router(recordings.router, prefix=f"{settings.API_STR}/recordings", tags=["recordings"])
 app.include_router(snippets.router, prefix=f"{settings.API_STR}/snippets", tags=["snippets"])
 app.include_router(annotations.router, prefix=f"{settings.API_STR}/annotations", tags=["annotations"])

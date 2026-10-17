@@ -8,6 +8,8 @@ from enum import Enum
 
 from pydantic import BaseModel, field_validator
 
+from app.schemas.dataset_ingest import ActiveIngestJob, EmbeddingFailureCount
+
 
 class DatasetType(str, Enum):
     PAM = "PAM"
@@ -86,10 +88,17 @@ class Dataset(DatasetBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     recording_count: Optional[int] = None  # Number of recordings in this dataset
+    # Recordings that have location + recorded_date + recorded_time (file name or CSV).
+    # Null where not computed (e.g. the create response).
+    recordings_with_metadata: Optional[int] = None
     is_ready_for_feed: bool = False  # True when default snippet set exists and is READY
     # Newest pending/running embedding job, so the UI can show progress (and hide
     # "Generate Embeddings") after a refresh without a per-card job-list call.
     active_embedding_job: Optional[ActiveEmbeddingJob] = None
+    # Newest pending/running "add recordings" run (same purpose as above).
+    active_ingest_job: Optional[ActiveIngestJob] = None
+    # Recordings left with unembedded snippets by add-recordings (not dismissed).
+    embedding_failures: Optional[EmbeddingFailureCount] = None
 
     class Config:
         from_attributes = True

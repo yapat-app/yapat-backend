@@ -31,6 +31,16 @@ _CACHE_CHUNK_SIZE = 4096
 # Optional in-process cache for repeated access within one worker process.
 _MEMORY_CACHE: dict[tuple[int, int], tuple[np.ndarray, List[Dict[str, Any]]]] = {}
 _MEMORY_CACHE_MAX_ENTRIES = 2
+# Fingerprint each in-memory entry was built from (see load_embeddings_cached).
+_MEMORY_FINGERPRINTS: dict[tuple[int, int], dict[str, int]] = {}
+
+
+def _remember(cache_key, result, fingerprint: dict[str, int]) -> None:
+    if len(_MEMORY_CACHE) >= _MEMORY_CACHE_MAX_ENTRIES:
+        _MEMORY_CACHE.clear()
+        _MEMORY_FINGERPRINTS.clear()
+    _MEMORY_CACHE[cache_key] = result
+    _MEMORY_FINGERPRINTS[cache_key] = dict(fingerprint)
 
 
 def get_embedding_cache_root() -> str:
@@ -103,6 +113,7 @@ def _cache_files_exist(cache_dir: str) -> bool:
 def invalidate_embedding_cache(snippet_set_id: int, embedding_model_id: int) -> None:
     cache_dir = get_cache_dir(snippet_set_id, embedding_model_id)
     _MEMORY_CACHE.pop((snippet_set_id, embedding_model_id), None)
+    _MEMORY_FINGERPRINTS.pop((snippet_set_id, embedding_model_id), None)
     if os.path.isdir(cache_dir):
         shutil.rmtree(cache_dir, ignore_errors=True)
         logger.info(
@@ -270,10 +281,15 @@ def load_embeddings_cached(
     Load embeddings from cache when valid; otherwise build the cache from Postgres.
     """
     cache_key = (snippet_set_id, embedding_model_id)
-    if cache_key in _MEMORY_CACHE:
-        return _MEMORY_CACHE[cache_key]
-
     fingerprint = compute_embedding_fingerprint(db, snippet_set_id, embedding_model_id)
+
+    # The in-process copy is only valid for the vectors it was built from: the
+    # add-recordings pipeline appends vectors to an existing set from another
+    # worker, and invalidate_embedding_cache cannot reach this process's memory.
+    cached = _MEMORY_CACHE.get(cache_key)
+    if cached is not None and _MEMORY_FINGERPRINTS.get(cache_key) == fingerprint:
+        return cached
+
     if fingerprint["count"] == 0:
         raise ValueError(
             f"No embeddings found for snippet_set_id={snippet_set_id}, "
@@ -293,9 +309,7 @@ def load_embeddings_cached(
                 fingerprint["count"],
             )
             result = _load_from_cache_dir(cache_dir)
-            if len(_MEMORY_CACHE) >= _MEMORY_CACHE_MAX_ENTRIES:
-                _MEMORY_CACHE.clear()
-            _MEMORY_CACHE[cache_key] = result
+            _remember(cache_key, result, fingerprint)
             return result
 
     lock_file = _acquire_build_lock(cache_dir)
@@ -305,9 +319,7 @@ def load_embeddings_cached(
                 meta = json.load(f)
             if _fingerprint_matches(meta, fingerprint):
                 result = _load_from_cache_dir(cache_dir)
-                if len(_MEMORY_CACHE) >= _MEMORY_CACHE_MAX_ENTRIES:
-                    _MEMORY_CACHE.clear()
-                _MEMORY_CACHE[cache_key] = result
+                _remember(cache_key, result, fingerprint)
                 return result
 
         result = _build_cache_from_db(
@@ -317,9 +329,7 @@ def load_embeddings_cached(
             cache_dir,
             fingerprint,
         )
-        if len(_MEMORY_CACHE) >= _MEMORY_CACHE_MAX_ENTRIES:
-            _MEMORY_CACHE.clear()
-        _MEMORY_CACHE[cache_key] = result
+        _remember(cache_key, result, fingerprint)
         return result
     finally:
         _release_build_lock(lock_file)

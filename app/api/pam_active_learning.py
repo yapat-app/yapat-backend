@@ -469,11 +469,13 @@ def submit_feedback(
         result = service.submit_feedback(body)
 
         if result.get("auto_retrain_job_id"):
-            from app.tasks.pam_al_tasks import pam_al_auto_retrain
-            pam_al_auto_retrain.delay(
-                checkpoint_id=result["auto_retrain_checkpoint_id"],
-                job_id=result["auto_retrain_job_id"],
-            )
+            # Starts now, or waits for an "add recordings" run on this dataset
+            # to finish (see app/services/retrain_deferral.py).
+            from app.models.pam_active_learning import ALRetrainJob
+            from app.services.retrain_deferral import dispatch_or_wait
+
+            job = db.get(ALRetrainJob, result["auto_retrain_job_id"])
+            result["retrain_waiting_for_ingest_job_id"] = dispatch_or_wait(db, job)
 
         return result
 
@@ -564,16 +566,20 @@ def manual_retrain(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to set up manual retrain: {str(e)}")
 
-    from app.tasks.pam_al_tasks import pam_al_manual_retrain
-    pam_al_manual_retrain.delay(checkpoint_id=ckpt.id, job_id=job.id)
+    from app.services.retrain_deferral import dispatch_or_wait
+
+    waiting_for = dispatch_or_wait(db, job)
 
     return ALJobDispatch(
         job_id=job.id,
         checkpoint_id=ckpt.id,
         status="PENDING",
+        waiting_for_ingest_job_id=waiting_for,
         message=(
-            f"Manual retrain job {job.id} dispatched. "
+            f"Manual retrain job {job.id} waits for add-recordings job {waiting_for} to finish. "
             f"Poll GET /retrain/jobs/{job.id} for status."
+            if waiting_for is not None
+            else f"Manual retrain job {job.id} dispatched. Poll GET /retrain/jobs/{job.id} for status."
         ),
     )
 
@@ -591,8 +597,11 @@ def list_retrain_jobs(
     current_user: User = Depends(get_current_active_user),
 ):
     """List recent retrain jobs, optionally filtered by dataset."""
+    from app.services.retrain_deferral import waiting_ingest_job_id
+
     svc = PAMActiveLearningService(db)
-    return svc.list_retrain_jobs(dataset_id=dataset_id, limit=limit)
+    jobs = svc.list_retrain_jobs(dataset_id=dataset_id, limit=limit)
+    return [_with_waiting(job, waiting_ingest_job_id(db, job)) for job in jobs]
 
 
 @router.get(
@@ -614,7 +623,16 @@ def get_retrain_job(
     job = svc.get_retrain_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Retrain job {job_id} not found.")
-    return job
+    from app.services.retrain_deferral import waiting_ingest_job_id
+
+    return _with_waiting(job, waiting_ingest_job_id(db, job))
+
+
+def _with_waiting(job, waiting_for: Optional[int]) -> ALRetrainJobStatusResponse:
+    """Job status plus the add-recordings run it waits for (computed, not stored)."""
+    response = ALRetrainJobStatusResponse.model_validate(job)
+    response.waiting_for_ingest_job_id = waiting_for
+    return response
 
 
 # ============ USER STUDY-MODE HELPERS ============
