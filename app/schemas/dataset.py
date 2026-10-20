@@ -72,6 +72,19 @@ class ActiveEmbeddingJob(BaseModel):
     started_at: Optional[datetime] = None
 
 
+class ScanProgress(BaseModel):
+    """Live progress of a dataset scan (Redis hash, see services/scan_progress)."""
+    dataset_id: int
+    stage: str  # idle | queued | listing | reading | saving | completed | failed
+    done: Optional[int] = None  # files processed in the current stage
+    total: Optional[int] = None  # files in the current stage (new files only on a rescan)
+    percent: Optional[float] = None  # overall progress across stages
+    stalled: bool = False  # working stage but no update for STALL_AFTER_SECONDS
+    last_update: Optional[int] = None  # unix seconds of the last update
+    error_message: Optional[str] = None
+    recordings_created: Optional[int] = None  # set once the scan has completed
+
+
 class Dataset(DatasetBase):
     id: int
     team_id: Optional[int] = None
@@ -90,6 +103,9 @@ class Dataset(DatasetBase):
     # Newest pending/running embedding job, so the UI can show progress (and hide
     # "Generate Embeddings") after a refresh without a per-card job-list call.
     active_embedding_job: Optional[ActiveEmbeddingJob] = None
+    # Running, queued or failed scan, so the card can show scan progress (or the
+    # failure) after a refresh; scans have no Postgres row of their own.
+    active_scan: Optional[ScanProgress] = None
 
     class Config:
         from_attributes = True

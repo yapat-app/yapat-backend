@@ -7,7 +7,7 @@ import hashlib
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import soundfile as sf
 from sqlalchemy import exists, and_, or_
@@ -478,10 +478,18 @@ class DatasetService:
     # substantially without touching the DB from worker threads.
     SCAN_HASH_WORKERS = 8
 
-    def scan_recordings(self, dataset: DatasetModel) -> List[RecordingModel]:
+    def scan_recordings(
+        self,
+        dataset: DatasetModel,
+        progress: Optional[Callable[[str, int, int], None]] = None,
+    ) -> List[RecordingModel]:
         """
         Walk dataset.source_uri (relative to DATA_ROOT),
         detect audio files, and create Recording rows.
+
+        ``progress(stage, done, total)`` is called as the scan advances
+        (stages: listing, reading, saving) so the caller can publish live
+        progress; the service itself stays free of any transport (Redis).
 
         Returns a list of newly created recordings.
         """
@@ -491,6 +499,7 @@ class DatasetService:
         if not os.path.isdir(dataset_path):
             raise ValueError(f"Invalid dataset path: {dataset_path}")
 
+        self._report(progress, "listing", 0, 0)
         audio_files = self._scan_audio_files(dataset_path)
         if not audio_files:
             return []
@@ -516,10 +525,19 @@ class DatasetService:
         # Read audio headers + compute checksums concurrently. Threads only
         # do file I/O/CPU work and return plain data — the DB session stays
         # single-threaded on the main thread below.
-        file_infos = self._read_file_infos_parallel([fpath for fpath, _ in to_process])
+        total_files = len(to_process)
+        self._report(progress, "reading", 0, total_files)
+        file_infos = self._read_file_infos_parallel(
+            [fpath for fpath, _ in to_process],
+            on_file_done=lambda done: self._report(progress, "reading", done, total_files),
+        )
 
         new_recordings: List[RecordingModel] = []
         batch: List[RecordingModel] = []
+        # Unreadable files are skipped below, so "saving" counts readable files only.
+        total_rows = sum(1 for fpath, _ in to_process if file_infos.get(fpath) is not None)
+        saved = 0
+        self._report(progress, "saving", 0, total_rows)
 
         for fpath, relative_path in to_process:
             info = file_infos.get(fpath)
@@ -541,11 +559,31 @@ class DatasetService:
             new_recordings.append(rec)
 
             if len(batch) >= self.SCAN_COMMIT_BATCH_SIZE:
+                saved += len(batch)
                 self._flush_batch(batch)
+                self._report(progress, "saving", saved, total_rows)
 
+        saved += len(batch)
         self._flush_batch(batch)
+        self._report(progress, "saving", saved, total_rows)
 
         return new_recordings
+
+    @staticmethod
+    def _report(
+        progress: Optional[Callable[[str, int, int], None]],
+        stage: str,
+        done: int,
+        total: int,
+    ) -> None:
+        """Forward scan progress to the caller. Progress is informational only, so a
+        failing callback is logged and never allowed to abort the scan."""
+        if progress is None:
+            return
+        try:
+            progress(stage, done, total)
+        except Exception as exc:
+            logger.warning("scan progress callback failed (%s %s/%s): %s", stage, done, total, exc)
 
     def _filter_to_referenced_files(
         self, dataset: DatasetModel, audio_files: List[str]
@@ -774,8 +812,14 @@ class DatasetService:
         return duration, sample_rate, checksum
 
     def _read_file_infos_parallel(
-            self, filepaths: List[str]
+            self,
+            filepaths: List[str],
+            on_file_done: Optional[Callable[[int], None]] = None,
     ) -> Dict[str, Optional[Tuple[float, int, str]]]:
+        """Read header + checksum for every file on a thread pool.
+
+        ``on_file_done(count)`` runs on the calling thread after each file
+        finishes (successfully or not), with the number finished so far."""
         results: Dict[str, Optional[Tuple[float, int, str]]] = {}
         if not filepaths:
             return results
@@ -792,6 +836,8 @@ class DatasetService:
                 except Exception as e:
                     logger.warning(f"Unexpected error reading {fpath}: {e}")
                     results[fpath] = None
+                if on_file_done is not None:
+                    on_file_done(len(results))
 
         return results
 

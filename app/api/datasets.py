@@ -47,6 +47,7 @@ from app.schemas.dataset import (
     RecordingLocationsResponse,
     RecordingMetadataPreview,
     RecordingMetadataImportResult,
+    ScanProgress,
     SpeciesFolder,
     AudioFile
 )
@@ -54,8 +55,8 @@ from app.schemas.annotation import AnnotationExport
 from app.schemas.quick_label import (
     QuickLabelEntryBatchCreate,
     QuickLabelEntryResponse,
-)
     RecentLabelResponse,
+)
 from app.services.dataset_service import DatasetService, ReferenceMetadataNotFound
 from app.services.recording_metadata_import_service import (
     RecordingMetadataImportService,
@@ -63,6 +64,7 @@ from app.services.recording_metadata_import_service import (
 from app.utils.recording_metadata_csv import MetadataCsvError
 from app.utils.dataset_response import dataset_to_dict
 from app.tasks.processing_tasks import process_dataset
+from app.services import scan_progress
 from app.config import settings
 
 router = APIRouter()
@@ -104,14 +106,23 @@ def create_dataset(
 
     # Dispatch background task for dataset processing (scanning + snippet generation)
     # Returns task ID for client tracking; None if task dispatch fails (backward compatible)
+    # Queued is marked before dispatch so a fast worker's "listing" update is
+    # never overwritten; if dispatch fails the card shows the failure instead.
+    scan_progress.mark_queued(dataset.id)
     try:
         task = process_dataset.delay(dataset.id)
         task_id = task.id
-    except Exception:
+    except Exception as exc:
         task_id = None
+        scan_progress.mark_failed(dataset.id, f"Could not queue the scan: {exc}")
 
     dataset_response = Dataset(
-        **dataset_to_dict(dataset, recording_count=0, is_ready_for_feed=False)
+        **dataset_to_dict(
+            dataset,
+            recording_count=0,
+            is_ready_for_feed=False,
+            active_scan=scan_progress.get_progress(dataset.id),
+        )
     )
 
     return DatasetCreationResponse(
@@ -214,6 +225,10 @@ def read_datasets(
                 },
             )
 
+    # Running, queued or failed scans, one Redis round trip for the page, so a
+    # refresh finds them again (scans have no Postgres row to look up).
+    active_scan_map = scan_progress.get_active_scans(dataset_ids)
+
     # Convert to schema and add recording_count and feed readiness
     result = []
     for dataset in datasets:
@@ -229,11 +244,28 @@ def read_datasets(
                     recording_count=count_map.get(dataset.id, 0),
                     is_ready_for_feed=is_ready,
                     active_embedding_job=active_job_map.get(dataset.id),
+                    active_scan=active_scan_map.get(dataset.id),
                 )
             )
         )
     
     return result
+
+
+@router.get("/{dataset_id}/scan-progress", response_model=ScanProgress)
+def get_scan_progress(
+        dataset_id: int,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_active_user),
+):
+    """
+    Live progress of the dataset's latest scan, polled by the dataset card.
+
+    One Redis read (see services/scan_progress); stage is "idle" when no scan
+    is known, e.g. the last one finished more than a day ago.
+    """
+    _require_dataset_access(DatasetService(db), dataset_id, current_user)
+    return ScanProgress(**scan_progress.get_progress(dataset_id))
 
 
 @router.get("/{dataset_id}/recording-locations", response_model=RecordingLocationsResponse)
@@ -832,33 +864,6 @@ def add_my_quick_labels(
     return _visible_quick_label_entries(db, dataset_id, current_user.id)
 
 
-@router.delete("/{dataset_id}/quick-labels/mine", status_code=status.HTTP_204_NO_CONTENT)
-def delete_my_quick_label(
-    dataset_id: int,
-    taxon_id: str = Query(..., description="Namespaced taxon ID, e.g. gbif:2480932"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    """Remove one of the caller's own entries.
-
-    Dataset-wide entries are not deletable here — hiding those per user would
-    need a separate suppression table, which nothing currently needs.
-    """
-    _require_dataset(db, dataset_id)
-
-    deleted = (
-        db.query(QuickLabelEntry)
-        .filter(
-            QuickLabelEntry.dataset_id == dataset_id,
-            QuickLabelEntry.user_id == current_user.id,
-            QuickLabelEntry.taxon_id == taxon_id,
-        )
-        .delete(synchronize_session=False)
-    )
-    db.commit()
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Quick label not found")
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 @router.get(
     "/{dataset_id}/quick-labels/recent",
     response_model=List[RecentLabelResponse],
@@ -905,3 +910,30 @@ def get_my_recent_labels(
     return recent
 
 
+@router.delete("/{dataset_id}/quick-labels/mine", status_code=status.HTTP_204_NO_CONTENT)
+def delete_my_quick_label(
+    dataset_id: int,
+    taxon_id: str = Query(..., description="Namespaced taxon ID, e.g. gbif:2480932"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Remove one of the caller's own entries.
+
+    Dataset-wide entries are not deletable here — hiding those per user would
+    need a separate suppression table, which nothing currently needs.
+    """
+    _require_dataset(db, dataset_id)
+
+    deleted = (
+        db.query(QuickLabelEntry)
+        .filter(
+            QuickLabelEntry.dataset_id == dataset_id,
+            QuickLabelEntry.user_id == current_user.id,
+            QuickLabelEntry.taxon_id == taxon_id,
+        )
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Quick label not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

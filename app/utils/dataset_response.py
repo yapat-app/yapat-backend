@@ -11,6 +11,7 @@ def dataset_to_dict(
     recording_count: int = 0,
     is_ready_for_feed: bool = False,
     active_embedding_job: Optional[dict[str, Any]] = None,
+    active_scan: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     return {
         "id": dataset.id,
@@ -30,4 +31,5 @@ def dataset_to_dict(
         "recording_count": recording_count,
         "is_ready_for_feed": is_ready_for_feed,
         "active_embedding_job": active_embedding_job,
+        "active_scan": active_scan,
     }
