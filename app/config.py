@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     ENABLE_DOCS: bool = True  # Disable Swagger/ReDoc in production; set to true in dev
     DATA_ROOT: Optional[str] = "/data"
+    # How many of a user's latest annotations feed the "Recent" quick-label row.
+    # Counting annotations rather than labels lets the row grow or shrink with
+    # the number of species a site actually has.
+    RECENT_LABELS_WINDOW: int = 10
     HOST_DATA_ROOT: str | None = None  # host path (optional)
     HOST_MODELS_AL: str | None = None  # host path for models; used by docker-compose for mounts only
     

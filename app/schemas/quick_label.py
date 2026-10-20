@@ -41,3 +41,10 @@ class QuickLabelEntryResponse(BaseModel):
     # True when the row belongs to the calling user, i.e. they may delete it.
     # Dataset-wide rows (Ontology Engineering) come back with owned=False.
     owned: bool
+
+
+class RecentLabelResponse(BaseModel):
+    """A label the caller applied recently, for the "Recent" quick-label row."""
+
+    label: str
+    last_used_at: datetime

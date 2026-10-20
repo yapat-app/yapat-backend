@@ -55,6 +55,7 @@ from app.schemas.quick_label import (
     QuickLabelEntryBatchCreate,
     QuickLabelEntryResponse,
 )
+    RecentLabelResponse,
 from app.services.dataset_service import DatasetService, ReferenceMetadataNotFound
 from app.services.recording_metadata_import_service import (
     RecordingMetadataImportService,
@@ -858,3 +859,49 @@ def delete_my_quick_label(
     if not deleted:
         raise HTTPException(status_code=404, detail="Quick label not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+@router.get(
+    "/{dataset_id}/quick-labels/recent",
+    response_model=List[RecentLabelResponse],
+)
+def get_my_recent_labels(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Distinct labels from the caller's latest annotations on this dataset,
+    newest first.
+
+    The window counts annotations, not labels (see RECENT_LABELS_WINDOW), so a
+    site with few species yields a short row without any per-dataset tuning.
+    Only the caller's own USER rows count: imported ground truth says nothing
+    about what this annotator is currently hearing.
+    """
+    from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
+
+    _require_dataset(db, dataset_id)
+
+    rows = (
+        db.query(ALSnippetAnnotation.label, ALSnippetAnnotation.created_at)
+        .filter(
+            ALSnippetAnnotation.dataset_id == dataset_id,
+            ALSnippetAnnotation.user_id == current_user.id,
+            ALSnippetAnnotation.source == ALAnnotationSource.USER,
+        )
+        .order_by(ALSnippetAnnotation.created_at.desc(), ALSnippetAnnotation.id.desc())
+        .limit(settings.RECENT_LABELS_WINDOW)
+        .all()
+    )
+
+    # Case-insensitive dedupe to match how the chip list dedupes; rows are
+    # newest first, so the first spelling seen is the most recent one.
+    seen = set()
+    recent = []
+    for label, created_at in rows:
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        recent.append(RecentLabelResponse(label=label, last_used_at=created_at))
+    return recent
+
+
