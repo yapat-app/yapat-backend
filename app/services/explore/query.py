@@ -20,6 +20,9 @@ import numpy as np
 # Model score columns, in storage order.
 SCORE_COLUMNS: tuple[str, ...] = ("uncertainty", "diversity", "density", "composite")
 SCORE_KEYS: tuple[str, ...] = SCORE_COLUMNS + ("confidence",)
+# Cosine similarity to a "Find similar" anchor. Only defined while a similarity
+# search is active, so it is kept out of SCORE_KEYS (always-present scores).
+SIMILARITY_KEY = "similarity"
 
 # alProperties.ts declared ranges — used when the data provides no domain.
 PROPERTY_RANGES: dict[str, tuple[float, float]] = {
@@ -28,6 +31,7 @@ PROPERTY_RANGES: dict[str, tuple[float, float]] = {
     "density": (0.0, 1.0),
     "composite": (-2.0, 2.0),
     "confidence": (0.0, 1.0),
+    SIMILARITY_KEY: (0.0, 1.0),
 }
 # computeScoreDomains only derives domains for these (confidence keeps [0,1]).
 DOMAIN_KEYS: tuple[str, ...] = SCORE_COLUMNS
@@ -35,7 +39,9 @@ DOMAIN_KEYS: tuple[str, ...] = SCORE_COLUMNS
 SCORE_UPPER_EPS = 1e-9
 MISSING_DAY = np.iinfo(np.int32).min
 
-SORT_FIELDS = ("confidence", "composite", "uncertainty", "diversity", "density", "date", "time")
+SORT_FIELDS = (
+    "confidence", "composite", "uncertainty", "diversity", "density", "date", "time", SIMILARITY_KEY,
+)
 
 
 # ── Aligned data ──────────────────────────────────────────────────────────────
@@ -124,14 +130,18 @@ class Filters:
     time_range: tuple[float, float] | None = None
     score_ranges: tuple[tuple[str, float, float], ...] = ()
     sticky_ids: tuple[int, ...] = ()
+    # "Find similar" anchor snippet id. The population shrinks to its nearest
+    # neighbours, whose similarity is computed by the caller (it needs the DB).
+    similar_to: int | None = None
 
     def population_key(self) -> tuple:
-        return (self.predicted_species, self.predicted_min_prob)
+        return (self.predicted_species, self.predicted_min_prob, self.similar_to)
 
     def non_score_key(self) -> tuple:
         return (
             self.predicted_species,
             self.predicted_min_prob,
+            self.similar_to,
             self.annotation_status,
             self.annotated_species,
             self.label_scope,
@@ -157,6 +167,9 @@ class Population:
     mask: np.ndarray  # bool [n]
     confidence: np.ndarray  # float32 [n], NaN undefined
     domains: dict[str, tuple[float, float]]
+    # float32 [n]: similarity to the anchor, NaN outside its neighbours.
+    # None when no similarity search is active.
+    similarity: np.ndarray | None = None
 
 
 @dataclass
@@ -243,7 +256,14 @@ def compute_population(
     base: BaseData,
     model: ModelData | None,
     filters: Filters,
+    similarity: np.ndarray | None = None,
 ) -> Population:
+    """Rows the current question is about, plus the domains scores scale to.
+
+    ``similarity`` (float32 [n], NaN = not a neighbour) restricts the population
+    to the anchor's nearest neighbours. Domains are then derived from those
+    rows only, so every score slider spans the values that can actually appear.
+    """
     n = base.n
     if model is None:
         mask = np.ones(n, dtype=bool)
@@ -285,7 +305,14 @@ def compute_population(
                 valid = ~np.isnan(scoped)
                 confidence[kept[valid]] = scoped[valid]
 
+    if similarity is not None:
+        mask &= ~np.isnan(similarity)
+
     domains: dict[str, tuple[float, float]] = {}
+    if similarity is not None:
+        sims = similarity[mask]
+        if sims.size:
+            domains[SIMILARITY_KEY] = (float(sims.min()), float(sims.max()))
     if model is not None:
         rows = np.flatnonzero(mask)
         for col, key in enumerate(SCORE_COLUMNS):
@@ -295,7 +322,7 @@ def compute_population(
             finite = vals[np.isfinite(vals)]
             if finite.size:
                 domains[key] = (float(finite.min()), float(finite.max()))
-    return Population(mask=mask, confidence=confidence, domains=domains)
+    return Population(mask=mask, confidence=confidence, domains=domains, similarity=similarity)
 
 
 def _noisy_or(probs: np.ndarray, model_rows: np.ndarray, positions: np.ndarray) -> np.ndarray:
@@ -405,6 +432,10 @@ def score_column(
 ) -> np.ndarray:
     if key == "confidence":
         return population.confidence
+    if key == SIMILARITY_KEY:
+        if population.similarity is None:
+            return np.full(n, np.nan, dtype=np.float32)
+        return population.similarity
     if model is None:
         return np.full(n, np.nan, dtype=np.float32)
     return model.scores[:, SCORE_COLUMNS.index(key)]
@@ -477,7 +508,10 @@ def score_histograms(
     n: int,
 ) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    for key in SCORE_KEYS:
+    keys = SCORE_KEYS
+    if result.population.similarity is not None:
+        keys = keys + (SIMILARITY_KEY,)
+    for key in keys:
         lo, hi = domain_for(key, result.population)
         col = score_column(key, model, result.population, n)
         out[key] = {
@@ -511,6 +545,11 @@ def _sort_values(
         else:
             vals = base.rec_time[safe].astype(np.float64)
         return np.where(has_dt, vals, -np.inf)
+    if field_name == SIMILARITY_KEY:
+        if population.similarity is None:
+            return np.full(rows.shape[0], -np.inf)
+        vals = population.similarity[rows].astype(np.float64)
+        return np.where(np.isnan(vals), -np.inf, vals)
     if field_name == "confidence":
         vals = population.confidence[rows].astype(np.float64)
         # prediction.confidence is 0 (not undefined) when no probability > 0.
@@ -536,6 +575,9 @@ def order_rows(
     """Visible base rows in feed order (int64)."""
     native = native_order(base, model)
     rows = native[result.visible[native]]
+    if not sort and result.population.similarity is not None:
+        # A similarity search without an explicit sort lists closest first.
+        sort = [(SIMILARITY_KEY, "desc")]
     if not sort or rows.size == 0:
         return rows
     keys: list[np.ndarray] = [np.arange(rows.size)]  # tie-break: native order

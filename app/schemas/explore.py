@@ -9,8 +9,10 @@ from pydantic import BaseModel, Field, field_validator
 from active_learning.config import FOCUS_SPECIES_MIN_PROB
 from app.services.explore.query import Filters
 
-ScoreKey = Literal["uncertainty", "diversity", "density", "composite", "confidence"]
-SortFieldName = Literal["confidence", "composite", "uncertainty", "diversity", "density", "date", "time"]
+ScoreKey = Literal["uncertainty", "diversity", "density", "composite", "confidence", "similarity"]
+SortFieldName = Literal[
+    "confidence", "composite", "uncertainty", "diversity", "density", "date", "time", "similarity"
+]
 ProjectionMethodName = Literal["pca", "umap", "tsne", "isomap"]
 
 
@@ -51,6 +53,10 @@ class ExploreFilters(BaseModel):
         max_length=5000,
         description="Snippets that stay admitted by the annotation-status filter (just-labelled rows).",
     )
+    similar_to: Optional[int] = Field(
+        default=None,
+        description="'Find similar' anchor: limits results to this snippet's nearest neighbours.",
+    )
 
     @field_validator("months")
     @classmethod
@@ -86,6 +92,7 @@ class ExploreFilters(BaseModel):
             time_range=_norm_range(self.time_range),
             score_ranges=tuple(score_ranges),
             sticky_ids=tuple(sorted(set(int(i) for i in self.sticky_ids))),
+            similar_to=self.similar_to,
         )
 
 
@@ -107,7 +114,7 @@ class FacetsRequest(BaseModel):
 class FeedRequest(BaseModel):
     scope: ExploreScope
     filters: ExploreFilters = Field(default_factory=ExploreFilters)
-    sort: List[ExploreSortField] = Field(default_factory=list, max_length=7)
+    sort: List[ExploreSortField] = Field(default_factory=list, max_length=8)
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=50, ge=1, le=200)
     anchor_snippet_id: Optional[int] = Field(

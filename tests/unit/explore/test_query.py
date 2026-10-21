@@ -289,3 +289,62 @@ def test_date_time_counts_are_recording_level(frame):
     assert counts["date_domain"] == [DAY, DAY]
     assert counts["date_counts"] == [[DAY, 1]]
     assert counts["time_counts"] == [[60, 1]]
+
+
+# ── Find similar ──────────────────────────────────────────────────────────────
+
+
+def _similarity(base, pairs: dict[int, float]) -> np.ndarray:
+    column = np.full(base.n, np.nan, dtype=np.float32)
+    for sid, value in pairs.items():
+        column[int(base.index_of([sid])[0])] = value
+    return column
+
+
+def test_similarity_limits_population_and_sets_domain(frame):
+    from app.services.explore.query import compute_population
+
+    base, model, labels = frame
+    sims = _similarity(base, {10: 1.0, 11: 0.6, 13: 0.8, 15: 0.9})
+    pop = compute_population(base, model, Filters(similar_to=10), sims)
+    # 15 has no prediction, so it stays outside the model population.
+    assert base.snippet_ids[pop.mask].tolist() == [10, 11, 13]
+    assert pop.domains["similarity"] == pytest.approx((0.6, 1.0))
+    # Other score domains are rescoped to the neighbours.
+    assert pop.domains["composite"] == pytest.approx((-0.5, 1.0))
+
+
+def test_similarity_defaults_to_closest_first_and_sorts_by_other_fields(frame):
+    from app.services.explore.query import compute_population
+
+    base, model, labels = frame
+    sims = _similarity(base, {10: 1.0, 11: 0.6, 13: 0.8})
+    filters = Filters(similar_to=10)
+    pop = compute_population(base, model, filters, sims)
+    result = apply_filters(base, model, labels, filters, population=pop)
+    assert ordered_ids(base, order_rows(base, model, result, [])) == [10, 13, 11]
+    by_uncertainty = order_rows(base, model, result, [("uncertainty", "desc")])
+    assert ordered_ids(base, by_uncertainty) == [11, 13, 10]
+    by_similarity_asc = order_rows(base, model, result, [("similarity", "asc")])
+    assert ordered_ids(base, by_similarity_asc) == [11, 13, 10]
+
+
+def test_similarity_range_and_histogram(frame):
+    from app.services.explore.query import compute_population
+
+    base, model, labels = frame
+    sims = _similarity(base, {10: 1.0, 11: 0.6, 13: 0.8})
+    # Normalised [0.5, 1] of the (0.6, 1.0) domain keeps similarity >= 0.8.
+    filters = Filters(similar_to=10, score_ranges=(("similarity", 0.5, 1.0),))
+    pop = compute_population(base, model, filters, sims)
+    result = apply_filters(base, model, labels, filters, population=pop)
+    assert visible_ids(base, result) == [10, 13]
+    hist = score_histograms(model, result, 4, base.n)
+    assert sum(hist["similarity"]["total"]) == 3
+    assert sum(hist["similarity"]["visible"]) == 2
+
+
+def test_no_similarity_keeps_histogram_keys_unchanged(frame):
+    base, model, labels = frame
+    result = apply_filters(base, model, labels, Filters())
+    assert "similarity" not in score_histograms(model, result, 4, base.n)

@@ -49,6 +49,12 @@ from app.services.explore.query import (
     unpack_labels,
 )
 from app.services.explore.sampling import density_grid
+from app.services.explore.similarity import (
+    SIMILARITY_K,
+    AnchorError,
+    nearest_neighbours,
+    similarity_column,
+)
 
 MAX_EXTRA_POINTS = 20_000
 
@@ -168,11 +174,41 @@ class ExploreService:
 
     # ── cached filter evaluation ──────────────────────────────────────────
 
+    def _similarity(self, frame: Frame, filters: Filters) -> np.ndarray | None:
+        """Dense similarity column for the "Find similar" anchor, if one is set.
+
+        Cached per base version, so paging, re-sorting and slider drags reuse
+        one index lookup; a rebuilt snippet set naturally invalidates it.
+        """
+        anchor = filters.similar_to
+        if anchor is None:
+            return None
+
+        def compute() -> np.ndarray:
+            try:
+                ids, sims = nearest_neighbours(
+                    self.db,
+                    frame.scope.snippet_set_id,
+                    frame.embedding_model_id,
+                    anchor,
+                    SIMILARITY_K,
+                )
+            except AnchorError as exc:
+                raise ScopeError(400, str(exc)) from exc
+            return similarity_column(frame.base, ids, sims)
+
+        return registry.similarity_cache.get_or_compute(
+            ("sim", frame.base.version, frame.embedding_model_id, anchor, SIMILARITY_K),
+            compute,
+        )
+
     def evaluate(self, frame: Frame, filters: Filters) -> FilterResult:
         base_key = frame.cache_key()
         population = registry.population_cache.get_or_compute(
             ("pop", base_key[0], base_key[1], filters.population_key()),
-            lambda: compute_population(frame.base, frame.model, filters),
+            lambda: compute_population(
+                frame.base, frame.model, filters, self._similarity(frame, filters)
+            ),
         )
         non_score = registry.non_score_cache.get_or_compute(
             ("ns", base_key, filters.non_score_key()),
@@ -321,6 +357,9 @@ class ExploreService:
                     scores["confidence"] = conf
                     row["confidence"] = conf
                 row["scores"] = scores
+            similarity = result.population.similarity
+            if similarity is not None and math.isfinite(float(similarity[r])):
+                row["scores"]["similarity"] = float(similarity[r])
             out.append(row)
         return out
 
@@ -443,6 +482,11 @@ class ExploreService:
         candidates = labels.labeled & has_coords & ~view["in_sample"]
         pinned_mask = np.zeros(frame.base.n, dtype=bool)
         pinned_mask[pinned_rows] = True
+        # "Find similar" matches are few (SIMILARITY_K) and are the point of the
+        # view, so they are always drawn even when the static sample skips them.
+        similarity = result.population.similarity
+        if similarity is not None:
+            pinned_mask |= ~np.isnan(similarity)
         pinned_extra = np.flatnonzero(pinned_mask & has_coords & ~view["in_sample"])
         labeled_extra = np.flatnonzero(candidates & ~pinned_mask)
         budget = max(0, MAX_EXTRA_POINTS - pinned_extra.size)

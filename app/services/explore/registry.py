@@ -156,6 +156,8 @@ population_cache = KeyedLRU(8)
 non_score_cache = KeyedLRU(16)
 filter_cache = KeyedLRU(16)
 order_cache = KeyedLRU(6)
+# "Find similar" neighbour columns, keyed by (base version, model, anchor).
+similarity_cache = KeyedLRU(16)
 
 _labels_lock = threading.Lock()
 _labels_key_locks: dict[tuple[int, int], threading.Lock] = {}
@@ -179,6 +181,7 @@ def reset_caches() -> None:
     for cache in (
         base_cache, model_cache, projection_map_cache,
         population_cache, non_score_cache, filter_cache, order_cache,
+        similarity_cache,
     ):
         cache.clear()
     with _labels_lock:

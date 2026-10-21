@@ -345,3 +345,59 @@ def test_inference_hook_publishes_model_layer(world, db_session):
     layer = storage.load_layer("model", model_key(world["ckpt"].id, world["ss"].id), pointer.version)
     assert layer["snippet_ids"].tolist() == [s.id for s in snippets]
     assert layer.meta["source"] == "inference"
+
+
+def test_find_similar_feed_filters_sort_and_summary(world, client_for, monkeypatch):
+    from app.services.explore import service as explore_service
+
+    sid = [s.id for s in world["snippets"]]
+    calls = []
+
+    def fake_neighbours(db, snippet_set_id, embedding_model_id, anchor, k):
+        calls.append(anchor)
+        return (
+            np.array([sid[0], sid[3], sid[1], sid[2]], dtype=np.int64),
+            np.array([1.0, 0.9, 0.7, 0.5], dtype=np.float32),
+        )
+
+    monkeypatch.setattr(explore_service, "nearest_neighbours", fake_neighbours)
+    client = client_for(world["admin"])
+    filters = {"similar_to": sid[0]}
+
+    feed = client.post("/api/explore/feed", json={"scope": scope(world), "filters": filters}).json()
+    assert ids_of(feed["rows"]) == [sid[0], sid[3], sid[1], sid[2]]
+    assert feed["rows"][1]["scores"]["similarity"] == pytest.approx(0.9)
+
+    unlabeled = client.post(
+        "/api/explore/feed",
+        json={
+            "scope": scope(world),
+            "filters": {**filters, "annotation_status": "unannotated"},
+            "sort": [{"field": "uncertainty", "direction": "desc"}],
+        },
+    ).json()
+    # Snippet 2 is labeled; uncertainty = 0.1 * i.
+    assert ids_of(unlabeled["rows"]) == [sid[3], sid[1], sid[0]]
+
+    summary = client.post("/api/explore/summary", json={"scope": scope(world), "filters": filters}).json()
+    assert summary["counts"]["population"] == 4
+    assert summary["domains"]["similarity"] == pytest.approx([0.5, 1.0])
+    assert sum(summary["histograms"]["similarity"]["total"]) == 4
+    # One index lookup serves every request for the same anchor.
+    assert calls == [sid[0]]
+
+
+def test_find_similar_bad_anchor_is_400(world, client_for, monkeypatch):
+    from app.services.explore import service as explore_service
+    from app.services.explore.similarity import AnchorError
+
+    def missing(*_args, **_kwargs):
+        raise AnchorError("no embedding")
+
+    monkeypatch.setattr(explore_service, "nearest_neighbours", missing)
+    client = client_for(world["admin"])
+    r = client.post(
+        "/api/explore/feed",
+        json={"scope": scope(world), "filters": {"similar_to": 123456}},
+    )
+    assert r.status_code == 400
