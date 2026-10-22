@@ -14,10 +14,10 @@ import math
 from typing import Any, Iterable, Sequence
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
-from app.models.embedding import SnippetSet
+from app.models.embedding import EmbeddingVector, SnippetSet
 from app.models.pam_active_learning import ALModelCheckpoint, ALPrediction
 from app.models.recording import Recording
 from app.models.snippet import Snippet
@@ -99,9 +99,16 @@ def build_base_arrays(db: Session, snippet_set_id: int) -> tuple[dict[str, np.nd
     id_chunks: list[np.ndarray] = []
     rec_chunks: list[np.ndarray] = []
     dur_chunks: list[np.ndarray] = []
+    # Only snippets that have an embedding: one left without (BirdNET returned
+    # nothing, or its recording failed during "add recordings") can never be
+    # scored or projected, so the hub does not list it.
+    has_vector = exists().where(
+        EmbeddingVector.snippet_id == Snippet.id,
+        EmbeddingVector.embedding_model_id == snippet_set.embedding_model_id,
+    )
     stmt = (
         select(Snippet.id, Snippet.recording_id, Snippet.start_time, Snippet.end_time)
-        .where(Snippet.snippet_set_id == snippet_set_id)
+        .where(Snippet.snippet_set_id == snippet_set_id, has_vector)
         .order_by(Snippet.id)
     )
     for part in stream_rows(db, stmt):

@@ -1275,10 +1275,10 @@ class PAMActiveLearningService:
         self.db.add(model_ckpt)
         self.db.flush()
 
+        # started_at is set when the task claims the job (see setup_manual_retrain).
         job = ALRetrainJob(
             model_checkpoint_id=model_ckpt.id, dataset_id=body.dataset_id,
             trigger="cold_start", feedback_count=0, status=ALRetrainStatus.PENDING,
-            started_at=datetime.now(timezone.utc),
         )
         self.db.add(job)
         self.db.commit()
@@ -1468,10 +1468,12 @@ class PAMActiveLearningService:
         self.db.add(new_ckpt)
         self.db.flush()
 
+        # started_at stays empty until the task claims the job: retrain_deferral
+        # reads "PENDING and never started" as held behind an add-recordings run.
         job = ALRetrainJob(
             model_checkpoint_id=new_ckpt.id, dataset_id=parent_ckpt.dataset_id, trigger="manual",
             feedback_count=fb_h.feedback_count_since_retrain(self.db, parent_ckpt.id),
-            status=ALRetrainStatus.PENDING, started_at=datetime.now(timezone.utc),
+            status=ALRetrainStatus.PENDING,
         )
         self.db.add(job)
         self.db.commit()
@@ -1537,10 +1539,11 @@ class PAMActiveLearningService:
         self.db.add(new_ckpt)
         self.db.flush()
 
+        # started_at is set when the task claims the job (see setup_manual_retrain).
         job = ALRetrainJob(
             model_checkpoint_id=new_ckpt.id, dataset_id=parent_ckpt.dataset_id, trigger="auto_feedback",
             feedback_count=fb_h.feedback_count_since_retrain(self.db, parent_checkpoint_id),
-            status=ALRetrainStatus.PENDING, started_at=datetime.now(timezone.utc),
+            status=ALRetrainStatus.PENDING,
         )
         self.db.add(job)
         self.db.commit()

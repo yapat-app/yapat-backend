@@ -88,6 +88,13 @@ def pam_al_train_from_scratch(self, checkpoint_id: int, job_id: int):
     """
     db = SessionLocal()
     try:
+        from app.services.retrain_deferral import claim_retrain_job
+
+        # A job can be sent twice (released after an add-recordings run, or
+        # re-sent by the cleanup safety net); only the copy that claims it runs.
+        if not claim_retrain_job(db, job_id):
+            logger.info("pam_al_train_from_scratch: job %d already claimed; skipping", job_id)
+            return {"status": "skipped", "checkpoint_id": checkpoint_id, "job_id": job_id}
         svc = _make_service(db)
         self.update_state(
             state="RUNNING",
@@ -130,6 +137,13 @@ def pam_al_manual_retrain(self, checkpoint_id: int, job_id: int):
     """
     db = SessionLocal()
     try:
+        from app.services.retrain_deferral import claim_retrain_job
+
+        # A job can be sent twice (released after an add-recordings run, or
+        # re-sent by the cleanup safety net); only the copy that claims it runs.
+        if not claim_retrain_job(db, job_id):
+            logger.info("pam_al_manual_retrain: job %d already claimed; skipping", job_id)
+            return {"status": "skipped", "checkpoint_id": checkpoint_id, "job_id": job_id}
         svc = _make_service(db)
         self.update_state(
             state="RUNNING",
@@ -174,6 +188,13 @@ def pam_al_auto_retrain(self, checkpoint_id: int, job_id: int):
     """
     db = SessionLocal()
     try:
+        from app.services.retrain_deferral import claim_retrain_job
+
+        # A job can be sent twice (released after an add-recordings run, or
+        # re-sent by the cleanup safety net); only the copy that claims it runs.
+        if not claim_retrain_job(db, job_id):
+            logger.info("pam_al_auto_retrain: job %d already claimed; skipping", job_id)
+            return {"status": "skipped", "checkpoint_id": checkpoint_id, "job_id": job_id}
         svc = _make_service(db)
         self.update_state(
             state="RUNNING",
@@ -291,8 +312,20 @@ def pam_al_cleanup_stale_jobs():
     retrain_cutoff = now - timedelta(hours=_RETRAIN_STALE_HOURS)
     inference_cutoff = now - timedelta(hours=_INFERENCE_STALE_HOURS)
 
+    from app.services.retrain_deferral import (
+        release_orphaned_waiting_retrains,
+        waiting_ingest_job_id,
+    )
+
     db = SessionLocal()
     try:
+        # Safety net for retrains held back by an "add recordings" run: re-send
+        # never-started ones no run is holding any more (e.g. a worker died
+        # between the run's end and its release pass).
+        released = release_orphaned_waiting_retrains(db)
+        if released:
+            logger.warning("pam_al_cleanup_stale_jobs: re-dispatched waiting retrains %s", released)
+
         stale = (
             db.query(ALRetrainJob)
             .filter(
@@ -303,9 +336,16 @@ def pam_al_cleanup_stale_jobs():
 
         marked = 0
         for job in stale:
+            if waiting_ingest_job_id(db, job) is not None:
+                # Held behind a running ingest: queued, not stuck. The ingest is
+                # failed as dead after 60 min without progress, which releases it.
+                continue
             reference_time = job.started_at or job.created_at
             if reference_time is None:
                 continue
+            if reference_time.tzinfo is None:
+                # SQLite hands back naive timestamps; they are stored as UTC.
+                reference_time = reference_time.replace(tzinfo=timezone.utc)
 
             is_retrain = job.trigger in _RETRAIN_TRIGGERS
             cutoff = retrain_cutoff if is_retrain else inference_cutoff
@@ -334,6 +374,81 @@ def pam_al_cleanup_stale_jobs():
         db.rollback()
         logger.exception("pam_al_cleanup_stale_jobs failed")
         raise
+
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.pam_al_tasks.pam_al_score_ingested_snippets",
+    max_retries=0,
+    time_limit=_INFERENCE_STALE_HOURS * 3600,
+    soft_time_limit=_INFERENCE_STALE_HOURS * 3600 - 300,
+)
+def pam_al_score_ingested_snippets(self, ingest_job_id: int):
+    """Scoring stage of an "add recordings" run (yapat-backend#70).
+
+    Scores the snippets each active checkpoint of the dataset has no prediction
+    for (see _incremental_scoring), then completes the ingest job. Recordings and
+    vectors are already stored at this point, so a scoring failure completes the
+    run with scoring_skipped_reason="scoring_failed" rather than failing it.
+    """
+    from app.models.dataset_ingest_job import DatasetIngestJob
+    from app.models.pam_active_learning import (
+        ALModelCheckpoint,
+        ALModelFamilyState,
+        ALModelStatus,
+    )
+    from app.services import ingest_progress
+    from app.services.pam_al._incremental_scoring import score_unscored_snippets
+    from app.tasks.ingest_tasks import complete_job
+
+    db = SessionLocal()
+    try:
+        job = db.get(DatasetIngestJob, ingest_job_id)
+        if job is None:
+            return {"status": "error", "message": f"DatasetIngestJob({ingest_job_id}) not found"}
+
+        checkpoints = (
+            db.query(ALModelCheckpoint)
+            .join(
+                ALModelFamilyState,
+                ALModelFamilyState.active_model_checkpoint_id == ALModelCheckpoint.id,
+            )
+            .filter(
+                ALModelFamilyState.dataset_id == job.dataset_id,
+                ALModelCheckpoint.status == ALModelStatus.AVAILABLE,
+            )
+            .all()
+        )
+        # A checkpoint trained on another (older) snippet set never sees this one.
+        checkpoints = [
+            c for c in checkpoints
+            if (c.hyperparameters or {}).get("resolved_snippet_set_id") in (None, job.snippet_set_id)
+        ]
+        if not checkpoints:
+            complete_job(ingest_job_id, snippets_scored=0, scoring_skipped_reason="no_active_checkpoint")
+            return {"status": "completed", "job_id": ingest_job_id, "scored": 0}
+
+        scored = 0
+        for ckpt in checkpoints:
+            scored += score_unscored_snippets(
+                db,
+                ckpt,
+                job.snippet_set_id,
+                on_total=lambda n: ingest_progress.start_stage(ingest_job_id, n),
+                on_scored=lambda n: ingest_progress.incr(ingest_job_id, n),
+            )
+        complete_job(ingest_job_id, snippets_scored=scored)
+        logger.info("pam_al_score_ingested_snippets: ingest_job=%s scored=%s", ingest_job_id, scored)
+        return {"status": "completed", "job_id": ingest_job_id, "scored": scored}
+
+    except Exception as e:
+        db.rollback()
+        logger.exception("pam_al_score_ingested_snippets failed: ingest_job=%s", ingest_job_id)
+        complete_job(ingest_job_id, error=f"Scoring failed: {e}", scoring_skipped_reason="scoring_failed")
+        return {"status": "scoring_failed", "job_id": ingest_job_id, "error": str(e)}
 
     finally:
         db.close()
