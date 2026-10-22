@@ -53,6 +53,62 @@ def publish_model_layer_from_inference(
             invalidate_model(checkpoint_id, int(snippet_set_id))
 
 
+def append_to_model_layer(
+    checkpoint_id: int,
+    snippet_set_id: int,
+    snippet_ids: Sequence[int],
+    probs: np.ndarray,
+    preds: np.ndarray,
+    score_matrix: np.ndarray,
+    label_order: Sequence[str],
+) -> None:
+    """Merge newly scored rows into the published model layer (add-recordings).
+
+    The layer is republished as a new version holding the old rows plus these
+    (re-scored ids replace their old row), so the hub never has to rebuild a
+    multi-million-row layer from al_predictions JSON. When no layer is published
+    yet there is nothing to merge into: the next reader builds it from Postgres,
+    which already holds these rows. A label-order mismatch or any error falls
+    back to invalidating, which is always correct, only slower.
+    """
+    from app.services.explore import storage
+    from app.services.explore.builders import model_arrays_from_matrices, model_key
+
+    if len(snippet_ids) == 0:
+        return
+    key = model_key(checkpoint_id, snippet_set_id)
+    try:
+        pointer = storage.read_pointer("model", key)
+        if pointer is None:
+            return
+        current = storage.load_layer("model", key, pointer.version)
+        if list(current.meta.get("label_order") or []) != [str(x) for x in label_order]:
+            invalidate_model(checkpoint_id, snippet_set_id)
+            return
+
+        new_arrays, meta = model_arrays_from_matrices(
+            snippet_ids, probs, preds, score_matrix, label_order,
+            checkpoint_id=checkpoint_id, snippet_set_id=snippet_set_id,
+        )
+        old_ids = np.asarray(current["snippet_ids"])
+        keep = ~np.isin(old_ids, new_arrays["snippet_ids"])
+        merged_ids = np.concatenate([old_ids[keep], new_arrays["snippet_ids"]])
+        order = np.argsort(merged_ids, kind="stable")
+        merged = {"snippet_ids": merged_ids[order]}
+        for name in ("scores", "probs", "pred_bits", "default_confidence"):
+            merged[name] = np.concatenate([np.asarray(current[name])[keep], new_arrays[name]])[order]
+
+        meta = {**current.meta, "n": int(merged_ids.size), "source": "inference+incremental"}
+        for reserved in ("kind", "key", "version", "arrays", "created_at"):
+            meta.pop(reserved, None)
+        storage.write_layer("model", key, merged, meta)
+    except Exception:
+        logger.exception(
+            "explore: merging %s rows into model layer %s failed; invalidating", len(snippet_ids), key
+        )
+        invalidate_model(checkpoint_id, snippet_set_id)
+
+
 MODEL_LAYERS_KEPT_PER_SNIPPET_SET = 3
 
 

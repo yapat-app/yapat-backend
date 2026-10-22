@@ -21,7 +21,7 @@ from fastapi import (
     Form,
 )
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, func
+from sqlalchemy import and_, case, func
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import get_db, get_current_active_user, get_current_admin_user
@@ -58,6 +58,7 @@ from app.schemas.quick_label import (
     RecentLabelResponse,
 )
 from app.services.dataset_service import DatasetService, ReferenceMetadataNotFound
+from app.services.dataset_ingest_service import DatasetIngestService
 from app.services.recording_metadata_import_service import (
     RecordingMetadataImportService,
 )
@@ -171,18 +172,25 @@ def read_datasets(
         current_user=current_user, skip=skip, limit=limit, include_reference=include_reference
     )
     
-    # Add recording count for each dataset
+    # Recording count, and how many of them have location + date + time, for each
+    # dataset in one grouped query (the metadata count rides on the same scan).
     dataset_ids = [ds.id for ds in datasets]
     if dataset_ids:
         recording_counts = (
-            db.query(Recording.dataset_id, func.count(Recording.id).label('count'))
+            db.query(
+                Recording.dataset_id,
+                func.count(Recording.id).label('count'),
+                func.sum(case((DatasetService.hub_metadata_complete_clause(), 1), else_=0)).label('with_metadata'),
+            )
             .filter(Recording.dataset_id.in_(dataset_ids))
             .group_by(Recording.dataset_id)
             .all()
         )
-        count_map = {ds_id: count for ds_id, count in recording_counts}
+        count_map = {ds_id: count for ds_id, count, _ in recording_counts}
+        metadata_map = {ds_id: int(with_meta or 0) for ds_id, _, with_meta in recording_counts}
     else:
         count_map = {}
+        metadata_map = {}
     
     # Check feed readiness for datasets with default snippet sets
     snippet_set_ids = [ds.default_snippet_set_id for ds in datasets if ds.default_snippet_set_id]
@@ -228,6 +236,9 @@ def read_datasets(
     # Running, queued or failed scans, one Redis round trip for the page, so a
     # refresh finds them again (scans have no Postgres row to look up).
     active_scan_map = scan_progress.get_active_scans(dataset_ids)
+    ingest_svc = DatasetIngestService(db)
+    active_ingest_map = ingest_svc.active_jobs_by_dataset(dataset_ids)
+    failure_map = ingest_svc.failure_counts_by_dataset(dataset_ids)
 
     # Convert to schema and add recording_count and feed readiness
     result = []
@@ -242,9 +253,12 @@ def read_datasets(
                 **dataset_to_dict(
                     dataset,
                     recording_count=count_map.get(dataset.id, 0),
+                    recordings_with_metadata=metadata_map.get(dataset.id, 0),
                     is_ready_for_feed=is_ready,
                     active_embedding_job=active_job_map.get(dataset.id),
                     active_scan=active_scan_map.get(dataset.id),
+                    active_ingest_job=active_ingest_map.get(dataset.id),
+                    embedding_failures=failure_map.get(dataset.id, {"recordings": 0, "snippets": 0}),
                 )
             )
         )
@@ -300,12 +314,17 @@ def read_dataset(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # Add recording count
-    recording_count = (
-        db.query(func.count(Recording.id))
+    # Recording count and how many have location + date + time (one query)
+    recording_count, recordings_with_metadata = (
+        db.query(
+            func.count(Recording.id),
+            func.sum(case((DatasetService.hub_metadata_complete_clause(), 1), else_=0)),
+        )
         .filter(Recording.dataset_id == dataset_id)
-        .scalar()
-    ) or 0
+        .one()
+    )
+    recording_count = int(recording_count or 0)
+    recordings_with_metadata = int(recordings_with_metadata or 0)
     
     # Check if dataset is ready for feed generation
     is_ready_for_feed = False
@@ -317,12 +336,21 @@ def read_dataset(
         )
         if snippet_set and snippet_set.status == SnippetSetStatus.READY:
             is_ready_for_feed = True
-    
+
+    ingest_svc = DatasetIngestService(db)
+    active_ingest_job = ingest_svc.active_jobs_by_dataset([dataset_id]).get(dataset_id)
+    embedding_failures = ingest_svc.failure_counts_by_dataset([dataset_id]).get(
+        dataset_id, {"recordings": 0, "snippets": 0}
+    )
+
     return Dataset(
         **dataset_to_dict(
             dataset,
             recording_count=recording_count,
+            recordings_with_metadata=recordings_with_metadata,
             is_ready_for_feed=is_ready_for_feed,
+            active_ingest_job=active_ingest_job,
+            embedding_failures=embedding_failures,
         )
     )
 

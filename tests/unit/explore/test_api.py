@@ -15,7 +15,14 @@ from fastapi.testclient import TestClient
 from app.api import explore as explore_api
 from app.api.deps import get_current_active_user, get_db
 from app.models.dataset import Dataset, DatasetType
-from app.models.embedding import EmbeddingModel, SnippetSet, SnippetSetStatus
+from app.models.embedding import (
+    EmbeddingJob,
+    EmbeddingJobStatus,
+    EmbeddingModel,
+    EmbeddingVector,
+    SnippetSet,
+    SnippetSetStatus,
+)
 from app.models.pam_active_learning import (
     ALAnnotationSource,
     ALModelCheckpoint,
@@ -72,6 +79,16 @@ def world(db_session):
         snippets.append(s)
     db_session.add_all(snippets)
     db_session.flush()
+
+    # Every snippet is embedded, as in a real set: the base layer only lists
+    # snippets with a vector (see test_base_layer_skips_unembedded_snippets).
+    ejob = EmbeddingJob(dataset_id=ds.id, embedding_model_id=em.id, snippet_set_id=ss.id,
+                        status=EmbeddingJobStatus.COMPLETED)
+    db_session.add(ejob)
+    db_session.flush()
+    for s in snippets:
+        db_session.add(EmbeddingVector(snippet_id=s.id, embedding_job_id=ejob.id,
+                                       embedding_model_id=em.id, dim=4, vector=[0.0] * 4))
 
     ckpt = ALModelCheckpoint(dataset_id=ds.id, model_family_name="fam", version="v1",
                              checkpoint_path="x.pt", label_config_path="labels.json",
@@ -269,6 +286,20 @@ def test_no_model_scope(world, client_for):
     resp = client.post("/api/explore/feed", json={"scope": scope(world, checkpoint_id=None)}).json()
     assert ids_of(resp["rows"]) == [s.id for s in world["snippets"]]
     assert resp["rows"][0]["predicted_labels"] is None
+
+
+def test_base_layer_skips_unembedded_snippets(world, client_for, db_session):
+    """A snippet left without an embedding (failed in add-recordings) is not listed."""
+    extra = Snippet(recording_id=world["snippets"][0].recording_id, snippet_set_id=world["ss"].id,
+                    start_time=99.0, end_time=102.0, duration=3.0)
+    db_session.add(extra)
+    db_session.commit()
+    client = client_for(world["admin"])
+
+    resp = client.post("/api/explore/feed", json={"scope": scope(world, checkpoint_id=None)}).json()
+
+    assert extra.id not in ids_of(resp["rows"])
+    assert ids_of(resp["rows"]) == [s.id for s in world["snippets"]]
 
 
 def test_validation_errors(world, client_for):

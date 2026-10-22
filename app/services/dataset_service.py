@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional, Tuple
 
 import soundfile as sf
-from sqlalchemy import exists, and_, or_
+from sqlalchemy import exists, and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -482,6 +482,10 @@ class DatasetService:
         self,
         dataset: DatasetModel,
         progress: Optional[Callable[[str, int, int], None]] = None,
+        *,
+        stats: Optional[Dict[str, int]] = None,
+        on_files_to_read: Optional[Callable[[int], None]] = None,
+        on_file_read: Optional[Callable[[], None]] = None,
     ) -> List[RecordingModel]:
         """
         Walk dataset.source_uri (relative to DATA_ROOT),
@@ -492,7 +496,22 @@ class DatasetService:
         progress; the service itself stays free of any transport (Redis).
 
         Returns a list of newly created recordings.
+
+        Optional hooks for callers that report progress (the add-recordings
+        pipeline): `stats` is filled with files_found / files_skipped /
+        files_unreadable / recordings_new, `on_files_to_read(n)` is called once
+        with the number of new files to read, and `on_file_read()` after each.
         """
+        stats = stats if stats is not None else {}
+        stats.update(
+            files_found=0,
+            files_skipped=0,
+            files_unreadable=0,
+            recordings_new=0,
+            recordings_with_metadata=0,
+            recordings_missing_metadata=0,
+        )
+
         DATA_ROOT = settings.DATA_ROOT or "/data"
         dataset_path = os.path.join(DATA_ROOT, dataset.source_uri)
 
@@ -516,20 +535,34 @@ class DatasetService:
             for fpath in audio_files
         ]
         existing_paths = self._existing_file_paths(dataset.id)
+        # Hashing below can take hours on big folders; don't sit idle in the
+        # read transaction the query above opened.
+        self.db.commit()
         to_process = [
             (fpath, rel) for fpath, rel in candidates if rel not in existing_paths
         ]
+        stats["files_found"] = len(candidates)
+        stats["files_skipped"] = len(candidates) - len(to_process)
         if not to_process:
             return []
+
+        if on_files_to_read is not None:
+            on_files_to_read(len(to_process))
 
         # Read audio headers + compute checksums concurrently. Threads only
         # do file I/O/CPU work and return plain data — the DB session stays
         # single-threaded on the main thread below.
         total_files = len(to_process)
         self._report(progress, "reading", 0, total_files)
+
+        def on_file_done(done: int) -> None:
+            self._report(progress, "reading", done, total_files)
+            if on_file_read is not None:
+                on_file_read()
+
         file_infos = self._read_file_infos_parallel(
             [fpath for fpath, _ in to_process],
-            on_file_done=lambda done: self._report(progress, "reading", done, total_files),
+            on_file_done=on_file_done,
         )
 
         new_recordings: List[RecordingModel] = []
@@ -542,6 +575,7 @@ class DatasetService:
         for fpath, relative_path in to_process:
             info = file_infos.get(fpath)
             if info is None:
+                stats["files_unreadable"] += 1
                 continue  # unreadable/failed file; already logged, skip it
 
             duration, sample_rate, checksum = info
@@ -567,6 +601,10 @@ class DatasetService:
         self._flush_batch(batch)
         self._report(progress, "saving", saved, total_rows)
 
+        stats["recordings_new"] = len(new_recordings)
+        complete = sum(1 for rec in new_recordings if self._has_hub_metadata(rec.extra_metadata))
+        stats["recordings_with_metadata"] = complete
+        stats["recordings_missing_metadata"] = len(new_recordings) - complete
         return new_recordings
 
     @staticmethod
@@ -584,6 +622,23 @@ class DatasetService:
             progress(stage, done, total)
         except Exception as exc:
             logger.warning("scan progress callback failed (%s %s/%s): %s", stage, done, total, exc)
+
+    # The recording fields the Annotation Hub filters on (location, date, time
+    # facets); a new recording with all three needs no metadata upload.
+    HUB_METADATA_KEYS = ("location", "recorded_date", "recorded_time")
+
+    @classmethod
+    def _has_hub_metadata(cls, extra_metadata: Optional[dict]) -> bool:
+        meta = extra_metadata or {}
+        return all(meta.get(key) not in (None, "") for key in cls.HUB_METADATA_KEYS)
+
+    @classmethod
+    def hub_metadata_complete_clause(cls):
+        """SQL twin of _has_hub_metadata, for counting recordings in the database."""
+        return and_(*[
+            func.nullif(RecordingModel.extra_metadata[key].as_string(), "").isnot(None)
+            for key in cls.HUB_METADATA_KEYS
+        ])
 
     def _filter_to_referenced_files(
         self, dataset: DatasetModel, audio_files: List[str]

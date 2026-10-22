@@ -45,6 +45,7 @@ _ADD_CHUNK_SIZE = 100_000
 # One index only: at 1024 dims over 3M points it is ~14 GB, so a second entry
 # would double the worker's footprint for no benefit.
 _MEMORY_CACHE: dict[tuple[int, int], faiss.Index] = {}
+_MEMORY_FINGERPRINT: dict[tuple[int, int], dict[str, int]] = {}
 
 
 def get_ann_index_root() -> str:
@@ -117,6 +118,7 @@ def _read_meta(cache_dir: str) -> dict[str, Any]:
 def invalidate_ann_index_cache(snippet_set_id: int, embedding_model_id: int) -> None:
     cache_dir = get_index_dir(snippet_set_id, embedding_model_id)
     _MEMORY_CACHE.pop((snippet_set_id, embedding_model_id), None)
+    _MEMORY_FINGERPRINT.pop((snippet_set_id, embedding_model_id), None)
     if os.path.isdir(cache_dir):
         shutil.rmtree(cache_dir, ignore_errors=True)
         logger.info(
@@ -190,7 +192,10 @@ def load_or_build_index(
     """
     cache_key = (snippet_set_id, embedding_model_id)
     cached = _MEMORY_CACHE.get(cache_key)
-    if cached is not None:
+    # Same rule as the embedding cache: vectors can be appended to a set by the
+    # add-recordings pipeline in another worker, so only reuse the in-process
+    # index when it was built from exactly these vectors.
+    if cached is not None and _MEMORY_FINGERPRINT.get(cache_key) == _expected_meta(fingerprint)["fingerprint"]:
         return cached
 
     cache_dir = get_index_dir(snippet_set_id, embedding_model_id)
@@ -203,6 +208,8 @@ def load_or_build_index(
         )
         _MEMORY_CACHE.clear()
         _MEMORY_CACHE[cache_key] = index
+        _MEMORY_FINGERPRINT.clear()
+        _MEMORY_FINGERPRINT[cache_key] = _expected_meta(fingerprint)["fingerprint"]
         return index
 
     lock_file = _acquire_build_lock(cache_dir)
@@ -214,6 +221,8 @@ def load_or_build_index(
             index = _build_index(X, cache_dir, fingerprint)
         _MEMORY_CACHE.clear()
         _MEMORY_CACHE[cache_key] = index
+        _MEMORY_FINGERPRINT.clear()
+        _MEMORY_FINGERPRINT[cache_key] = _expected_meta(fingerprint)["fingerprint"]
         return index
     finally:
         _release_build_lock(lock_file)
