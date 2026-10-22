@@ -1,7 +1,8 @@
 """
-Retrains wait for a running "add recordings" run on the same dataset.
+Retrains and cold starts wait for a running "add recordings" run on the same dataset.
 
-Without this, a retrain triggered by feedback (or the manual button) while an
+Without this, a retrain triggered by feedback (or the manual button), or a
+cold start from metadata, started while an
 ingest run is embedding new snippets trains on the old embedding matrix, then
 replaces the active checkpoint after the ingest scored the new snippets with
 the old one, so the new snippets end up with no predictions for the new
@@ -17,6 +18,10 @@ never started and created after the run started was held back by that run.
 A retrain job may therefore be dispatched twice in rare races (e.g. created the
 instant the run ends, or re-sent by the cleanup safety net). The retrain tasks
 claim their job atomically (claim_retrain_job), so a second copy exits.
+
+The bootstrap cold start (first labels, trained synchronously inside the
+feedback request) never goes through here: it stamps started_at as it starts,
+so it never looks held.
 """
 
 from __future__ import annotations
@@ -32,8 +37,8 @@ from app.models.pam_active_learning import ALRetrainJob, ALRetrainStatus
 
 logger = logging.getLogger(__name__)
 
-# Only these wait for a run; cold-start training and inference jobs never do.
-WAITING_TRIGGERS = ("manual", "auto_feedback")
+# Only these wait for a run; inference jobs never do.
+WAITING_TRIGGERS = ("manual", "auto_feedback", "cold_start")
 
 # Safety net: a never-started PENDING retrain older than this, with no run on
 # its dataset, is re-dispatched by the cleanup beat (duplicates exit on claim).
@@ -68,9 +73,16 @@ def _held_query(db: Session, dataset_id: int):
 
 
 def _dispatch(job: ALRetrainJob) -> None:
-    from app.tasks.pam_al_tasks import pam_al_auto_retrain, pam_al_manual_retrain
+    from app.tasks.pam_al_tasks import (
+        pam_al_auto_retrain,
+        pam_al_manual_retrain,
+        pam_al_train_from_scratch,
+    )
 
-    task = pam_al_manual_retrain if job.trigger == "manual" else pam_al_auto_retrain
+    task = {
+        "manual": pam_al_manual_retrain,
+        "cold_start": pam_al_train_from_scratch,
+    }.get(job.trigger, pam_al_auto_retrain)
     task.delay(checkpoint_id=job.model_checkpoint_id, job_id=job.id)
 
 

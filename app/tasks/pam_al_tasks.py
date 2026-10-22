@@ -88,6 +88,13 @@ def pam_al_train_from_scratch(self, checkpoint_id: int, job_id: int):
     """
     db = SessionLocal()
     try:
+        from app.services.retrain_deferral import claim_retrain_job
+
+        # A job can be sent twice (released after an add-recordings run, or
+        # re-sent by the cleanup safety net); only the copy that claims it runs.
+        if not claim_retrain_job(db, job_id):
+            logger.info("pam_al_train_from_scratch: job %d already claimed; skipping", job_id)
+            return {"status": "skipped", "checkpoint_id": checkpoint_id, "job_id": job_id}
         svc = _make_service(db)
         self.update_state(
             state="RUNNING",

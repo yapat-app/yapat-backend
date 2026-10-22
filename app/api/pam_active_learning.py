@@ -525,16 +525,22 @@ def train_from_scratch(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to set up training: {str(e)}")
 
-    from app.tasks.pam_al_tasks import pam_al_train_from_scratch
-    pam_al_train_from_scratch.delay(checkpoint_id=ckpt.id, job_id=job.id)
+    # Starts now, or waits for an "add recordings" run on this dataset to
+    # finish (see app/services/retrain_deferral.py).
+    from app.services.retrain_deferral import dispatch_or_wait
+
+    waiting_for = dispatch_or_wait(db, job)
 
     return ALJobDispatch(
         job_id=job.id,
         checkpoint_id=ckpt.id,
         status="PENDING",
+        waiting_for_ingest_job_id=waiting_for,
         message=(
-            f"Cold-start training job {job.id} dispatched. "
+            f"Cold-start training job {job.id} waits for add-recordings job {waiting_for} to finish. "
             f"Poll GET /retrain/jobs/{job.id} for status."
+            if waiting_for is not None
+            else f"Cold-start training job {job.id} dispatched. Poll GET /retrain/jobs/{job.id} for status."
         ),
     )
 

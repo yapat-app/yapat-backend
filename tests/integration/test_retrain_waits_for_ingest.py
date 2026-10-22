@@ -1,5 +1,5 @@
 """
-Retrains wait for a running "add recordings" run on the same dataset.
+Retrains and cold starts wait for a running "add recordings" run on the same dataset.
 
 Covers app/services/retrain_deferral.py (no stored link: a held retrain is one
 that is PENDING, never started and created after the run started) and its
@@ -36,7 +36,21 @@ def dispatched(monkeypatch):
                         lambda **kw: calls.append(("auto", kw["job_id"])))
     monkeypatch.setattr(pam_al_tasks.pam_al_manual_retrain, "delay",
                         lambda **kw: calls.append(("manual", kw["job_id"])))
+    monkeypatch.setattr(pam_al_tasks.pam_al_train_from_scratch, "delay",
+                        lambda **kw: calls.append(("cold", kw["job_id"])))
     return calls
+
+
+@pytest.fixture
+def training_files(tmp_path, monkeypatch):
+    """The metadata CSV and label config setup_train_from_scratch requires to exist."""
+    from app.services.pam_al import service as service_module
+
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "pam_metadata.csv").write_text("filename,species\n")
+    (site / "pam_label_config.json").write_text('["a"]')
+    monkeypatch.setattr(service_module, "DATA_ROOT", str(tmp_path))
 
 
 @pytest.fixture
@@ -154,6 +168,72 @@ def test_dead_run_failed_on_read_dispatches_the_held_retrain(db_session, env, di
     assert dispatched == [("auto", job.id)]
 
 
+@pytest.mark.parametrize("trigger", ["auto_feedback", "manual"])
+def test_retrains_created_by_the_service_are_held_and_released(db_session, env, dispatched, trigger):
+    """Jobs built by setup_auto_retrain / setup_manual_retrain, not by hand,
+    so a setup that stamps started_at early (and hides the job from release)
+    is caught."""
+    from app.models.pam_active_learning import ALModelFamilyState
+    from app.schemas.pam_active_learning import ALRetrainRequest
+    from app.services.pam_al.service import PAMActiveLearningService
+    from app.tasks.ingest_tasks import complete_job
+
+    parent = ALModelCheckpoint(
+        dataset_id=env.dataset.id, model_family_name="default", version="v0",
+        checkpoint_path="p.pt", label_config_path="", status=ALModelStatus.AVAILABLE,
+        hyperparameters={"embedding_model_id": 1, "resolved_snippet_set_id": 1, "label_order": ["a"]},
+    )
+    db_session.add(parent)
+    db_session.flush()
+    db_session.add(ALModelFamilyState(dataset_id=env.dataset.id, model_family_name="default",
+                                      active_model_checkpoint_id=parent.id))
+    db_session.commit()
+
+    # A minute ago: the job's created_at comes from SQLite's CURRENT_TIMESTAMP,
+    # which has whole seconds only and could read as older than a run started
+    # in the same second.
+    run = env.ingest(minutes_ago=1)
+    svc = PAMActiveLearningService(db_session)
+    if trigger == "manual":
+        _, job = svc.setup_manual_retrain(
+            ALRetrainRequest(dataset_id=env.dataset.id, model_family_name="default"))
+    else:
+        _, job = svc.setup_auto_retrain(parent.id)
+
+    assert job.started_at is None
+    assert retrain_deferral.dispatch_or_wait(db_session, job) == run.id
+    assert dispatched == []
+
+    complete_job(run.id)
+
+    kind = "manual" if trigger == "manual" else "auto"
+    assert dispatched == [(kind, job.id)]
+
+
+def test_cold_start_created_by_the_service_is_held_and_released(
+    db_session, env, dispatched, training_files
+):
+    """Same as above for setup_train_from_scratch, released to the cold-start task."""
+    from app.schemas.pam_active_learning import ALTrainFromScratchRequest
+    from app.services.pam_al.service import PAMActiveLearningService
+    from app.tasks.ingest_tasks import complete_job
+
+    snippet_set = db_session.query(SnippetSet).filter_by(dataset_id=env.dataset.id).one()
+    run = env.ingest(minutes_ago=1)   # see the SQLite note in the test above
+    _, job = PAMActiveLearningService(db_session).setup_train_from_scratch(
+        ALTrainFromScratchRequest(dataset_id=env.dataset.id, snippet_set_id=snippet_set.id,
+                                  embedding_model_id=snippet_set.embedding_model_id))
+
+    assert job.trigger == "cold_start" and job.started_at is None
+    assert retrain_deferral.dispatch_or_wait(db_session, job) == run.id
+    assert dispatched == []
+    assert retrain_deferral.waiting_ingest_job_id(db_session, _fresh(db_session, job)) == run.id
+
+    complete_job(run.id)
+
+    assert dispatched == [("cold", job.id)]
+
+
 def test_release_only_touches_retrains_the_run_held(db_session, env, dispatched):
     from app.tasks.ingest_tasks import complete_job
 
@@ -162,13 +242,14 @@ def test_release_only_touches_retrains_the_run_held(db_session, env, dispatched)
     started = env.retrain(minutes_ago=5)
     started.started_at = _now()                              # already running
     db_session.commit()
-    cold = env.retrain(trigger="cold_start", minutes_ago=5)  # never waits
+    cold = env.retrain(trigger="cold_start", minutes_ago=5)  # held like a retrain
+    inference = env.retrain(trigger="inference", minutes_ago=5)  # never waits
     held = env.retrain(minutes_ago=1)
 
     complete_job(run.id)
 
-    assert dispatched == [("auto", held.id)]
-    assert {before.id, started.id, cold.id}.isdisjoint({j for _, j in dispatched})
+    assert dispatched == [("cold", cold.id), ("auto", held.id)]
+    assert {before.id, started.id, inference.id}.isdisjoint({j for _, j in dispatched})
 
 
 # ----------------------------------------------------------------------
@@ -186,7 +267,8 @@ def test_claim_succeeds_once(db_session, env):
     assert claimed.started_at is not None
 
 
-@pytest.mark.parametrize("task_name", ["pam_al_auto_retrain", "pam_al_manual_retrain"])
+@pytest.mark.parametrize(
+    "task_name", ["pam_al_auto_retrain", "pam_al_manual_retrain", "pam_al_train_from_scratch"])
 def test_second_copy_of_a_retrain_task_skips(db_session, env, monkeypatch, task_name):
     from app.tasks import pam_al_tasks
 
@@ -259,3 +341,31 @@ def test_poll_endpoint_reports_waiting(db_session, env, dispatched):
     assert polled["status"] == "PENDING"
     assert polled["waiting_for_ingest_job_id"] == run.id
     assert [j["waiting_for_ingest_job_id"] for j in listed if j["id"] == job.id] == [run.id]
+
+
+def test_train_from_scratch_endpoint_waits_for_a_running_ingest(
+    db_session, env, dispatched, training_files
+):
+    from app.api.deps import get_current_active_user, get_db
+    from app.main import app
+
+    admin = User(username="cold_start_admin", hashed_password="x", role=UserRole.ADMIN)
+    db_session.add(admin)
+    db_session.commit()
+    snippet_set = db_session.query(SnippetSet).filter_by(dataset_id=env.dataset.id).one()
+    run = env.ingest(minutes_ago=1)
+    app.dependency_overrides[get_db] = lambda: db_session
+    app.dependency_overrides[get_current_active_user] = lambda: admin
+    try:
+        response = TestClient(app).post("/api/pam-al/train-from-scratch", json={
+            "dataset_id": env.dataset.id,
+            "snippet_set_id": snippet_set.id,
+            "embedding_model_id": snippet_set.embedding_model_id,
+        })
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["waiting_for_ingest_job_id"] == run.id
+    assert dispatched == []
