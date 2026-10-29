@@ -53,6 +53,8 @@ services:
       API_STR: /api
       PROJECT_NAME: YAPAT Backend
       ENABLE_DOCS: true
+      # User-study deployment: store interaction events sent by the frontend.
+      STUDY_EVENTS_ENABLED: ${STUDY_EVENTS_ENABLED:-true}
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS}
       WSSED_FOCAL_DATA_ROOT: /wssed-focal-data
       WSSED_GPU_SERVER_URL: ${WSSED_GPU_SERVER_URL:-http://172.17.0.1:8004}

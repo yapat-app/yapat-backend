@@ -1,0 +1,12 @@
+# Local-only: the database stores absolute host paths for these recordings, so
+# the folder is mounted at the same path inside the containers.
+services:
+  api:
+    volumes:
+      - /Users/prpr02-admin/Downloads/raw_data:/Users/prpr02-admin/Downloads/raw_data:ro
+  celery-worker:
+    volumes:
+      - /Users/prpr02-admin/Downloads/raw_data:/Users/prpr02-admin/Downloads/raw_data:ro
+  celery-worker-pam-al:
+    volumes:
+      - /Users/prpr02-admin/Downloads/raw_data:/Users/prpr02-admin/Downloads/raw_data:ro

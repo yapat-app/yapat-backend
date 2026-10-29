@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "YAPAT Backend"
     LOG_LEVEL: str = "INFO"
     ENABLE_DOCS: bool = True  # Disable Swagger/ReDoc in production; set to true in dev
+    # User-study interaction logging. Off by default so public installs never
+    # store participant interaction events; enable only on study deployments.
+    STUDY_EVENTS_ENABLED: bool = False
     DATA_ROOT: Optional[str] = "/data"
     # How many of a user's latest annotations feed the "Recent" quick-label row.
     # Counting annotations rather than labels lets the row grow or shrink with

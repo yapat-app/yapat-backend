@@ -20,6 +20,7 @@ from sqlalchemy import func, distinct
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_admin_user
+from app.config import settings
 from app.core.security import verify_token
 from app.models.study_event import StudyEvent as StudyEventModel
 from app.models.user import User
@@ -84,7 +85,16 @@ def ingest_study_events(
     (navigator.sendBeacon unload path, which cannot set headers). The user_id is
     always taken from the validated token server-side — the client envelope's
     userId is never trusted.
+
+    Rejected with 403 unless STUDY_EVENTS_ENABLED is set, so a public install
+    stores nothing even if a client is misconfigured to send events.
     """
+    if not settings.STUDY_EVENTS_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Study event logging is disabled on this server.",
+        )
+
     token = credentials.credentials if credentials else batch_in.token
     user = _resolve_user(db, token)
 
