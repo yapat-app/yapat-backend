@@ -2,10 +2,8 @@
 Snippet retrieval and utility service (for SnippetSet-based architecture)
 """
 
-import random
-from datetime import datetime, timezone
 from typing import List, Optional
-from sqlalchemy import String, cast, case, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.snippet import Snippet
@@ -13,7 +11,6 @@ from app.models.annotation import Annotation
 from app.models.recording import Recording
 from app.models.embedding import SnippetSet, SnippetSetStatus
 from app.models.dataset import Dataset
-from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
 
 
 class SnippetService:
@@ -31,22 +28,13 @@ class SnippetService:
         dataset_id: int,
         snippet_set_id: int,
         recording_id: Optional[int] = None,
-        q: Optional[str] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> List[Snippet]:
         """
         Retrieve snippets belonging to a dataset and snippet_set.
 
-        Optionally filter by recording and by snippet-ID prefix.
-
-        Args:
-            q: Optional snippet-ID prefix search. Casts ``Snippet.id`` to text
-                and matches ``LIKE '<q>%'``. A non-digit ``q`` matches nothing
-                (returns ``[]``). When ``q`` is provided, results are ordered by
-                ``Snippet.id`` ascending for a stable, predictable dropdown;
-                otherwise the default ``start_time`` ordering is preserved so
-                existing callers are unaffected.
+        Optionally filter by recording.
         """
 
         query = (
@@ -60,17 +48,7 @@ class SnippetService:
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
 
-        if q is not None:
-            # Snippet-ID prefix search. IDs are integers, so a non-digit query
-            # can never match -- short-circuit to an empty result.
-            if not q.isdigit():
-                return []
-            query = query.filter(cast(Snippet.id, String).like(f"{q}%"))
-            order_by = Snippet.id.asc()
-        else:
-            order_by = Snippet.start_time
-
-        return query.order_by(order_by).offset(skip).limit(limit).all()
+        return query.order_by(Snippet.start_time).offset(skip).limit(limit).all()
 
     # ---------------------------------------------------------
     # Annotation Utility
@@ -246,13 +224,8 @@ class SnippetService:
         # Filter by recording_id if provided
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
-        
-        # Return random snippets as placeholder
-        all_snippets = query.all()
-        random.shuffle(all_snippets)
-        
-        # Apply pagination
-        return all_snippets[skip:skip + limit]
+
+        return query.order_by(func.random()).offset(skip).limit(limit).all()
 
     def get_feed_random(
         self,
@@ -300,45 +273,43 @@ class SnippetService:
         # Filter by recording_id if provided
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
-        
-        # Return random snippets
-        import random
-        all_snippets = query.all()
-        random.shuffle(all_snippets)
 
-        # Apply pagination
-        return all_snippets[skip:skip + limit]
+        return query.order_by(func.random()).offset(skip).limit(limit).all()
 
     def get_feed_filter(
         self,
         dataset_id: Optional[int] = None,
         snippet_set_id: Optional[int] = None,
         recording_id: Optional[int] = None,
-        annotation_status: Optional[str] = "any",
+        annotation_status: Optional[str] = None,
         location: Optional[str] = None,
-        species: Optional[str] = None,
+        user_id: Optional[int] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> List[Snippet]:
         """
-        Filter snippets by annotation status.
+        Return a randomly-ordered, SQL-filtered feed.
 
         Args:
-            annotation_status: 'any' (default), 'annotated' (has >=1 label),
-                or 'unannotated' (has no label). Matches ALSnippetAnnotation
-                (GROUND_TRUTH + USER sources) -- the same superset of
-                canonical Annotation that the species filter matches against
-                -- so a snippet counts as "annotated" whether it was labeled
-                via the classic hub, AL-mode feedback, or ground-truth import.
-            species: Comma-separated list of annotated species labels. Only
-                snippets with at least one matching label are returned.
+            dataset_id: Optional dataset ID (required when snippet_set_id not given)
+            snippet_set_id: Optional snippet set ID (uses dataset default if absent)
+            recording_id: Optional recording ID to restrict snippets to one recording
+            annotation_status: "annotated" | "unannotated" | "any" (default).
+                               Annotation scope is any user annotation on the snippet.
+            location: Optional site/locality filter. Supports one value or a comma-separated
+                      list for multi-select filtering.
+            user_id: Unused for annotation_status filtering (kept for API compatibility).
+            skip: Pagination offset
+            limit: Maximum snippets to return (default 50)
 
         Returns:
-            List of Snippet objects in random order.
+            List of Snippet objects in random order
 
         Raises:
-            ValueError: If dataset_id is required but not provided, or if SnippetSet is not READY.
+            ValueError: If parameters are invalid or SnippetSet is not READY
         """
+        from sqlalchemy import cast, func, exists, select, String
+
         snippet_set_id = self._resolve_and_validate_snippet_set(dataset_id, snippet_set_id)
 
         query = (
@@ -350,168 +321,72 @@ class SnippetService:
 
         if dataset_id is not None:
             query = query.filter(SnippetSet.dataset_id == dataset_id)
+
         if recording_id is not None:
             query = query.filter(Snippet.recording_id == recording_id)
 
-        # Set below only for annotation_status='annotated' (optionally
-        # narrowed by species); None means default id-ascending order.
-        recency_order_by = None
-        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-        status = (annotation_status or "any").lower()
-        # A snippet is "annotated" if it has an AL row (ground-truth import or
-        # AL-mode feedback) OR a canonical annotations row (classic hub).
-        has_annotation = (
-            self.db.query(ALSnippetAnnotation.id)
-            .filter(
-                ALSnippetAnnotation.snippet_id == Snippet.id,
-                ALSnippetAnnotation.source.in_(
-                    [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
-                ),
-            )
-            .exists()
-        ) | (
-            self.db.query(Annotation.id)
-            .filter(Annotation.snippet_id == Snippet.id)
-            .exists()
-        )
-        if status == "annotated":
-            query = query.filter(has_annotation)
-
-            # Rank by most recent trusted annotation (any label); overridden
-            # below if `species` narrows this to specific labels.
-            latest_al_at = (
-                self.db.query(func.max(ALSnippetAnnotation.created_at))
-                .filter(
-                    ALSnippetAnnotation.snippet_id == Snippet.id,
-                    ALSnippetAnnotation.source.in_(
-                        [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
-                    ),
+        if location is not None and location.strip():
+            loc_values = [p.strip() for p in location.split(",") if p.strip()]
+            if not loc_values:
+                loc_values = []
+            # Parse & persist location from file names for rows that still lack it
+            backfill_dataset_id = dataset_id
+            if backfill_dataset_id is None:
+                ss_row = (
+                    self.db.query(SnippetSet)
+                    .filter(SnippetSet.id == snippet_set_id)
+                    .first()
                 )
-                .correlate(Snippet)
-                .scalar_subquery()
-            )
-            latest_ann_at = (
-                self.db.query(func.max(Annotation.created_at))
-                .filter(Annotation.snippet_id == Snippet.id)
-                .correlate(Snippet)
-                .scalar_subquery()
-            )
-            al_latest = func.coalesce(latest_al_at, epoch)
-            ann_latest = func.coalesce(latest_ann_at, epoch)
-            recency_order_by = case(
-                (al_latest > ann_latest, al_latest),
-                else_=ann_latest,
-            ).desc()
-        elif status == "unannotated":
-            query = query.filter(~has_annotation)
-        elif status not in ("any", ""):
+                if ss_row is not None:
+                    backfill_dataset_id = ss_row.dataset_id
+            if backfill_dataset_id is not None:
+                from app.services.dataset_service import DatasetService
+
+                DatasetService(self.db).backfill_recording_locations(
+                    backfill_dataset_id
+                )
+
+            bind = self.db.get_bind()
+            dialect = bind.dialect.name
+            # PG: cast(json['k'], String) is wrong for string JSON values; use ->> for text.
+            if loc_values:
+                if dialect == "postgresql":
+                    query = query.filter(
+                        Recording.extra_metadata.op("->>")("location").in_(loc_values)
+                    )
+                elif dialect == "sqlite":
+                    query = query.filter(
+                        func.json_extract(Recording.extra_metadata, "$.location")
+                        .in_(loc_values)
+                    )
+                else:
+                    query = query.filter(
+                        cast(Recording.extra_metadata["location"], String).in_(loc_values)
+                    )
+
+        # Apply annotation status filter based on any annotation on the snippet
+        status = (annotation_status or "any").lower()
+        if status not in ("any", "", "annotated", "unannotated"):
             raise ValueError(
                 f"Invalid annotation_status '{annotation_status}'. "
                 "Expected 'any', 'annotated', or 'unannotated'."
             )
+        if status in ("annotated", "unannotated"):
+            ann_subq = (
+                select(Annotation.id)
+                .where(
+                    Annotation.snippet_id == Snippet.id,
+                )
+                .correlate(Snippet)
+                .exists()
+            )
+            if status == "annotated":
+                query = query.filter(ann_subq)
+            else:
+                query = query.filter(~ann_subq)
 
-        # Location filter: comma-separated list of location values.
-        # A recording's location is extra_metadata['location'] if set, otherwise
-        # the first underscore-delimited segment of the file name.
-        if location:
-            wanted = {loc.strip() for loc in location.split(",") if loc.strip()}
-            if wanted:
-                # Collect recording IDs whose location matches any wanted value.
-                all_recordings = (
-                    self.db.query(Recording.id, Recording.file_name, Recording.extra_metadata)
-                    .filter(Recording.dataset_id == dataset_id)
-                    .all()
-                )
-                matching_ids = []
-                for rec_id, file_name, meta in all_recordings:
-                    if meta and isinstance(meta, dict) and meta.get("location"):
-                        loc_val = str(meta["location"])
-                    else:
-                        stem = file_name.rsplit(".", 1)[0] if file_name and "." in file_name else (file_name or "")
-                        loc_val = stem.split("_")[0] if "_" in stem else stem
-                    if loc_val in wanted:
-                        matching_ids.append(rec_id)
-                if matching_ids:
-                    query = query.filter(Snippet.recording_id.in_(matching_ids))
-                else:
-                    return []
-
-        # Species filter: comma-separated list of annotated species labels.
-        # Matches ALSnippetAnnotation (a superset of canonical Annotation --
-        # it also captures AL-mode feedback and ground-truth imports),
-        # restricted to trusted sources. One row per (snippet, label), so
-        # this naturally matches a snippet if ANY of its labels is selected.
-        if species:
-            wanted_species = {s.strip() for s in species.split(",") if s.strip()}
-            if wanted_species:
-                # Match AL rows (ground-truth / AL feedback) OR canonical
-                # annotations by resolved species name.
-                species_match = (
-                    self.db.query(ALSnippetAnnotation.id)
-                    .filter(
-                        ALSnippetAnnotation.snippet_id == Snippet.id,
-                        ALSnippetAnnotation.source.in_(
-                            [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
-                        ),
-                        ALSnippetAnnotation.label.in_(wanted_species),
-                    )
-                    .exists()
-                ) | (
-                    self.db.query(Annotation.id)
-                    .filter(
-                        Annotation.snippet_id == Snippet.id,
-                        Annotation.resolved_name_snapshot.in_(wanted_species),
-                    )
-                    .exists()
-                )
-                query = query.filter(species_match)
-
-                # Rank by most recent annotation matching one of the
-                # requested species; more specific, so overrides the plain
-                # "annotated" ordering above.
-                latest_al_label_at = (
-                    self.db.query(func.max(ALSnippetAnnotation.created_at))
-                    .filter(
-                        ALSnippetAnnotation.snippet_id == Snippet.id,
-                        ALSnippetAnnotation.source.in_(
-                            [ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER]
-                        ),
-                        ALSnippetAnnotation.label.in_(wanted_species),
-                    )
-                    .correlate(Snippet)
-                    .scalar_subquery()
-                )
-                latest_annotation_label_at = (
-                    self.db.query(func.max(Annotation.created_at))
-                    .filter(
-                        Annotation.snippet_id == Snippet.id,
-                        Annotation.resolved_name_snapshot.in_(wanted_species),
-                    )
-                    .correlate(Snippet)
-                    .scalar_subquery()
-                )
-                al_latest = func.coalesce(latest_al_label_at, epoch)
-                ann_latest = func.coalesce(latest_annotation_label_at, epoch)
-                latest_matching_label_at = case(
-                    (al_latest > ann_latest, al_latest),
-                    else_=ann_latest,
-                )
-                recency_order_by = latest_matching_label_at.desc()
-
-        # Deterministic order (no shuffle): id ascending by default, or
-        # recency-first when annotated/species set recency_order_by above.
-        order_by_clauses = (
-            (recency_order_by, Snippet.id.asc())
-            if recency_order_by is not None
-            else (Snippet.id.asc(),)
-        )
-        return (
-            query.order_by(*order_by_clauses)
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
+        # Push randomisation + pagination into the DB — avoids loading the full set in Python
+        return query.order_by(func.random()).offset(skip).limit(limit).all()
 
     def get_feed_similarity(
         self,

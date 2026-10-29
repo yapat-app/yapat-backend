@@ -1,8 +1,4 @@
-"""merge heads: spectrogram range + indexes
-
-Revision ID: 2026_05_22_merge_heads
-Revises: 2026_05_21_spec_range
-Create Date: 2026-05-22
+"""Follow-up marker after dataset spectrogram range migration.
 
 Merge-only revision.
 

@@ -62,7 +62,10 @@ class Annotation(AnnotationBase):
     id: int
     snippet_id: int
     user_id: int
-    username: Optional[str] = None
+    username: Optional[str] = Field(
+        None,
+        description="Username of the annotator (when available)."
+    )
     taxon_id: str = Field(
         ...,
         description="Namespaced taxon identifier (always present in response)"
@@ -81,27 +84,19 @@ class Annotation(AnnotationBase):
 class AnnotationExport(BaseModel):
     """Annotation with recording and snippet metadata for export"""
     # Annotation fields
-    # Prefixed with its source table (`ann:12`, `al:12`) because the two label
-    # stores have independent id sequences -- a bare int collides across them.
-    annotation_id: str
+    annotation_id: int
     dataset_id: int
     snippet_id: int
-    # The database calls this `resolved_name_snapshot` -- it records how the
-    # value was obtained. The export calls it what a reader wants it to be.
-    # `taxon_id` is not exported; see EXPORT_CSV_HEADERS for why.
-    label: str
+    taxon_id: str
+    resolved_name_snapshot: str
+    confidence: Optional[float]
     created_at: datetime
     created_by: int
-    # Which table the row came from: 'al_snippet_annotation' or 'annotations'.
-    # `annotation_id` is only unique within a source table, so the two together
-    # form the identity of an exported row. Admin-only: omitted entirely for
-    # everyone else, which is why this is optional.
-    source_table: Optional[str] = None
-
+    
     # Recording metadata
     recording_file_name: str
-
-
+    recording_file_path: str
+    
     # Snippet metadata
     snippet_start_time: float
     snippet_end_time: float

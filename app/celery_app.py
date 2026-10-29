@@ -23,6 +23,8 @@ celery_app = Celery(
         "app.tasks.processing_tasks",
         "app.tasks.pam_al_tasks",
         "app.tasks.wssed_tasks",
+        "app.tasks.explore_tasks",
+        "app.tasks.ingest_tasks",
     ]
 )
 
@@ -39,6 +41,7 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.embedding_tasks.*": {"queue": "embeddings"},
         "app.tasks.processing_tasks.*": {"queue": "processing"},
+        "app.tasks.ingest_tasks.*": {"queue": "processing"},
         "app.tasks.pam_al_tasks.*": {"queue": "pam_al"},
     },
     task_default_queue="default",
@@ -66,14 +69,30 @@ celery_app.conf.update(
         },
         "wssed-sync-training-jobs": {
             "task": "app.tasks.wssed_tasks.sync_wssed_training_jobs",
-            # Poll GPU server for all TRAINING jobs every WSSED_POLL_INTERVAL (10 s).
-            # Keeps DB fresh so the status endpoint never has to probe the GPU
-            # server directly on each frontend poll.
-            "schedule": settings.WSSED_POLL_INTERVAL,
+            # Safety net only: each TRAINING job is polled by its own
+            # poll_training_status chain (every WSSED_TRAINING_POLL_INTERVAL).
+            # This catches jobs whose chain was lost, and logs nothing when
+            # there are none.
+            "schedule": settings.WSSED_SYNC_SAFETY_INTERVAL,
             "options": {"queue": "default"},
         },
     },
 )
+
+# ── Quiet periodic tasks ───────────────────────────────────────────────────
+QUIET_TASKS = frozenset({"app.tasks.wssed_tasks.sync_wssed_training_jobs"})
+
+
+class _QuietTaskFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno > logging.INFO:
+            return True
+        message = record.getMessage()
+        return not any(name in message for name in QUIET_TASKS)
+
+
+for _name in ("celery.beat", "celery.worker.strategy", "celery.app.trace"):
+    logging.getLogger(_name).addFilter(_QuietTaskFilter())
 
 # ── Per-task duration logging (stdout via configure_logging) ───────────────
 
@@ -98,6 +117,8 @@ def _celery_task_postrun(task_id=None, task=None, **kwargs):
             task_id,
             getattr(task, "name", "?"),
         )
+        return
+    if getattr(task, "name", None) in QUIET_TASKS:
         return
     duration_ms = (time.perf_counter() - start) * 1000
     _celery_task_logger.info(

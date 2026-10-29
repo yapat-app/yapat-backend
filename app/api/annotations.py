@@ -3,7 +3,7 @@ Annotation endpoints
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 
 from app.api.deps import get_db, get_current_active_user
@@ -42,12 +42,6 @@ def _require_snippet_annotation_access(db: Session, snippet_id: int, user: User)
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to annotate this dataset",
         )
-
-
-def _require_annotation_delete_access(db: Session, annotation: AnnotationModel, user: User) -> None:
-    if annotation.user_id == user.id:
-        return
-    _require_snippet_annotation_access(db, annotation.snippet_id, user)
 
 
 def _mirror_to_al(db: Session, annotation: AnnotationModel) -> None:
@@ -406,16 +400,42 @@ def delete_annotation(
 ):
     """
     Delete an annotation.
-    
-    Users can delete their own annotations.
-    Team members can delete annotations on datasets they can access.
+
+    Team members can delete annotations made by other users within the same team.
     """
     annotation = db.query(AnnotationModel).filter(AnnotationModel.id == annotation_id).first()
     if not annotation:
         raise HTTPException(status_code=404, detail="Annotation not found")
 
-    _require_annotation_delete_access(db, annotation, current_user)
-    
+    # Determine the owning team for the snippet's recording dataset.
+    # If dataset has no team (admin-created personal dataset), only allow self-deletes or admins.
+    snippet_row = db.query(Snippet).filter(Snippet.id == annotation.snippet_id).first()
+    if not snippet_row:
+        raise HTTPException(status_code=404, detail="Snippet not found")
+
+    recording_row = db.query(Recording).filter(Recording.id == snippet_row.recording_id).first()
+    if not recording_row:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    dataset_row = db.query(Dataset).filter(Dataset.id == recording_row.dataset_id).first()
+    if not dataset_row:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    from app.core.permissions import check_admin, check_team_member
+
+    if dataset_row.team_id is None:
+        if annotation.user_id != current_user.id and not check_admin(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to delete this annotation",
+            )
+    else:
+        if not (check_admin(current_user) or check_team_member(current_user, dataset_row.team_id, db)):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to delete annotations in this team",
+            )
+
     _unmirror_from_al(db, annotation)
     db.delete(annotation)
     db.commit()
@@ -428,89 +448,54 @@ def get_all_datasets_annotation_stats(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Get annotation statistics for the datasets the caller can access.
-
-    Scoped the same way as GET /datasets: admins see everything, everyone else
-    sees datasets from teams they belong to plus any granted directly by
-    invitation.
-
+    Get annotation statistics for all datasets.
+    
     Returns a list of annotation statistics for each dataset including:
     - Total number of snippets in each dataset
     - Number of annotated snippets (with at least one annotation)
     - Number of not annotated snippets (with zero annotations)
     - Annotation percentage
     - Total number of annotations
-
-    Counts span both label stores -- the canonical `annotations` table and the
-    AL store (USER source only) -- because neither is a superset of the other:
-    mirroring between them only began in June 2026, and AL-mode feedback still
-    writes rows that never reach the canonical table. Counting one store alone
-    understates every dataset that predates the mirror or uses AL mode. The
-    union deduplicates on (snippet, label, user), so a mirrored annotation
-    counts once, matching what the export reports.
     """
-    # Not db.query(Dataset).all(): that leaked every dataset's name and counts
-    # to any authenticated user. limit follows the convention in wssed.py --
-    # high enough not to truncate in practice.
-    datasets = DatasetService(db).list_datasets(current_user, skip=0, limit=10_000)
-    if not datasets:
-        return AllDatasetsAnnotationStats(datasets=[], total_datasets=0)
+    # Get all datasets
+    datasets = db.query(Dataset).all()
 
-    visible_dataset_ids = [dataset.id for dataset in datasets]
+    # Compute counts for every dataset in three grouped queries rather than three per dataset. 
 
-    canonical_labels = (
-        db.query(
-            Recording.dataset_id.label('dataset_id'),
-            AnnotationModel.snippet_id.label('snippet_id'),
-            AnnotationModel.resolved_name_snapshot.label('label'),
-            AnnotationModel.user_id.label('user_id'),
-        )
-        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
-        .join(Recording, Snippet.recording_id == Recording.id)
-        .filter(Recording.dataset_id.in_(visible_dataset_ids))
-    )
-    al_labels = (
-        db.query(
-            Recording.dataset_id.label('dataset_id'),
-            ALSnippetAnnotation.snippet_id.label('snippet_id'),
-            ALSnippetAnnotation.label.label('label'),
-            ALSnippetAnnotation.user_id.label('user_id'),
-        )
-        .join(Snippet, ALSnippetAnnotation.snippet_id == Snippet.id)
-        .join(Recording, Snippet.recording_id == Recording.id)
-        .filter(ALSnippetAnnotation.source == ALAnnotationSource.USER)
-        .filter(Recording.dataset_id.in_(visible_dataset_ids))
-    )
-    # UNION (not UNION ALL) is what performs the dedupe.
-    labels = canonical_labels.union(al_labels).subquery()
-
-    # One grouped query each, rather than three per dataset in a loop.
-    annotation_counts = {
-        row.dataset_id: (row.total_annotations, row.annotated_snippets)
-        for row in db.query(
-            labels.c.dataset_id,
-            func.count().label('total_annotations'),
-            func.count(func.distinct(labels.c.snippet_id)).label('annotated_snippets'),
-        ).group_by(labels.c.dataset_id).all()
-    }
-    snippet_counts = {
-        dataset_id: count
-        for dataset_id, count in db.query(
-            Recording.dataset_id, func.count(Snippet.id)
-        )
+    # Total snippets per dataset.
+    total_snippets_by_dataset = dict(
+        db.query(Recording.dataset_id, func.count(Snippet.id))
         .join(Snippet, Snippet.recording_id == Recording.id)
-        .filter(Recording.dataset_id.in_(visible_dataset_ids))
         .group_by(Recording.dataset_id)
         .all()
-    }
+    )
+
+    # Snippets with at least one annotation, per dataset (distinct snippet ids).
+    annotated_snippets_by_dataset = dict(
+        db.query(Recording.dataset_id, func.count(func.distinct(Snippet.id)))
+        .join(Snippet, Snippet.recording_id == Recording.id)
+        .join(AnnotationModel, AnnotationModel.snippet_id == Snippet.id)
+        .group_by(Recording.dataset_id)
+        .all()
+    )
+
+    # Total annotations per dataset.
+    total_annotations_by_dataset = dict(
+        db.query(Recording.dataset_id, func.count(AnnotationModel.id))
+        .join(Snippet, Snippet.recording_id == Recording.id)
+        .join(AnnotationModel, AnnotationModel.snippet_id == Snippet.id)
+        .group_by(Recording.dataset_id)
+        .all()
+    )
 
     dataset_stats_list = []
 
     for dataset in datasets:
         dataset_id = dataset.id
 
-        total_snippets = snippet_counts.get(dataset_id, 0)
-        total_annotations, annotated_snippets = annotation_counts.get(dataset_id, (0, 0))
+        total_snippets = total_snippets_by_dataset.get(dataset_id, 0) or 0
+        annotated_snippets = annotated_snippets_by_dataset.get(dataset_id, 0) or 0
+        total_annotations = total_annotations_by_dataset.get(dataset_id, 0) or 0
 
         # Calculate not annotated snippets
         not_annotated_snippets = total_snippets - annotated_snippets
@@ -529,7 +514,7 @@ def get_all_datasets_annotation_stats(
                 total_annotations=total_annotations
             )
         )
-    
+
     return AllDatasetsAnnotationStats(
         datasets=dataset_stats_list,
         total_datasets=len(datasets)

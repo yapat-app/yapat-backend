@@ -9,9 +9,9 @@ import logging
 
 from app.database import SessionLocal
 from app.services.dataset_service import DatasetService
+from app.services import scan_progress
 from app.celery_app import celery_app
 from app.config import settings
-from benchmarks.stage_timer import stage_timer
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +68,20 @@ def scan_dataset(self, dataset_id: int):
         logger.info(f"Starting scan for dataset {dataset_id} (source_uri: {dataset.source_uri})")
 
         try:
-            with stage_timer("scan", "cpu", dataset.source_uri) as timer:
-                new_recs = svc.scan_recordings(dataset)
-                timer.n = len(new_recs)
+            # Live progress for the dataset card (see services/scan_progress).
+            new_recs = svc.scan_recordings(
+                dataset, progress=scan_progress.make_reporter(dataset_id)
+            )
             logger.info(f"Scan completed for dataset {dataset_id}: {len(new_recs)} recordings created")
         except Exception as e:
+            # Also catches SoftTimeLimitExceeded, so a scan cut by the time budget
+            # shows as failed on the card instead of hanging in "reading".
             error_msg = f"Scan failed for dataset {dataset_id}: {str(e)}"
             logger.error(error_msg, exc_info=True)
+            scan_progress.mark_failed(dataset_id, str(e))
             return {"status": "error", "message": error_msg}
+
+        scan_progress.mark_completed(dataset_id, len(new_recs))
 
         return {
             "status": "ok",

@@ -13,32 +13,26 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://yapat_user:yapat_password@localhost/yapat"
 
-    # Connection pool, per process. Every uvicorn worker and every Celery child
-    # gets its own pool, so the ceiling is (processes x (size + overflow)) and
-    # must stay under Postgres max_connections. Defaults are deliberately small;
-    # docker-compose sets a real value per service.
-    DB_POOL_SIZE: int = 5
-    DB_MAX_OVERFLOW: int = 5
-    DB_POOL_TIMEOUT: int = 30
-    # Upper bound on FastAPI's threadpool, which runs every sync `def` endpoint.
-    # Left unset it defaults to 40 per worker, which lets far more requests race
-    # for connections than the pool can serve: the surplus blocks in
-    # pool.connect() and dies at DB_POOL_TIMEOUT. Matching it to the pool makes
-    # them queue for a thread instead, which costs latency rather than errors.
-    # None = leave AnyIO's default alone.
-    API_THREADPOOL_LIMIT: Optional[int] = None
-
     # Security
     SECRET_KEY: str = "your-secret-key-change-in-production"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    # First-run admin seeding (alembic migration 2026_10_07_seed_default_admin).
+    # Created only if no admin exists yet; change the password after first login.
+    DEFAULT_ADMIN_USERNAME: str = "admin"
+    DEFAULT_ADMIN_PASSWORD: str = "admin12345"
 
     # API
     API_STR: str = "/api"
     PROJECT_NAME: str = "YAPAT Backend"
     LOG_LEVEL: str = "INFO"
-    ENABLE_DOCS: bool = False  # Disable Swagger/ReDoc in production; set to true in dev
+    ENABLE_DOCS: bool = True  # Disable Swagger/ReDoc in production; set to true in dev
     DATA_ROOT: Optional[str] = "/data"
+    # How many of a user's latest annotations feed the "Recent" quick-label row.
+    # Counting annotations rather than labels lets the row grow or shrink with
+    # the number of species a site actually has.
+    RECENT_LABELS_WINDOW: int = 10
     HOST_DATA_ROOT: str | None = None  # host path (optional)
     HOST_MODELS_AL: str | None = None  # host path for models; used by docker-compose for mounts only
     
@@ -74,18 +68,18 @@ class Settings(BaseSettings):
     CELERY_TASK_TIME_LIMIT: int = 3600  # 1 hour max per task
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes limit
 
-    # scan_dataset gets its own, longer time budget instead of the app-wide
-    # default above — it can legitimately run for hours on very large
-    # datasets (hundreds of GB, tens of thousands of files).
-    SCAN_TASK_TIME_LIMIT: int = 90000       # 25 h hard kill
-    SCAN_TASK_SOFT_TIME_LIMIT: int = 86400  # 24 h soft limit
-
     # run_embedding dispatches one chord child per this many recordings,
     # instead of one per recording. Keeps chord/broker bookkeeping (Redis
     # counters, task messages) proportional to worker concurrency rather
     # than dataset size — a dataset with tens of thousands of recordings
     # would otherwise create tens of thousands of chord entries.
     EMBEDDING_CHORD_CHUNK_SIZE: int = 25
+
+    # scan_dataset gets its own, longer time budget instead of the app-wide
+    # default above — it can legitimately run for hours on very large
+    # datasets (hundreds of GB, tens of thousands of files).
+    SCAN_TASK_TIME_LIMIT: int = 90000       # 25 h hard kill
+    SCAN_TASK_SOFT_TIME_LIMIT: int = 86400  # 24 h soft limit
 
     # OE_YAPAT Service (Custom Taxonomy Generation)
     OE_YAPAT_SERVICE_URL: str = "http://localhost:8002"  
@@ -96,7 +90,12 @@ class Settings(BaseSettings):
     # WSSED GPU Server
     WSSED_GPU_SERVER_URL: str = "http://localhost:8003"  # URL of GPU server running WSSED
     WSSED_TIMEOUT: int = 300  # seconds (5 minutes for long operations)
-    WSSED_POLL_INTERVAL: int = 10  # seconds between status polls
+    WSSED_POLL_INTERVAL: int = 10  # seconds before the status endpoint re-probes the GPU server
+    # Per-job Celery poll chain: started when a job is sent to the GPU server,
+    # re-schedules itself every N seconds until the job is COMPLETED/FAILED.
+    WSSED_TRAINING_POLL_INTERVAL: int = 30
+    # Beat safety net for TRAINING jobs whose poll chain was lost (e.g. worker restart).
+    WSSED_SYNC_SAFETY_INTERVAL: int = 300
     # Host path to WSSED focal-data outputs (for copying checkpoints into PAM_CHECKPOINTS_DIR)
     WSSED_FOCAL_DATA_ROOT: Optional[str] = None
     
@@ -120,16 +119,37 @@ class Settings(BaseSettings):
     # 16GB worker at ~20k points, so it stays conservative.
     FPV_TSNE_MAX_POINTS: int = 50_000
     FPV_ISOMAP_MAX_POINTS: int = 15_000
-    # Overall ceiling: datasets with more embeddings than this skip FPV generation
-    # entirely (the callers 413 / skip auto-FPV) rather than queuing a job that
-    # would OOM the worker. Defaults to the largest per-method cap.
-    FPV_MAX_POINTS: int = 100_000
+
+    # Server-side explore store (app/services/explore). Columnar numpy layers
+    # memory-mapped by every API worker so the feed, score histograms and
+    # projection are answered over the whole dataset without shipping it to
+    # the browser. The directory must be shared by the API and Celery
+    # containers (it lives under the mounted /app volume by default).
+    EXPLORE_CACHE_DIR: str = "models_AL/explore_cache"
+    # Build missing layers synchronously in the request instead of via
+    # Celery. For tests and local development without a worker only.
+    EXPLORE_BUILD_INLINE: bool = False
+    # Upper bound on projection points sent to the browser per method; above
+    # it a grid-stratified sample plus density grids are returned instead.
+    EXPLORE_PROJECTION_MAX_POINTS: int = 200_000
+    # How often (seconds) a worker re-checks the annotation-table fingerprint
+    # before trusting its cached labels layer.
+    EXPLORE_LABELS_RECHECK_SECONDS: float = 1.0
+
+    # Recording-metadata CSV import (app/api/datasets.py metadata endpoints)
+    RECORDING_METADATA_MAX_UPLOAD_BYTES: int = 20 * 1024 * 1024  # 20 MB
+    RECORDING_METADATA_MAX_ROWS: int = 200_000
 
     # PAM Active Learning
     PAM_AUTO_RETRAIN_THRESHOLD: int = 5  # Auto-retrain after N feedback events
     PAM_DEFAULT_DEVICE: str = "cpu"      # Override with PAM_DEFAULT_DEVICE=cuda on GPU deployments
     PAM_BASE_MODEL_PATH: str = "models_AL/pam/base/base_pam_model.pt"  # Physical base model file
     PAM_CHECKPOINTS_DIR: str = "models_AL/pam/checkpoints"              # Versioned checkpoint storage
+    # After each successful training, delete the prediction rows of superseded
+    # checkpoints, keeping only the active, previous and first trained ones per
+    # dataset and model family (see services/pam_al/_prediction_retention.py).
+    PAM_PRUNE_OLD_PREDICTIONS: bool = True
+    PAM_PREDICTION_PRUNE_BATCH_SIZE: int = 50_000
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -7,11 +7,12 @@ decoupled from the service class and are independently testable.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import torch
 from sqlalchemy import and_
@@ -301,18 +302,144 @@ def load_species_from_label_config(label_config_path: str) -> List[str]:
     return [str(s) for s in species_list]
 
 
+def resolve_checkpoint_label_order(checkpoint: ALModelCheckpoint) -> List[str]:
+    """Resolve label order from DB metadata, label config, or checkpoint payload."""
+    hyper = checkpoint.hyperparameters or {}
+    label_order = hyper.get("label_order")
+    if label_order:
+        return [str(label) for label in label_order]
+
+    resolution_errors: list[str] = []
+    if checkpoint.label_config_path:
+        try:
+            return load_species_from_label_config(checkpoint.label_config_path)
+        except Exception as exc:
+            resolution_errors.append(f"label config: {exc}")
+
+    if checkpoint.checkpoint_path:
+        try:
+            payload = torch.load(checkpoint.checkpoint_path, map_location="cpu")
+            label_order = payload.get("label_order") if isinstance(payload, dict) else None
+            if label_order:
+                return [str(label) for label in label_order]
+            resolution_errors.append("checkpoint payload has no label_order")
+        except Exception as exc:
+            resolution_errors.append(f"checkpoint payload: {exc}")
+
+    detail = "; ".join(resolution_errors) or "no label config or checkpoint path is available"
+    raise ValueError(f"Checkpoint {checkpoint.id} missing label_order ({detail}).")
+
+
+# POSIX NAME_MAX. Each retrain appends "_r<timestamp>" (or "_manual_<timestamp>")
+# onto the parent's version, so a long-lived lineage grows ~12-18 chars per
+# generation and eventually overflows the filename -- torch.save then fails with
+# "[enforce fail at inline_container.cc:747] . open file failed with strerror:
+# File name too long". The version stays intact on the checkpoint row; only its
+# copy inside the filename gets condensed.
+_NAME_MAX = 255
+_VERSION_DIGEST_LEN = 12
+
+
+def _bounded_basename(family_name: str, version: str, suffix: str) -> str:
+    """Build ``<family>_<version><suffix>``, condensing the version if it overflows."""
+    basename = f"{family_name}_{version}{suffix}"
+    if len(basename.encode()) <= _NAME_MAX:
+        return basename
+
+    # Keep a readable head of the version plus a digest of the whole thing, so
+    # sibling lineages that share a prefix still get distinct filenames.
+    digest = hashlib.blake2b(version.encode(), digest_size=_VERSION_DIGEST_LEN // 2).hexdigest()
+    fixed = len(f"{family_name}__{digest}{suffix}".encode())
+    head_budget = _NAME_MAX - fixed
+    if head_budget < 0:
+        # Even without the version it does not fit; the id in the suffix is
+        # unique on its own, so drop the family name too.
+        return f"{digest}{suffix}"[-_NAME_MAX:]
+
+    head = version.encode()[:head_budget].decode(errors="ignore")
+    return f"{family_name}_{head}_{digest}{suffix}"
+
+
 def make_checkpoint_path(dataset_id: int, family_name: str, version: str, ckpt_id: int) -> str:
     checkpoint_dir = ensure_dir(
         os.path.join(settings.PAM_CHECKPOINTS_DIR, "pam_active_learning", str(dataset_id))
     )
-    return os.path.join(checkpoint_dir, f"{family_name}_{version}_ckpt_{ckpt_id}.pt")
+    return os.path.join(checkpoint_dir, _bounded_basename(family_name, version, f"_ckpt_{ckpt_id}.pt"))
 
 
 def make_label_config_path(dataset_id: int, family_name: str, version: str, ckpt_id: int) -> str:
     checkpoint_dir = ensure_dir(
         os.path.join(settings.PAM_CHECKPOINTS_DIR, "pam_active_learning", str(dataset_id))
     )
-    return os.path.join(checkpoint_dir, f"{family_name}_{version}_labels_{ckpt_id}.json")
+    return os.path.join(checkpoint_dir, _bounded_basename(family_name, version, f"_labels_{ckpt_id}.json"))
+
+CheckpointLayout = Literal["linear", "mlp", "unknown"]
+
+_LINEAR_MODEL_TYPES = frozenset(
+    {
+        "pam_multilabel_classifier",
+        "pam_multi_label_classifier",
+        ALModelType.PAM_LINEAR_MULTILABEL.value,
+    }
+)
+
+
+def detect_checkpoint_layout(state_dict: Dict[str, Any]) -> CheckpointLayout:
+    """Infer classifier architecture from saved ``state_dict`` key names."""
+    if not state_dict:
+        return "unknown"
+    keys = state_dict.keys()
+    if "model.weight" in keys:
+        return "linear"
+    # MLP Sequential: Linear(0) -> ReLU(1) -> Dropout(2) -> Linear(3)
+    if "model.3.weight" in keys:
+        return "mlp"
+    if "model.0.weight" in keys:
+        return "linear"
+    weight_keys = [k for k in keys if k.endswith(".weight") and isinstance(state_dict[k], torch.Tensor)]
+    if len(weight_keys) == 1:
+        return "linear"
+    if len(weight_keys) >= 2:
+        return "mlp"
+    return "unknown"
+
+
+def remap_legacy_linear_state_dict(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Remap legacy single-layer Sequential checkpoints (``model.0.*``) to the
+    current ``nn.Linear`` layout (``model.*``).
+
+    MLP checkpoints (``model.0.*`` + ``model.3.*``) are returned unchanged;
+    callers should load those with :class:`MultiLabelMLPClassifier`.
+    """
+    if not state_dict or "model.weight" in state_dict:
+        return state_dict
+    if "model.3.weight" in state_dict:
+        return state_dict
+
+    remapped: Dict[str, Any] = {}
+    for key, value in state_dict.items():
+        if key.startswith("model.0."):
+            remapped["model." + key[len("model.0.") :]] = value
+        else:
+            remapped[key] = value
+    return remapped
+
+
+def prepare_linear_classifier_checkpoint(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a checkpoint dict whose ``state_dict`` is compatible with linear load."""
+    payload = dict(checkpoint)
+    state_dict = payload.get("state_dict")
+    if isinstance(state_dict, dict):
+        payload["state_dict"] = remap_legacy_linear_state_dict(state_dict)
+    return payload
+
+
+def _is_linear_model_type(model_type: ALModelType | str) -> bool:
+    if model_type == ALModelType.PAM_LINEAR_MULTILABEL:
+        return True
+    return str(model_type) in _LINEAR_MODEL_TYPES
+
 
 def make_model(model_type: ALModelType | str):
     # Backward compatibility:
@@ -329,10 +456,29 @@ def make_model(model_type: ALModelType | str):
     raise ValueError(f"Unsupported model_type '{model_type}'")
 
 def load_model_from_checkpoint(model_ckpt, device: str):
-    if model_ckpt.model_type == ALModelType.WSSED_BIRDNET_SEGMENT or model_ckpt.model_type == ALModelType.WSSED_BIRDNET_SEGMENT.value:
-        return SimpleLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
-    if model_ckpt.model_type in {"pam_multilabel_classifier", "pam_multi_label_classifier"}:
-        return MultiLabelLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
-    if model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL or model_ckpt.model_type == ALModelType.PAM_LINEAR_MULTILABEL.value:
-        return MultiLabelLinearClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
-    return MultiLabelMLPClassifier.load_from_checkpoint(model_ckpt.checkpoint_path, device=device)
+    path = model_ckpt.checkpoint_path
+    model_type = model_ckpt.model_type
+
+    if model_type == ALModelType.WSSED_BIRDNET_SEGMENT or model_type == ALModelType.WSSED_BIRDNET_SEGMENT.value:
+        return SimpleLinearClassifier.load_from_checkpoint(path, device=device)
+
+    if _is_linear_model_type(model_type):
+        checkpoint = torch.load(path, map_location=device)
+        if not isinstance(checkpoint, dict):
+            raise ValueError(f"Checkpoint at {path} is not a dict payload.")
+        state_dict = checkpoint.get("state_dict")
+        # Some checkpoints are saved as a bare state_dict (no "state_dict" wrapper key).
+        # Fall back to treating the checkpoint itself as the state_dict for layout detection.
+        effective_state_dict = state_dict if isinstance(state_dict, dict) else checkpoint
+        layout = detect_checkpoint_layout(effective_state_dict)
+        if layout == "mlp":
+            logger.warning(
+                "Checkpoint id=%s is registered as linear but contains MLP "
+                "Sequential weights (model.0 + model.3); loading as MLP.",
+                model_ckpt.id,
+            )
+            return MultiLabelMLPClassifier.load_from_checkpoint(path, device=device)
+        prepared = prepare_linear_classifier_checkpoint(checkpoint)
+        return MultiLabelLinearClassifier.load_from_checkpoint_dict(prepared, device=device)
+
+    return MultiLabelMLPClassifier.load_from_checkpoint(path, device=device)

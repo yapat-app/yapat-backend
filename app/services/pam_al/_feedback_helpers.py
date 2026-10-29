@@ -9,8 +9,6 @@ from datetime import datetime, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.annotation import Annotation
-
 from app.models.pam_active_learning import (
     ALFeedbackAction,
     ALFeedbackEvent,
@@ -20,6 +18,7 @@ from app.models.pam_active_learning import (
 )
 
 from app.services.pam_al._annotation_helpers import replace_user_labels_for_snippet
+from active_learning.config import NO_EVENT_LABELS
 
 # Trigger values that represent actual model-retrain jobs.
 # "inference" jobs use the same ALRetrainJob table but are NOT retrains and
@@ -100,57 +99,27 @@ def sync_feedback_events_to_annotations(db: Session, checkpoint_id: int) -> int:
     """
     Sync recent ACCEPT / MODIFY feedback since the last retrain into
     ALSnippetAnnotation.  Returns the number of events processed.
+
+    Events are deduplicated by (snippet_id, user_id) keeping only the latest
+    before writing, so that re-labeling the same snippet twice within one
+    retrain window never produces duplicate annotation rows.
     """
     events = get_feedback_events_since_last_retrain(db, checkpoint_id)
     if not events:
         return 0
 
-    # Events are ordered by created_at asc, so iterating in order means the
-    # last assignment per (snippet_id, user_id) wins — correct for re-feedback.
-    # An event that clears the labels (REJECT, or an empty MODIFY) must be
-    # allowed to win too: skipping it here let an older labelled event stand,
-    # which resurrected labels annotators had deliberately removed.
+    # Keep only the latest actionable event per (snippet_id, user_id).
+    # Events are ordered oldest-first; iterating forward means later entries
+    # overwrite earlier ones, leaving the most-recent label per snippet+user.
     latest_by_snippet_user: dict[tuple[int, int | None], ALFeedbackEvent] = {}
     for event in events:
-        if event.action not in {
-            ALFeedbackAction.ACCEPT,
-            ALFeedbackAction.MODIFY,
-            ALFeedbackAction.REJECT,
-        }:
+        if event.action not in {ALFeedbackAction.ACCEPT, ALFeedbackAction.MODIFY}:
+            continue
+        if not (event.final_labels or []):
             continue
         latest_by_snippet_user[(event.snippet_id, event.user_id)] = event
 
-    if not latest_by_snippet_user:
-        return len(events)
-
-    # The classic hub writes to `annotations` without producing feedback events,
-    # so a snippet relabelled there has no event recording the correction. The
-    # cutoff is the last completed retrain, which can be months back, and
-    # replaying those stale events over newer hub decisions silently reverted
-    # them. Anything the annotator touched more recently than the event wins.
-    latest_canonical: dict[tuple[int, int | None], datetime] = {}
-    rows = (
-        db.query(
-            Annotation.snippet_id,
-            Annotation.user_id,
-            func.max(Annotation.created_at),
-        )
-        .filter(Annotation.snippet_id.in_([sid for sid, _ in latest_by_snippet_user]))
-        .group_by(Annotation.snippet_id, Annotation.user_id)
-        .all()
-    )
-    for snippet_id, user_id, created_at in rows:
-        latest_canonical[(snippet_id, user_id)] = created_at
-
-    for key, event in latest_by_snippet_user.items():
-        canonical_at = latest_canonical.get(key)
-        if (
-            canonical_at is not None
-            and event.created_at is not None
-            and canonical_at > event.created_at
-        ):
-            continue
-
+    for event in latest_by_snippet_user.values():
         replace_user_labels_for_snippet(
             db=db,
             dataset_id=event.dataset_id,
@@ -264,4 +233,17 @@ def resolve_feedback_labels(
     if action == "MODIFY":
         return incoming_labels
     return []
+
+
+def is_no_event_feedback(labels: list[str] | None) -> bool:
+    """
+    True if feedback carries no real label -- either nothing at all, or only
+    reserved confirmed-negative sentinels (e.g. "No biophony" and/or "Other
+    biophony" quick labels). Callers use this to decide whether a snippet
+    should be treated as an explicit confirmed negative rather than a real
+    species label.
+    """
+    if not labels:
+        return True
+    return set(labels).issubset(NO_EVENT_LABELS)
 

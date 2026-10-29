@@ -12,14 +12,12 @@ REST API for the PAM-specific active learning flow:
 import logging
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import text
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from app.api.deps import get_db, get_current_active_user
 from app.models.annotation import Annotation as AnnotationModel
-from app.models.embedding import SnippetSet
 from app.models.pam_active_learning import ALAnnotationSource, ALSnippetAnnotation
 from app.models.user import User
 from app.schemas.pam_active_learning import (
@@ -32,6 +30,7 @@ from app.schemas.pam_active_learning import (
     ALRetrainRequest,
     ALStats,
     ALTrainFromScratchRequest,
+    ALTrainingPathDefaultsResponse,
     ALPredictionListResponse,
     ALJobDispatch,
     ALRetrainJobStatusResponse,
@@ -48,6 +47,41 @@ router = APIRouter()
 
 
 # ============ MODEL CHECKPOINT ENDPOINTS ============
+
+@router.get(
+    "/datasets/{dataset_id}/training-path-defaults",
+    response_model=ALTrainingPathDefaultsResponse,
+)
+def get_training_path_defaults(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return default metadata and label-config paths for cold-start training."""
+    from app.config import settings
+    from app.utils.pam_training_paths import resolve_pam_training_paths
+
+    svc = PAMActiveLearningService(db)
+    try:
+        ds = svc.get_dataset_for_training_paths(dataset_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    data_root = settings.DATA_ROOT or "/data"
+    try:
+        metadata_path, label_config_path = resolve_pam_training_paths(
+            data_root,
+            ds.source_uri,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return ALTrainingPathDefaultsResponse(
+        metadata_path=metadata_path,
+        label_config_path=label_config_path,
+        source_uri=ds.source_uri,
+    )
+
 
 @router.post(
     "/checkpoints",
@@ -122,20 +156,31 @@ def get_checkpoint_species(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Return the species list stored in the checkpoint's label config file."""
+    """Return the species the checkpoint was actually trained on.
+
+    Prefers hyperparameters["used_species"] (set during training, excludes
+    low-sample species). Falls back to parsing label_config_path for older
+    checkpoints that pre-date the used_species field.
+    """
     from app.services.pam_al._checkpoint_helpers import load_species_from_label_config
 
     svc = PAMActiveLearningService(db)
     ckpt = svc._get_checkpoint(checkpoint_id)
     if ckpt is None:
         raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found.")
+
+    # Prefer used_species — these are the labels the model actually knows.
+    hyper = ckpt.hyperparameters or {}
+    used_species = hyper.get("used_species")
+    if used_species:
+        return used_species
+
+    # Fallback: parse label config file (older checkpoints without used_species).
     if not ckpt.label_config_path:
-        raise HTTPException(status_code=404, detail="Checkpoint has no label config path.")
+        raise HTTPException(status_code=404, detail="Checkpoint has no species information.")
     try:
         return load_species_from_label_config(ckpt.label_config_path)
     except ValueError as e:
-        # The checkpoint exists and the file might exist, but its contents are invalid.
-        # Treat this as a client/configuration error, not "not found".
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -215,13 +260,20 @@ def get_or_create_predictions(
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Return stored predictions for the active checkpoint, or enqueue exactly one
-    inference job if predictions do not exist yet (or force_refresh=true).
+    Return stored predictions for the active checkpoint.
+
+    Predictions present -> served synchronously from the stored rows (fast).
+    Predictions missing, or force_inference=True -> an async Celery job is dispatched
+    and an ALJobDispatch returned for polling.
+    No checkpoint -> random snippet suggestions, immediately.
+
+    force_refresh only drops the cached response payload and rebuilds it from the
+    stored rows; it never re-runs the model. That distinction matters at scale: a
+    full inference pass over 3M snippets costs ~18 minutes, and the hub sends
+    force_refresh after every retrain.
     """
     service = PAMActiveLearningService(db)
     try:
-        # Resolve and validate the inference scope before deciding whether the
-        # request can use stored predictions or needs a background job.
         from datetime import datetime, timezone
 
         from app.models.pam_active_learning import ALRetrainJob, ALRetrainStatus
@@ -229,64 +281,105 @@ def get_or_create_predictions(
         from app.services.pam_al import _inference_helpers as inf_h
 
         model_ckpt = ckpt_h.get_active_checkpoint_for_model_family(db, body.dataset_id, body.model_family_name)
+
+        # Validate label_scope entries against the checkpoint's known species.
+        if body.label_scope and model_ckpt is not None:
+            hyper = model_ckpt.hyperparameters or {}
+            used_species = hyper.get("used_species")
+            if used_species:
+                invalid = [s for s in body.label_scope if s not in used_species]
+                if invalid:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"label_scope contains species not known to this checkpoint: {invalid}. "
+                            f"Valid species are: {used_species}"
+                        ),
+                    )
+
+        if not body.force_inference and model_ckpt is not None:
+            # Only use sync path when predictions are already cached — avoids blocking
+            # the request thread on full ML inference over large datasets.
+            #
+            # `force_refresh` deliberately does NOT reach the async path: it means
+            # "my cached payload is stale", not "re-run the model". The hub sends it
+            # after every retrain (useHubALSession checkpoint poller), and routing it
+            # to inference made each retrain redo its own work — a second full pass
+            # over the snippet set, ~18 min at 3M, for predictions the retrain had
+            # just written. We drop the cached payload and rebuild it from the stored
+            # rows instead. See docs/superpowers/plans/2026-09-22-retrain-scaling-fixes.md.
+            predictions_cached = inf_h.predictions_exist_for_checkpoint_and_snippet_set(
+                db, model_ckpt.id, body.snippet_set_id
+            )
+            if predictions_cached:
+                from app.services import inference_feed_cache
+
+                if body.force_refresh:
+                    inference_feed_cache.invalidate_inference_feed(model_ckpt.id)
+
+                # The whole-dataset prediction payload (sample_suggestion=False)
+                # is large and identical across users. Serve it straight from
+                # Redis as raw JSON to skip the ORM load + Pydantic round-trip
+                # over tens of thousands of rows. Returning a Response bypasses
+                # response_model re-validation.
+                payload_cacheable = not body.sample_suggestion
+                effective_scope = None
+                if payload_cacheable:
+                    hyper = model_ckpt.hyperparameters or {}
+                    effective_scope = body.label_scope or hyper.get("used_species") or None
+                    # Skip the read on force_refresh: we just invalidated it, and the
+                    # caller is telling us what it holds is stale.
+                    cached_json = (
+                        None
+                        if body.force_refresh
+                        else inference_feed_cache.get_cached_full_payload(
+                            model_ckpt.id,
+                            body.snippet_set_id,
+                            body.min_confidence,
+                            effective_scope,
+                        )
+                    )
+                    if cached_json is not None:
+                        return Response(content=cached_json, media_type="application/json")
+                try:
+                    result = service.get_or_create_predictions(body)
+                except ValueError:
+                    db.rollback()
+                    raise
+                except Exception as fast_err:
+                    db.rollback()
+                    logger.warning(
+                        "Sync inference fast path failed for dataset_id=%s model_family=%s; "
+                        "falling back to async job: %s",
+                        body.dataset_id,
+                        body.model_family_name,
+                        fast_err,
+                        exc_info=True,
+                    )
+                else:
+                    if payload_cacheable:
+                        try:
+                            payload = ALPredictionListResponse.model_validate(result)
+                            inference_feed_cache.set_cached_full_payload(
+                                model_ckpt.id,
+                                body.snippet_set_id,
+                                body.min_confidence,
+                                effective_scope,
+                                payload.model_dump_json(),
+                            )
+                        except Exception as cache_err:
+                            logger.warning(
+                                "Full-payload cache store failed for checkpoint_id=%s: %s",
+                                model_ckpt.id,
+                                cache_err,
+                            )
+                    return result
+
         if model_ckpt is None:
-            # No checkpoint: keep previous behavior (random suggestions).
+            # No checkpoint: return random snippet suggestions immediately.
             return service.get_or_create_predictions(body)
 
-        snippet_set = db.query(SnippetSet).filter(SnippetSet.id == body.snippet_set_id).one_or_none()
-        if snippet_set is None:
-            raise ValueError(f"snippet_set_id={body.snippet_set_id} does not exist.")
-        if snippet_set.dataset_id != body.dataset_id:
-            raise ValueError(
-                f"snippet_set_id={body.snippet_set_id} belongs to dataset_id={snippet_set.dataset_id}, "
-                f"not dataset_id={body.dataset_id}."
-            )
-
-        def predictions_exist() -> bool:
-            return inf_h.predictions_exist_for_checkpoint_and_snippet_set(
-                db,
-                model_ckpt.id,
-                body.snippet_set_id,
-            )
-
-        # Never interpret a ranking/serialization failure as a reason to rerun
-        # model inference. If predictions exist, errors should surface normally.
-        if not body.force_refresh and predictions_exist():
-            return service.get_or_create_predictions(body)
-
-        # Serialize job creation across all API workers. Without this lock, each
-        # concurrent request can observe "no predictions", create its own job,
-        # and force the 1M+ snippet inference to run again. The transaction-level
-        # lock is released by the commit below and requires no schema migration.
-        if db.get_bind().dialect.name == "postgresql":
-            db.execute(
-                text("SELECT pg_advisory_xact_lock(:namespace, :checkpoint_id)"),
-                {"namespace": 1346457161, "checkpoint_id": model_ckpt.id},
-            )
-
-        # Another worker may have completed inference while this request waited.
-        if not body.force_refresh and predictions_exist():
-            return service.get_or_create_predictions(body)
-
-        active_job = (
-            db.query(ALRetrainJob)
-            .filter(
-                ALRetrainJob.model_checkpoint_id == model_ckpt.id,
-                ALRetrainJob.dataset_id == body.dataset_id,
-                ALRetrainJob.trigger == "inference",
-                ALRetrainJob.status.in_([ALRetrainStatus.PENDING, ALRetrainStatus.RUNNING]),
-            )
-            .order_by(ALRetrainJob.created_at.desc(), ALRetrainJob.id.desc())
-            .first()
-        )
-        if active_job is not None:
-            db.commit()  # release the advisory transaction lock immediately
-            return ALJobDispatch(
-                job_id=active_job.id,
-                checkpoint_id=model_ckpt.id,
-                status=active_job.status,
-                message=f"Inference job {active_job.id} is already in progress.",
-            )
+        # Async path: predictions genuinely missing, or force_inference — dispatch to worker.
 
         job = ALRetrainJob(
             model_checkpoint_id=model_ckpt.id,
@@ -302,14 +395,7 @@ def get_or_create_predictions(
 
         from app.tasks.pam_al_tasks import pam_al_create_predictions
 
-        try:
-            pam_al_create_predictions.delay(job_id=job.id, inference_body=body.model_dump())
-        except Exception as dispatch_error:
-            job.status = ALRetrainStatus.FAILED
-            job.completed_at = datetime.now(timezone.utc)
-            job.error_message = f"Celery dispatch failed: {dispatch_error}"
-            db.commit()
-            raise
+        pam_al_create_predictions.delay(job_id=job.id, inference_body=body.model_dump())
 
         return ALJobDispatch(
             job_id=job.id,
@@ -383,11 +469,13 @@ def submit_feedback(
         result = service.submit_feedback(body)
 
         if result.get("auto_retrain_job_id"):
-            from app.tasks.pam_al_tasks import pam_al_auto_retrain
-            pam_al_auto_retrain.delay(
-                checkpoint_id=result["auto_retrain_checkpoint_id"],
-                job_id=result["auto_retrain_job_id"],
-            )
+            # Starts now, or waits for an "add recordings" run on this dataset
+            # to finish (see app/services/retrain_deferral.py).
+            from app.models.pam_active_learning import ALRetrainJob
+            from app.services.retrain_deferral import dispatch_or_wait
+
+            job = db.get(ALRetrainJob, result["auto_retrain_job_id"])
+            result["retrain_waiting_for_ingest_job_id"] = dispatch_or_wait(db, job)
 
         return result
 
@@ -437,16 +525,22 @@ def train_from_scratch(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to set up training: {str(e)}")
 
-    from app.tasks.pam_al_tasks import pam_al_train_from_scratch
-    pam_al_train_from_scratch.delay(checkpoint_id=ckpt.id, job_id=job.id)
+    # Starts now, or waits for an "add recordings" run on this dataset to
+    # finish (see app/services/retrain_deferral.py).
+    from app.services.retrain_deferral import dispatch_or_wait
+
+    waiting_for = dispatch_or_wait(db, job)
 
     return ALJobDispatch(
         job_id=job.id,
         checkpoint_id=ckpt.id,
         status="PENDING",
+        waiting_for_ingest_job_id=waiting_for,
         message=(
-            f"Cold-start training job {job.id} dispatched. "
+            f"Cold-start training job {job.id} waits for add-recordings job {waiting_for} to finish. "
             f"Poll GET /retrain/jobs/{job.id} for status."
+            if waiting_for is not None
+            else f"Cold-start training job {job.id} dispatched. Poll GET /retrain/jobs/{job.id} for status."
         ),
     )
 
@@ -478,16 +572,20 @@ def manual_retrain(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to set up manual retrain: {str(e)}")
 
-    from app.tasks.pam_al_tasks import pam_al_manual_retrain
-    pam_al_manual_retrain.delay(checkpoint_id=ckpt.id, job_id=job.id)
+    from app.services.retrain_deferral import dispatch_or_wait
+
+    waiting_for = dispatch_or_wait(db, job)
 
     return ALJobDispatch(
         job_id=job.id,
         checkpoint_id=ckpt.id,
         status="PENDING",
+        waiting_for_ingest_job_id=waiting_for,
         message=(
-            f"Manual retrain job {job.id} dispatched. "
+            f"Manual retrain job {job.id} waits for add-recordings job {waiting_for} to finish. "
             f"Poll GET /retrain/jobs/{job.id} for status."
+            if waiting_for is not None
+            else f"Manual retrain job {job.id} dispatched. Poll GET /retrain/jobs/{job.id} for status."
         ),
     )
 
@@ -505,8 +603,11 @@ def list_retrain_jobs(
     current_user: User = Depends(get_current_active_user),
 ):
     """List recent retrain jobs, optionally filtered by dataset."""
+    from app.services.retrain_deferral import waiting_ingest_job_id
+
     svc = PAMActiveLearningService(db)
-    return svc.list_retrain_jobs(dataset_id=dataset_id, limit=limit)
+    jobs = svc.list_retrain_jobs(dataset_id=dataset_id, limit=limit)
+    return [_with_waiting(job, waiting_ingest_job_id(db, job)) for job in jobs]
 
 
 @router.get(
@@ -528,7 +629,16 @@ def get_retrain_job(
     job = svc.get_retrain_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Retrain job {job_id} not found.")
-    return job
+    from app.services.retrain_deferral import waiting_ingest_job_id
+
+    return _with_waiting(job, waiting_ingest_job_id(db, job))
+
+
+def _with_waiting(job, waiting_for: Optional[int]) -> ALRetrainJobStatusResponse:
+    """Job status plus the add-recordings run it waits for (computed, not stored)."""
+    response = ALRetrainJobStatusResponse.model_validate(job)
+    response.waiting_for_ingest_job_id = waiting_for
+    return response
 
 
 # ============ USER STUDY-MODE HELPERS ============

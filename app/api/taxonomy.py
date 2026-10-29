@@ -486,6 +486,7 @@ def resolve_taxon(
 @router.post("/resolve", response_model=BatchResolveResponse)
 def batch_resolve_taxa(
     request: BatchResolveRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -510,7 +511,7 @@ def batch_resolve_taxa(
             detail=f"Invalid taxon ID format for: {', '.join(invalid_ids)}"
         )
     
-    results = taxonomy.batch_resolve_taxon_ids(request.taxon_ids)
+    results = taxonomy.batch_resolve_taxon_ids(request.taxon_ids, db_session=db)
     return {"results": results}
 
 

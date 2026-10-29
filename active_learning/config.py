@@ -12,12 +12,24 @@ with open(CONFIG_PATH, "r") as f:
 
 # Default values for active learning  inference
 DEFAULT_INFERENCE_THRESHOLD = _cfg["DEFAULT_INFERENCE_THRESHOLD"]
+# Query-time gate for "Focus on species"; independent of the storage threshold.
+# Falls back to 0.0 so a config file without the key keeps every snippet visible.
+FOCUS_SPECIES_MIN_PROB = float(_cfg.get("FOCUS_SPECIES_MIN_PROB", 0.0))
 DEFAULT_DENSITY_K = _cfg["DEFAULT_DENSITY_K"]
 DEFAULT_COMPOSITE_WU = _cfg["DEFAULT_COMPOSITE_WU"]
 DEFAULT_COMPOSITE_WD = _cfg["DEFAULT_COMPOSITE_WD"]
 DEFAULT_COMPOSITE_WR = _cfg["DEFAULT_COMPOSITE_WR"]
-DIVERSITY_HNSW_MIN_NL = _cfg["DIVERSITY_HNSW_MIN_NL"]
+
+# HNSW CONFIG PARAMETERS
+HNSW_NEIGHBORS = _cfg["HNSW_NEIGHBORS"]
+HNSW_EF_SEARCH = _cfg["HNSW_EF_SEARCH"]
+HNSW_MIN_NL = _cfg["HNSW_MIN_NL"]
+HNSW_MIN_NU = _cfg["HNSW_MIN_NU"]
 RETRAIN_AFTER = _cfg["RETRAIN_AFTER"]
+
+# DIVERSITY CONFIG PARAMETERS
+DIVERSITY_NUM_CENTERS = _cfg["DIVERSITY_NUM_CENTERS"]
+DIVERSITY_UPDATE_K = _cfg["DIVERSITY_UPDATE_K"]
 
 #Default values for training checkpoints
 DEFAULT_EPOCHS = _cfg["DEFAULT_EPOCHS"]
@@ -25,3 +37,7 @@ DEFAULT_LEARNING_RATE = _cfg["DEFAULT_LEARNING_RATE"]
 DEFAULT_BATCH_SIZE = _cfg["DEFAULT_BATCH_SIZE"]
 DEFAULT_HIDDEN_DIM = _cfg["DEFAULT_HIDDEN_DIM"]
 DEFAULT_DROPOUT = _cfg["DEFAULT_DROPOUT"]
+
+# Reserved confirmed-negative sentinel labels (see config.yaml for details).
+NO_EVENT_LABELS = frozenset(_cfg["NO_EVENT_LABELS"])
+NO_EVENT_LABEL = _cfg["NO_EVENT_LABELS"][0]  # canonical label for collapsed GROUND_TRUTH rows

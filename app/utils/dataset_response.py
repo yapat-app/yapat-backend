@@ -9,7 +9,12 @@ def dataset_to_dict(
     dataset: DatasetModel,
     *,
     recording_count: int = 0,
+    recordings_with_metadata: Optional[int] = None,
     is_ready_for_feed: bool = False,
+    active_embedding_job: Optional[dict[str, Any]] = None,
+    active_scan: Optional[dict[str, Any]] = None,
+    active_ingest_job: Optional[dict[str, Any]] = None,
+    embedding_failures: Optional[dict[str, int]] = None,
 ) -> dict[str, Any]:
     return {
         "id": dataset.id,
@@ -22,8 +27,15 @@ def dataset_to_dict(
         "spectrogram_f_min_hz": dataset.spectrogram_f_min_hz,
         "spectrogram_f_max_hz": dataset.spectrogram_f_max_hz,
         "retrain_after_threshold": dataset.retrain_after_threshold,
+        "is_reference": dataset.is_reference,
+        "reference_metadata_path": dataset.reference_metadata_path,
         "created_at": dataset.created_at,
         "updated_at": dataset.updated_at,
         "recording_count": recording_count,
+        "recordings_with_metadata": recordings_with_metadata,
         "is_ready_for_feed": is_ready_for_feed,
+        "active_embedding_job": active_embedding_job,
+        "active_scan": active_scan,
+        "active_ingest_job": active_ingest_job,
+        "embedding_failures": embedding_failures,
     }

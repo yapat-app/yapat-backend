@@ -1,7 +1,6 @@
 import logging
 
 import numpy as np
-from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -32,17 +31,6 @@ from utils.dr_methods import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def count_fpv_points(db: Session, dataset_id: int, embedding_model_id: int) -> int:
-    return (
-        db.query(func.count(EmbeddingVector.snippet_id))
-        .join(Snippet, Snippet.id == EmbeddingVector.snippet_id)
-        .join(SnippetSet, SnippetSet.id == Snippet.snippet_set_id)
-        .filter(SnippetSet.dataset_id == dataset_id)
-        .filter(EmbeddingVector.embedding_model_id == embedding_model_id)
-        .scalar()
-    ) or 0
 
 
 def _fpv_method_availability(n: int) -> dict[str, FPVMethodAvailability] | None:
@@ -443,6 +431,9 @@ class VISService:
             invalidate_fpv(body.dataset_id, body.embedding_model_id)
         except Exception:
             pass
+        from app.services.explore.hooks import invalidate_projection
+
+        invalidate_projection(body.dataset_id, body.embedding_model_id)
 
         read_db = SessionLocal()
         try:
@@ -451,8 +442,23 @@ class VISService:
             read_db.close()
 
     def get_fpv_for_dataset_embeddings(self, body: FPVDatasetRequest) -> FPVResponse:
+        from sqlalchemy.orm import load_only
+
+        selected_methods = self._selected_methods(body.method)
+        _METHOD_ATTR_NAMES: dict[str, list[str]] = {
+            "pca":    ["pca_2d_x",    "pca_2d_y",    "pca_3d_x",    "pca_3d_y",    "pca_3d_z"],
+            "umap":   ["umap_2d_x",   "umap_2d_y",   "umap_3d_x",   "umap_3d_y",   "umap_3d_z"],
+            "tsne":   ["tsne_2d_x",   "tsne_2d_y",   "tsne_3d_x",   "tsne_3d_y",   "tsne_3d_z"],
+            "isomap": ["isomap_2d_x", "isomap_2d_y", "isomap_3d_x", "isomap_3d_y", "isomap_3d_z"],
+        }
+        attr_names = ["snippet_id", "embedding_model_id", "dataset_id"]
+        for m in selected_methods:
+            attr_names.extend(_METHOD_ATTR_NAMES[m])
+        load_attrs = [getattr(FPVVis, a) for a in attr_names]
+
         rows = (
             self.db.query(FPVVis)
+            .options(load_only(*load_attrs))
             .filter(FPVVis.dataset_id == body.dataset_id)
             .filter(FPVVis.embedding_model_id == body.embedding_model_id)
             .filter(FPVVis.model_checkpoint_id.is_(None))
@@ -467,7 +473,6 @@ class VISService:
             )
 
         points = []
-        selected_methods = self._selected_methods(body.method)
         projections_2d = {
             method: FPVProjection2D(x=[], y=[])
             for method in selected_methods

@@ -8,6 +8,8 @@ from enum import Enum
 
 from pydantic import BaseModel, field_validator
 
+from app.schemas.dataset_ingest import ActiveIngestJob, EmbeddingFailureCount
+
 
 class DatasetType(str, Enum):
     PAM = "PAM"
@@ -25,6 +27,14 @@ class DatasetCreate(DatasetBase):
     team_id: Optional[int] = None  # Optional for admins, required for regular users
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
+    # Marks this dataset as reference-only training data (never surfaced for
+    # annotation; other datasets/teams opt in via reference links). Admin-set.
+    is_reference: bool = False
+    # Optional override for where pam_metadata.csv lives, decoupled from
+    # source_uri. Bare filename -> resolved within source_uri; path with "/"
+    # -> resolved relative to DATA_ROOT instead. Only meaningful when
+    # is_reference=True. Null = default to {source_uri}/pam_metadata.csv.
+    reference_metadata_path: Optional[str] = None
 
 
 class DatasetUpdate(BaseModel):
@@ -35,6 +45,8 @@ class DatasetUpdate(BaseModel):
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
     retrain_after_threshold: Optional[int] = None
+    is_reference: Optional[bool] = None
+    reference_metadata_path: Optional[str] = None
 
     @field_validator("spectrogram_f_min_hz", "spectrogram_f_max_hz")
     @classmethod
@@ -55,6 +67,26 @@ class DatasetUpdate(BaseModel):
         return v
 
 
+class ActiveEmbeddingJob(BaseModel):
+    id: int
+    status: str
+    snippet_set_id: int
+    started_at: Optional[datetime] = None
+
+
+class ScanProgress(BaseModel):
+    """Live progress of a dataset scan (Redis hash, see services/scan_progress)."""
+    dataset_id: int
+    stage: str  # idle | queued | listing | reading | saving | completed | failed
+    done: Optional[int] = None  # files processed in the current stage
+    total: Optional[int] = None  # files in the current stage (new files only on a rescan)
+    percent: Optional[float] = None  # overall progress across stages
+    stalled: bool = False  # working stage but no update for STALL_AFTER_SECONDS
+    last_update: Optional[int] = None  # unix seconds of the last update
+    error_message: Optional[str] = None
+    recordings_created: Optional[int] = None  # set once the scan has completed
+
+
 class Dataset(DatasetBase):
     id: int
     team_id: Optional[int] = None
@@ -64,10 +96,25 @@ class Dataset(DatasetBase):
     spectrogram_f_max_hz: Optional[float] = None
     quick_labels: Optional[List[Dict[str, Any]]] = None
     retrain_after_threshold: Optional[int] = None
+    is_reference: bool = False
+    reference_metadata_path: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     recording_count: Optional[int] = None  # Number of recordings in this dataset
+    # Recordings that have location + recorded_date + recorded_time (file name or CSV).
+    # Null where not computed (e.g. the create response).
+    recordings_with_metadata: Optional[int] = None
     is_ready_for_feed: bool = False  # True when default snippet set exists and is READY
+    # Newest pending/running embedding job, so the UI can show progress (and hide
+    # "Generate Embeddings") after a refresh without a per-card job-list call.
+    active_embedding_job: Optional[ActiveEmbeddingJob] = None
+    # Running, queued or failed scan, so the card can show scan progress (or the
+    # failure) after a refresh; scans have no Postgres row of their own.
+    active_scan: Optional[ScanProgress] = None
+    # Newest pending/running "add recordings" run (same purpose as above).
+    active_ingest_job: Optional[ActiveIngestJob] = None
+    # Recordings left with unembedded snippets by add-recordings (not dismissed).
+    embedding_failures: Optional[EmbeddingFailureCount] = None
 
     class Config:
         from_attributes = True
@@ -118,3 +165,36 @@ class AvailableDatasetPathsResponse(BaseModel):
     current_path: str = ""
     parent_path: Optional[str] = None
     paths: List[AvailableDatasetPath]
+
+
+class RecordingLocationsResponse(BaseModel):
+    """Distinct site/locality values parsed from recording file names."""
+    locations: List[str]
+
+
+class RecordingMetadataLocationCount(BaseModel):
+    """A distinct (original) location value in an uploaded CSV and its row count."""
+    name: str
+    count: int
+
+
+class RecordingMetadataPreview(BaseModel):
+    """Dry-run summary of a recording-metadata CSV upload (no DB writes)."""
+    total_rows: int
+    matched: int
+    affected_recordings: int
+    unmatched: int
+    unmatched_file_names: List[str]
+    columns_present: List[str]
+    unique_locations: List[RecordingMetadataLocationCount]
+    errors: List[str]
+
+
+class RecordingMetadataImportResult(BaseModel):
+    """Result of committing a recording-metadata CSV import."""
+    total_rows: int
+    matched: int
+    unmatched: int
+    unmatched_file_names: List[str]
+    errors: List[str]
+

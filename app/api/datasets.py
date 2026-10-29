@@ -7,17 +7,35 @@ from datetime import datetime
 from io import StringIO
 import csv
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
+import json
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+    Query,
+    Response,
+    UploadFile,
+    File,
+    Form,
+)
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, func
+from sqlalchemy import and_, case, func
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import get_db, get_current_active_user, get_current_admin_user
 from app.models.user import User, UserRole
+from app.models.quick_label_entry import QuickLabelEntry, SOURCE_PRIORITY
 from app.models.annotation import Annotation as AnnotationModel
-from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
 from app.models.snippet import Snippet
 from app.models.recording import Recording
-from app.models.embedding import SnippetSet, SnippetSetStatus
+from app.models.embedding import (
+    EmbeddingJob,
+    EmbeddingJobStatus,
+    SnippetSet,
+    SnippetSetStatus,
+)
 from app.schemas.dataset import (
     Dataset,
     DatasetCreate,
@@ -26,13 +44,29 @@ from app.schemas.dataset import (
     DatasetExplorerResponse,
     AvailableDatasetPath,
     AvailableDatasetPathsResponse,
+    RecordingLocationsResponse,
+    RecordingMetadataPreview,
+    RecordingMetadataImportResult,
+    ScanProgress,
     SpeciesFolder,
     AudioFile
 )
 from app.schemas.annotation import AnnotationExport
-from app.services.dataset_service import DatasetService
+from app.schemas.quick_label import (
+    QuickLabelEntryBatchCreate,
+    QuickLabelEntryResponse,
+    RecentLabelResponse,
+)
+from app.services.dataset_service import DatasetService, ReferenceMetadataNotFound
+from app.services.dataset_ingest_service import DatasetIngestService
+from app.services.recording_metadata_import_service import (
+    RecordingMetadataImportService,
+)
+from app.utils.recording_metadata_csv import MetadataCsvError
 from app.utils.dataset_response import dataset_to_dict
 from app.tasks.processing_tasks import process_dataset
+from app.services import scan_progress
+from app.config import settings
 
 router = APIRouter()
 
@@ -50,7 +84,16 @@ def create_dataset(
 
     try:
         dataset = svc.create_dataset(dataset_in, current_user)
+    except ReferenceMetadataNotFound as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Label file not found: {e.expected_path}",
+        )
     except ValueError as e:
+        if str(e) == "reference_admin_only":
+            raise HTTPException(
+                status_code=403, detail="Only admins can create reference datasets"
+            )
         if str(e) == "duplicate_dataset":
             raise HTTPException(status_code=409, detail="Dataset already exists")
         if str(e) == "team_not_found":
@@ -64,14 +107,23 @@ def create_dataset(
 
     # Dispatch background task for dataset processing (scanning + snippet generation)
     # Returns task ID for client tracking; None if task dispatch fails (backward compatible)
+    # Queued is marked before dispatch so a fast worker's "listing" update is
+    # never overwritten; if dispatch fails the card shows the failure instead.
+    scan_progress.mark_queued(dataset.id)
     try:
         task = process_dataset.delay(dataset.id)
         task_id = task.id
-    except Exception:
+    except Exception as exc:
         task_id = None
+        scan_progress.mark_failed(dataset.id, f"Could not queue the scan: {exc}")
 
     dataset_response = Dataset(
-        **dataset_to_dict(dataset, recording_count=0, is_ready_for_feed=False)
+        **dataset_to_dict(
+            dataset,
+            recording_count=0,
+            is_ready_for_feed=False,
+            active_scan=scan_progress.get_progress(dataset.id),
+        )
     )
 
     return DatasetCreationResponse(
@@ -109,24 +161,36 @@ def list_available_dataset_paths(
 def read_datasets(
         skip: int = 0,
         limit: int = 100,
+        include_reference: bool = Query(
+            False, description="Include reference-only datasets (is_reference=True) in results."
+        ),
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_active_user),
 ):
     svc = DatasetService(db)
-    datasets = svc.list_datasets(current_user=current_user, skip=skip, limit=limit)
+    datasets = svc.list_datasets(
+        current_user=current_user, skip=skip, limit=limit, include_reference=include_reference
+    )
     
-    # Add recording count for each dataset
+    # Recording count, and how many of them have location + date + time, for each
+    # dataset in one grouped query (the metadata count rides on the same scan).
     dataset_ids = [ds.id for ds in datasets]
     if dataset_ids:
         recording_counts = (
-            db.query(Recording.dataset_id, func.count(Recording.id).label('count'))
+            db.query(
+                Recording.dataset_id,
+                func.count(Recording.id).label('count'),
+                func.sum(case((DatasetService.hub_metadata_complete_clause(), 1), else_=0)).label('with_metadata'),
+            )
             .filter(Recording.dataset_id.in_(dataset_ids))
             .group_by(Recording.dataset_id)
             .all()
         )
-        count_map = {ds_id: count for ds_id, count in recording_counts}
+        count_map = {ds_id: count for ds_id, count, _ in recording_counts}
+        metadata_map = {ds_id: int(with_meta or 0) for ds_id, _, with_meta in recording_counts}
     else:
         count_map = {}
+        metadata_map = {}
     
     # Check feed readiness for datasets with default snippet sets
     snippet_set_ids = [ds.default_snippet_set_id for ds in datasets if ds.default_snippet_set_id]
@@ -142,7 +206,40 @@ def read_datasets(
         ready_set_ids = {ss_id for (ss_id,) in ready_snippet_sets}
     else:
         ready_set_ids = set()
-    
+
+    # Newest pending/running embedding job per dataset (one small indexed query for
+    # the whole page), so cards can show progress without a per-card job-list call.
+    active_job_map: dict = {}
+    if dataset_ids:
+        active_jobs = (
+            db.query(EmbeddingJob)
+            .filter(
+                EmbeddingJob.dataset_id.in_(dataset_ids),
+                EmbeddingJob.status.in_(
+                    [EmbeddingJobStatus.PENDING, EmbeddingJobStatus.RUNNING]
+                ),
+            )
+            .order_by(EmbeddingJob.created_at.desc())
+            .all()
+        )
+        for job in active_jobs:
+            active_job_map.setdefault(
+                job.dataset_id,
+                {
+                    "id": job.id,
+                    "status": job.status.value,
+                    "snippet_set_id": job.snippet_set_id,
+                    "started_at": job.started_at,
+                },
+            )
+
+    # Running, queued or failed scans, one Redis round trip for the page, so a
+    # refresh finds them again (scans have no Postgres row to look up).
+    active_scan_map = scan_progress.get_active_scans(dataset_ids)
+    ingest_svc = DatasetIngestService(db)
+    active_ingest_map = ingest_svc.active_jobs_by_dataset(dataset_ids)
+    failure_map = ingest_svc.failure_counts_by_dataset(dataset_ids)
+
     # Convert to schema and add recording_count and feed readiness
     result = []
     for dataset in datasets:
@@ -156,12 +253,54 @@ def read_datasets(
                 **dataset_to_dict(
                     dataset,
                     recording_count=count_map.get(dataset.id, 0),
+                    recordings_with_metadata=metadata_map.get(dataset.id, 0),
                     is_ready_for_feed=is_ready,
+                    active_embedding_job=active_job_map.get(dataset.id),
+                    active_scan=active_scan_map.get(dataset.id),
+                    active_ingest_job=active_ingest_map.get(dataset.id),
+                    embedding_failures=failure_map.get(dataset.id, {"recordings": 0, "snippets": 0}),
                 )
             )
         )
     
     return result
+
+
+@router.get("/{dataset_id}/scan-progress", response_model=ScanProgress)
+def get_scan_progress(
+        dataset_id: int,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_active_user),
+):
+    """
+    Live progress of the dataset's latest scan, polled by the dataset card.
+
+    One Redis read (see services/scan_progress); stage is "idle" when no scan
+    is known, e.g. the last one finished more than a day ago.
+    """
+    _require_dataset_access(DatasetService(db), dataset_id, current_user)
+    return ScanProgress(**scan_progress.get_progress(dataset_id))
+
+
+@router.get("/{dataset_id}/recording-locations", response_model=RecordingLocationsResponse)
+def list_recording_locations(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    List distinct recording locations for a dataset.
+
+    Locations are parsed from file names (PAM site codes or FNJV locality)
+    and stored on ``Recording.extra_metadata['location']``.
+    Existing recordings are backfilled on first request.
+    """
+    svc = DatasetService(db)
+    dataset = svc.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    locations = svc.list_recording_locations(dataset_id)
+    return RecordingLocationsResponse(locations=locations)
 
 
 @router.get("/{dataset_id}", response_model=Dataset)
@@ -175,12 +314,17 @@ def read_dataset(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    # Add recording count
-    recording_count = (
-        db.query(func.count(Recording.id))
+    # Recording count and how many have location + date + time (one query)
+    recording_count, recordings_with_metadata = (
+        db.query(
+            func.count(Recording.id),
+            func.sum(case((DatasetService.hub_metadata_complete_clause(), 1), else_=0)),
+        )
         .filter(Recording.dataset_id == dataset_id)
-        .scalar()
-    ) or 0
+        .one()
+    )
+    recording_count = int(recording_count or 0)
+    recordings_with_metadata = int(recordings_with_metadata or 0)
     
     # Check if dataset is ready for feed generation
     is_ready_for_feed = False
@@ -192,12 +336,21 @@ def read_dataset(
         )
         if snippet_set and snippet_set.status == SnippetSetStatus.READY:
             is_ready_for_feed = True
-    
+
+    ingest_svc = DatasetIngestService(db)
+    active_ingest_job = ingest_svc.active_jobs_by_dataset([dataset_id]).get(dataset_id)
+    embedding_failures = ingest_svc.failure_counts_by_dataset([dataset_id]).get(
+        dataset_id, {"recordings": 0, "snippets": 0}
+    )
+
     return Dataset(
         **dataset_to_dict(
             dataset,
             recording_count=recording_count,
+            recordings_with_metadata=recordings_with_metadata,
             is_ready_for_feed=is_ready_for_feed,
+            active_ingest_job=active_ingest_job,
+            embedding_failures=embedding_failures,
         )
     )
 
@@ -213,11 +366,16 @@ def update_dataset(
     svc = DatasetService(db)
     try:
         dataset = svc.update_dataset(dataset_id, update_in, current_user)
+    except ReferenceMetadataNotFound as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Label file not found: {e.expected_path}",
+        )
     except ValueError as e:
         code = str(e)
         if code == "not_found":
             raise HTTPException(status_code=404, detail="Dataset not found")
-        if code == "forbidden":
+        if code in ("forbidden", "reference_admin_only"):
             raise HTTPException(status_code=403, detail="Not allowed to update this dataset")
         if code in (
             "invalid_spectrogram_f_min",
@@ -313,38 +471,6 @@ def get_dataset_explorer(
     )
 
 
-@router.get("/{dataset_id}/recording-locations")
-def get_recording_locations(
-        dataset_id: int,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_active_user),
-):
-    """
-    Return unique location values for all recordings in a dataset.
-
-    Location is read from extra_metadata['location'] when present, otherwise
-    parsed from the recording file name as the first segment before an underscore
-    (e.g. 'SITE001' from 'SITE001_20240101_120000.wav').
-    """
-    recordings = (
-        db.query(Recording.file_name, Recording.extra_metadata)
-        .filter(Recording.dataset_id == dataset_id)
-        .all()
-    )
-
-    locations: set[str] = set()
-    for file_name, meta in recordings:
-        if meta and isinstance(meta, dict) and meta.get("location"):
-            locations.add(str(meta["location"]))
-        elif file_name:
-            stem = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
-            part = stem.split("_")[0] if "_" in stem else stem
-            if part:
-                locations.add(part)
-
-    return {"locations": sorted(locations)}
-
-
 @router.delete("/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_dataset(
         dataset_id: int,
@@ -363,272 +489,11 @@ def delete_dataset(
     return None
 
 
-EXPORT_CSV_HEADERS = [
-    'annotation_id', 'dataset_id', 'snippet_id',
-    'label', 'created_at', 'created_by',
-    'recording_file_name', 'snippet_start_time',
-    'snippet_end_time', 'snippet_duration',
-]
-
-# `source_table` is diagnostic — it exposes which of the two label stores a row
-# came from, which is an internal detail annotators have no use for. Admins get
-# it because it is what makes `annotation_id` unambiguous across the two tables.
-EXPORT_ADMIN_ONLY_FIELDS = ['source_table']
-
-
-def _resolve_scope_snippet_ids(
-        db: Session,
-        dataset_id: int,
-        labels: List[str],
-) -> set:
-    """
-    Snippet ids in the dataset carrying at least one of `labels`.
-
-    A label may be written three ways depending on which store it landed in: an
-    AL label string, a canonical namespaced taxon_id (`gbif:123`, `custom:uuid`)
-    or a canonical resolved name. Accept any of them, so callers can scope by
-    whatever spelling they have.
-    """
-    al_snippets = (
-        db.query(ALSnippetAnnotation.snippet_id)
-        .join(Snippet, ALSnippetAnnotation.snippet_id == Snippet.id)
-        .join(Recording, Snippet.recording_id == Recording.id)
-        .filter(
-            Recording.dataset_id == dataset_id,
-            ALSnippetAnnotation.source == ALAnnotationSource.USER,
-            ALSnippetAnnotation.label.in_(labels),
-        )
-    )
-    canonical_snippets = (
-        db.query(AnnotationModel.snippet_id)
-        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
-        .join(Recording, Snippet.recording_id == Recording.id)
-        .filter(
-            Recording.dataset_id == dataset_id,
-            (AnnotationModel.taxon_id.in_(labels))
-            | (AnnotationModel.resolved_name_snapshot.in_(labels)),
-        )
-    )
-    return {row[0] for row in al_snippets.all()} | {row[0] for row in canonical_snippets.all()}
-
-
-def _collect_annotation_labels(db: Session, dataset_id: int) -> List[str]:
-    """
-    Every label value that scopes an export of this dataset to a non-empty result.
-
-    Deliberately the mirror image of `_resolve_scope_snippet_ids`: it returns
-    the spellings that function matches on, so any value offered here is
-    guaranteed to select at least one snippet. That means AL label strings and
-    canonical `resolved_name_snapshot`s -- not `taxon_id`, which also matches
-    but is machine spelling (`gbif:2427091`) no annotator would recognise.
-
-    Values differing only in case or spacing ("Rain" vs "rain") are kept apart
-    because the scope match is exact: collapsing them would silently drop the
-    other spelling's snippets from an export.
-    """
-    al_labels = (
-        db.query(ALSnippetAnnotation.label)
-        .join(Snippet, ALSnippetAnnotation.snippet_id == Snippet.id)
-        .join(Recording, Snippet.recording_id == Recording.id)
-        .filter(
-            Recording.dataset_id == dataset_id,
-            ALSnippetAnnotation.source == ALAnnotationSource.USER,
-        )
-        .distinct()
-    )
-    canonical_labels = (
-        db.query(AnnotationModel.resolved_name_snapshot)
-        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
-        .join(Recording, Snippet.recording_id == Recording.id)
-        .filter(Recording.dataset_id == dataset_id)
-        .distinct()
-    )
-    names = {row[0] for row in al_labels.all()} | {row[0] for row in canonical_labels.all()}
-    return sorted((name for name in names if name), key=lambda name: (name.lower(), name))
-
-
-def _collect_export_rows(
-        db: Session,
-        dataset_id: int,
-        taxon_id: Optional[str] = None,
-        labels: Optional[List[str]] = None,
-        include_co_occurring: bool = False,
-        user_id: Optional[int] = None,
-        created_after: Optional[datetime] = None,
-        created_before: Optional[datetime] = None,
-) -> List[dict]:
-    """
-    Collect a dataset's USER annotations from both label stores.
-
-    Annotations live in two places and neither is a superset of the other:
-    `al_snippet_annotation` (written by AL-mode feedback, and by the annotate
-    feed) and the canonical `annotations` table (written by the classic hub).
-    Mirroring between them only started in June 2026, so an export from either
-    one alone silently drops history. This unions both, the same way the feed's
-    filters do.
-
-    Rows are deduplicated on (snippet_id, label, user) because the mirroring
-    means most rows are present in both stores. The canonical row wins that tie:
-    it carries a real taxon_id, where the AL store only keeps a single label
-    string doing duty as both. Deduplication also collapses AL rows that differ
-    only by model_checkpoint_id, which the AL-only export emitted more than once.
-
-    Every row carries `source_table`; callers decide whether to expose it.
-
-    `labels` (or its single-value alias `taxon_id`) filters row by row: asking
-    for SCIALT returns SCIALT rows and nothing else.
-
-    `include_co_occurring` widens that to snippet level -- a snippet matching
-    any requested label contributes *all* of its annotations. Worth having when
-    the co-occurring label is context for the match (a species heard during
-    wind or rain) and worthless when it is just another species the exporter
-    did not ask about, so it is opt-in rather than the default. Which rows
-    matched is not marked: `label` already says, and a column repeating that
-    test was noise in every export that carried it.
-
-    `user_id` and the date filters narrow the emitted rows only -- snippet
-    scope is resolved from labels alone, so "snippets labelled X, showing only
-    user Y's annotations" does not collapse into "snippets where Y applied X".
-    """
-    scope_labels = [label for label in (labels or []) if label]
-    if taxon_id:
-        scope_labels.append(taxon_id)
-
-    scope_snippet_ids = (
-        _resolve_scope_snippet_ids(db, dataset_id, scope_labels)
-        if scope_labels and include_co_occurring else None
-    )
-    if scope_snippet_ids is not None and not scope_snippet_ids:
-        return []
-
-    # Row-level scoping is the default: filter the label columns directly.
-    row_scope = scope_labels if scope_labels and not include_co_occurring else None
-
-    al_query = (
-        db.query(
-            ALSnippetAnnotation.id.label('annotation_id'),
-            Recording.dataset_id.label('dataset_id'),
-            ALSnippetAnnotation.snippet_id,
-            ALSnippetAnnotation.label.label('taxon_id'),
-            ALSnippetAnnotation.label.label('resolved_name_snapshot'),
-            ALSnippetAnnotation.created_at,
-            ALSnippetAnnotation.user_id.label('created_by'),
-            Recording.file_name.label('recording_file_name'),
-            Snippet.start_time.label('snippet_start_time'),
-            Snippet.end_time.label('snippet_end_time'),
-            Snippet.duration.label('snippet_duration'),
-        )
-        .join(Snippet, ALSnippetAnnotation.snippet_id == Snippet.id)
-        .join(Recording, Snippet.recording_id == Recording.id)
-        .filter(Recording.dataset_id == dataset_id)
-        .filter(ALSnippetAnnotation.source == ALAnnotationSource.USER)
-    )
-    if scope_snippet_ids is not None:
-        al_query = al_query.filter(ALSnippetAnnotation.snippet_id.in_(scope_snippet_ids))
-    if row_scope is not None:
-        al_query = al_query.filter(ALSnippetAnnotation.label.in_(row_scope))
-    if user_id:
-        al_query = al_query.filter(ALSnippetAnnotation.user_id == user_id)
-    if created_after:
-        al_query = al_query.filter(ALSnippetAnnotation.created_at >= created_after)
-    if created_before:
-        al_query = al_query.filter(ALSnippetAnnotation.created_at <= created_before)
-
-    canonical_query = (
-        db.query(
-            AnnotationModel.id.label('annotation_id'),
-            Recording.dataset_id.label('dataset_id'),
-            AnnotationModel.snippet_id,
-            AnnotationModel.taxon_id,
-            AnnotationModel.resolved_name_snapshot,
-            AnnotationModel.created_at,
-            AnnotationModel.user_id.label('created_by'),
-            Recording.file_name.label('recording_file_name'),
-            Snippet.start_time.label('snippet_start_time'),
-            Snippet.end_time.label('snippet_end_time'),
-            Snippet.duration.label('snippet_duration'),
-        )
-        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
-        .join(Recording, Snippet.recording_id == Recording.id)
-        .filter(Recording.dataset_id == dataset_id)
-    )
-    if scope_snippet_ids is not None:
-        canonical_query = canonical_query.filter(
-            AnnotationModel.snippet_id.in_(scope_snippet_ids)
-        )
-    if row_scope is not None:
-        # Same three spellings `_resolve_scope_snippet_ids` accepts, so a label
-        # scopes identically whichever mode the caller picked.
-        canonical_query = canonical_query.filter(
-            (AnnotationModel.taxon_id.in_(row_scope))
-            | (AnnotationModel.resolved_name_snapshot.in_(row_scope))
-        )
-    if user_id:
-        canonical_query = canonical_query.filter(AnnotationModel.user_id == user_id)
-    if created_after:
-        canonical_query = canonical_query.filter(AnnotationModel.created_at >= created_after)
-    if created_before:
-        canonical_query = canonical_query.filter(AnnotationModel.created_at <= created_before)
-
-    # The two stores have independent id sequences, so a bare row id collides
-    # across them -- annotations 6..23 and al_snippet_annotation 6..23 are
-    # unrelated rows. Exports were emitting the same annotation_id twice for
-    # different labels, and `source_table` (the only disambiguator) is stripped
-    # for non-admins. Prefixing makes the id unique for every reader.
-    ID_PREFIXES = {'annotations': 'ann', 'al_snippet_annotation': 'al'}
-
-    def _row_to_dict(row, source_table: str) -> dict:
-        data = {
-            'annotation_id': f"{ID_PREFIXES[source_table]}:{row.annotation_id}",
-            'dataset_id': row.dataset_id,
-            'snippet_id': row.snippet_id,
-            'label': row.resolved_name_snapshot,
-            'created_at': row.created_at.isoformat() if row.created_at else None,
-            'created_by': row.created_by,
-            'recording_file_name': row.recording_file_name,
-            'snippet_start_time': row.snippet_start_time,
-            'snippet_end_time': row.snippet_end_time,
-            'snippet_duration': row.snippet_duration,
-            'source_table': source_table,
-        }
-        return data
-
-    merged: dict[tuple, dict] = {}
-    for row in al_query.all():
-        key = (row.snippet_id, row.resolved_name_snapshot, row.created_by)
-        merged.setdefault(key, _row_to_dict(row, 'al_snippet_annotation'))
-    for row in canonical_query.all():
-        key = (row.snippet_id, row.resolved_name_snapshot, row.created_by)
-        merged[key] = _row_to_dict(row, 'annotations')
-
-    return sorted(
-        merged.values(),
-        key=lambda item: (item['snippet_id'], item['label'] or ''),
-    )
-
-
 @router.get("/{dataset_id}/annotations/export")
 def export_dataset_annotations(
         dataset_id: int,
         format: Literal["json", "csv"] = Query("json", description="Export format: json or csv"),
-        taxon_id: Optional[str] = Query(None, description="Single-label scope; alias for `labels`"),
-        labels: Optional[str] = Query(
-            None,
-            description=(
-                "Comma-separated label filter. Only annotations carrying one "
-                "of these labels are exported. Matches an AL label, a "
-                "canonical taxon_id, or a resolved species name."
-            ),
-        ),
-        include_co_occurring: bool = Query(
-            False,
-            description=(
-                "Widen `labels` from row level to snippet level: every "
-                "annotation on a matching snippet is exported, including the "
-                "labels you did not ask for. Ignored when no label filter is "
-                "given."
-            ),
-        ),
+        taxon_id: Optional[str] = Query(None, description="Filter by taxon_id"),
         user_id: Optional[int] = Query(None, description="Filter by user_id (created_by)"),
         created_after: Optional[datetime] = Query(None, description="Filter annotations created after this datetime"),
         created_before: Optional[datetime] = Query(None, description="Filter annotations created before this datetime"),
@@ -637,67 +502,98 @@ def export_dataset_annotations(
 ):
     """
     Export all annotations for a dataset with recording and snippet metadata.
-
-    Unions the AL label store and the canonical annotations table (USER labels
-    only; ground-truth imports are excluded), deduplicated per
-    (snippet, label, user). See `_collect_export_rows`.
-
+    
     Supports filtering by:
-    - labels: Comma-separated label filter applied row by row — asking for
-      SCIALT returns SCIALT rows and nothing else.
-    - include_co_occurring: Widens that filter to snippet level, so a matching
-      snippet brings its other annotations along for context (a species heard
-      during wind or rain).
-    - taxon_id: Single-label alias for `labels`; supplying both is rejected
+    - taxon_id: Filter by specific taxon
     - user_id: Filter by annotation creator
     - created_after: Filter annotations created after datetime
     - created_before: Filter annotations created before datetime
-
-    Returns either JSON (default) or CSV format. Admins additionally get a
-    `source_table` column; see EXPORT_ADMIN_ONLY_FIELDS.
+    
+    Returns either JSON (default) or CSV format.
     """
     # Verify dataset exists
     svc = DatasetService(db)
     dataset = svc.get_dataset(dataset_id)
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
-
-    if taxon_id and labels:
-        raise HTTPException(
-            status_code=400,
-            detail="Provide either `labels` or `taxon_id`, not both.",
+    
+    # Build query with joins
+    query = (
+        db.query(
+            AnnotationModel.id.label('annotation_id'),
+            Recording.dataset_id.label('dataset_id'),
+            AnnotationModel.snippet_id,
+            AnnotationModel.taxon_id,
+            AnnotationModel.resolved_name_snapshot,
+            AnnotationModel.confidence,
+            AnnotationModel.created_at,
+            AnnotationModel.user_id.label('created_by'),
+            Recording.file_name.label('recording_file_name'),
+            Recording.file_path.label('recording_file_path'),
+            Snippet.start_time.label('snippet_start_time'),
+            Snippet.end_time.label('snippet_end_time'),
+            Snippet.duration.label('snippet_duration'),
         )
-
-    scope_labels = [part.strip() for part in labels.split(",")] if labels else []
-    scope_labels = [part for part in scope_labels if part]
-
-    annotations_data = _collect_export_rows(
-        db,
-        dataset_id,
-        taxon_id=taxon_id,
-        labels=scope_labels,
-        include_co_occurring=include_co_occurring,
-        user_id=user_id,
-        created_after=created_after,
-        created_before=created_before,
+        .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
+        .join(Recording, Snippet.recording_id == Recording.id)
+        .filter(Recording.dataset_id == dataset_id)
     )
-
-    is_admin = current_user.role == UserRole.ADMIN
-    if not is_admin:
-        for row in annotations_data:
-            for field in EXPORT_ADMIN_ONLY_FIELDS:
-                row.pop(field, None)
-
-    headers = EXPORT_CSV_HEADERS + (EXPORT_ADMIN_ONLY_FIELDS if is_admin else [])
-
+    
+    # Apply filters
+    if taxon_id:
+        query = query.filter(AnnotationModel.taxon_id == taxon_id)
+    if user_id:
+        query = query.filter(AnnotationModel.user_id == user_id)
+    if created_after:
+        query = query.filter(AnnotationModel.created_at >= created_after)
+    if created_before:
+        query = query.filter(AnnotationModel.created_at <= created_before)
+    
+    # Execute query
+    results = query.all()
+    
+    # Convert to dict for easy processing
+    annotations_data = [
+        {
+            'annotation_id': row.annotation_id,
+            'dataset_id': row.dataset_id,
+            'snippet_id': row.snippet_id,
+            'taxon_id': row.taxon_id,
+            'resolved_name_snapshot': row.resolved_name_snapshot,
+            'confidence': row.confidence,
+            'created_at': row.created_at.isoformat() if row.created_at else None,
+            'created_by': row.created_by,
+            'recording_file_name': row.recording_file_name,
+            'recording_file_path': row.recording_file_path,
+            'snippet_start_time': row.snippet_start_time,
+            'snippet_end_time': row.snippet_end_time,
+            'snippet_duration': row.snippet_duration,
+        }
+        for row in results
+    ]
+    
     # Return based on format
     if format == "csv":
-        output = StringIO()
-        writer = csv.DictWriter(output, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(annotations_data)
-        csv_content = output.getvalue()
-
+        # Generate CSV
+        if not annotations_data:
+            # Return empty CSV with headers
+            csv_headers = [
+                'annotation_id', 'dataset_id', 'snippet_id', 'taxon_id', 
+                'resolved_name_snapshot', 'confidence', 'created_at', 'created_by',
+                'recording_file_name', 'recording_file_path', 'snippet_start_time',
+                'snippet_end_time', 'snippet_duration'
+            ]
+            output = StringIO()
+            writer = csv.DictWriter(output, fieldnames=csv_headers)
+            writer.writeheader()
+            csv_content = output.getvalue()
+        else:
+            output = StringIO()
+            writer = csv.DictWriter(output, fieldnames=annotations_data[0].keys())
+            writer.writeheader()
+            writer.writerows(annotations_data)
+            csv_content = output.getvalue()
+        
         return Response(
             content=csv_content,
             media_type="text/csv",
@@ -706,33 +602,107 @@ def export_dataset_annotations(
             }
         )
     else:
-        # Validate through the schema, then drop unset keys so non-admins get no
-        # `source_table` at all rather than an explicit null.
-        return [
-            AnnotationExport(**data).model_dump(exclude_none=True)
-            for data in annotations_data
-        ]
+        # Return JSON (using Pydantic for validation)
+        return [AnnotationExport(**data) for data in annotations_data]
 
 
-@router.get("/{dataset_id}/annotation-labels")
-def list_dataset_annotation_labels(
-        dataset_id: int,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_active_user),
+# ── Recording metadata CSV import ─────────────────────────────────────────────
+
+def _read_metadata_upload(file: UploadFile) -> bytes:
+    """Shared validation for the two metadata-CSV endpoints. Returns the bytes."""
+    name = (file.filename or "").lower()
+    if not (name.endswith(".csv") or (file.content_type or "").startswith("text/")):
+        raise HTTPException(status_code=400, detail="Upload must be a .csv file")
+
+    file_bytes = file.file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(file_bytes) > settings.RECORDING_METADATA_MAX_UPLOAD_BYTES:
+        limit_mb = settings.RECORDING_METADATA_MAX_UPLOAD_BYTES / (1024 * 1024)
+        raise HTTPException(
+            status_code=400, detail=f"File exceeds the {limit_mb:.0f} MB upload limit"
+        )
+    return file_bytes
+
+
+def _require_dataset_access(
+    svc: DatasetService, dataset_id: int, current_user: User
+):
+    dataset = svc.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if not svc.user_can_access_dataset(current_user, dataset_id):
+        raise HTTPException(status_code=403, detail="Not authorized for this dataset")
+    return dataset
+
+
+@router.post(
+    "/{dataset_id}/recordings/metadata/preview",
+    response_model=RecordingMetadataPreview,
+)
+def preview_recording_metadata(
+    dataset_id: int,
+    file: UploadFile = File(..., description="Recording-metadata CSV to preview"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
-    The labels actually present on this dataset's annotations.
-
-    Feeds the export dialog's label-scope picker. Every value returned is one
-    the export's `labels` filter matches exactly, so picking from this list
-    cannot produce an empty export. Includes recording conditions (wind, rain,
-    stream) alongside species, since those scope an export just as well.
+    Dry-run a recording-metadata CSV: parse, match rows to recordings by
+    ``file_name``, and return counts + distinct locations. No DB writes.
     """
     svc = DatasetService(db)
-    if not svc.get_dataset(dataset_id):
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    _require_dataset_access(svc, dataset_id, current_user)
 
-    return {"labels": _collect_annotation_labels(db, dataset_id)}
+    file_bytes = _read_metadata_upload(file)
+    import_svc = RecordingMetadataImportService(db)
+    try:
+        return import_svc.preview(dataset_id, file_bytes)
+    except MetadataCsvError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{dataset_id}/recordings/metadata/import",
+    response_model=RecordingMetadataImportResult,
+)
+def import_recording_metadata(
+    dataset_id: int,
+    file: UploadFile = File(..., description="Recording-metadata CSV to import"),
+    location_overrides: Optional[str] = Form(
+        None,
+        description='Optional JSON map of original location -> replacement, e.g. {"Alto Cuieiras":"Reserva Ducke"}',
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Commit a recording-metadata CSV: normalize + merge into
+    ``Recording.extra_metadata`` (merge, never replace), applying optional
+    location renames.
+    """
+    svc = DatasetService(db)
+    _require_dataset_access(svc, dataset_id, current_user)
+
+    overrides: dict = {}
+    if location_overrides:
+        try:
+            overrides = json.loads(location_overrides)
+        except (json.JSONDecodeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="location_overrides is not valid JSON"
+            )
+        if not isinstance(overrides, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="location_overrides must be a JSON object (original -> replacement)",
+            )
+
+    file_bytes = _read_metadata_upload(file)
+    import_svc = RecordingMetadataImportService(db)
+    try:
+        return import_svc.import_metadata(dataset_id, file_bytes, overrides)
+    except MetadataCsvError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── Quick Labels ────────────────────────────────────────────────────────────
@@ -795,3 +765,203 @@ def put_quick_labels(
     dataset.quick_labels = cleaned
     db.commit()
     return cleaned
+
+
+# ── Runtime quick labels (personal + dataset-wide) ──────────────────────────
+#
+# Separate from the curated `datasets.quick_labels` column above: these are
+# labels that entered the palette while annotating — today a participant
+# picking a species from the GBIF search box. Rows with user_id NULL are
+# dataset-wide and reserved for the Ontology Engineering service.
+
+
+def _require_dataset(db: Session, dataset_id: int) -> "DatasetModel":
+    from app.models.dataset import Dataset as DatasetModel
+
+    dataset = db.query(DatasetModel).filter(DatasetModel.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return dataset
+
+
+def _visible_quick_label_entries(
+    db: Session, dataset_id: int, user_id: int
+) -> List[QuickLabelEntryResponse]:
+    """The caller's own entries plus every dataset-wide entry, ordered so that
+    hand-picked labels stay ahead of a bulk OE import, newest first within each
+    group."""
+    from sqlalchemy import or_
+
+    rows = (
+        db.query(QuickLabelEntry)
+        .filter(
+            QuickLabelEntry.dataset_id == dataset_id,
+            or_(
+                QuickLabelEntry.user_id == user_id,
+                QuickLabelEntry.user_id.is_(None),
+            ),
+        )
+        .all()
+    )
+
+    def sort_key(row: QuickLabelEntry):
+        # created_at is NULL only for rows written by a backend that predates
+        # the server_default; treat those as oldest.
+        created = row.created_at.timestamp() if row.created_at else 0.0
+        return (SOURCE_PRIORITY.get(row.source, 1), -created, -row.id)
+
+    rows.sort(key=sort_key)
+    return [
+        QuickLabelEntryResponse(
+            id=row.id,
+            taxon_id=row.taxon_id,
+            display_name=row.display_name,
+            rank=row.rank,
+            source=row.source,
+            created_at=row.created_at,
+            owned=row.user_id == user_id,
+        )
+        for row in rows
+    ]
+
+
+@router.get(
+    "/{dataset_id}/quick-labels/mine",
+    response_model=List[QuickLabelEntryResponse],
+)
+def get_my_quick_labels(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Quick labels added at annotation time and visible to this user."""
+    _require_dataset(db, dataset_id)
+    return _visible_quick_label_entries(db, dataset_id, current_user.id)
+
+
+@router.post(
+    "/{dataset_id}/quick-labels/mine",
+    response_model=List[QuickLabelEntryResponse],
+)
+def add_my_quick_labels(
+    dataset_id: int,
+    body: QuickLabelEntryBatchCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Add labels to the caller's personal palette and return the full visible list.
+
+    Idempotent: a taxon_id already present is left exactly as it was, so the
+    original source and created_at survive a re-pick. Accepts a list because an
+    Ontology Engineering label space arrives all at once; a GBIF pick just
+    sends one item.
+    """
+    _require_dataset(db, dataset_id)
+
+    existing = {
+        taxon_id
+        for (taxon_id,) in db.query(QuickLabelEntry.taxon_id).filter(
+            QuickLabelEntry.dataset_id == dataset_id,
+            QuickLabelEntry.user_id == current_user.id,
+        )
+    }
+
+    seen_in_request = set()
+    for item in body.labels:
+        if item.taxon_id in existing or item.taxon_id in seen_in_request:
+            continue
+        seen_in_request.add(item.taxon_id)
+        # One savepoint per row so a concurrent insert of the same taxon_id
+        # loses only that row rather than the whole batch.
+        try:
+            with db.begin_nested():
+                db.add(
+                    QuickLabelEntry(
+                        dataset_id=dataset_id,
+                        user_id=current_user.id,
+                        taxon_id=item.taxon_id,
+                        display_name=item.display_name,
+                        rank=item.rank,
+                        source=item.source,
+                    )
+                )
+        except IntegrityError:
+            pass  # another request already inserted it; that row wins
+
+    db.commit()
+    return _visible_quick_label_entries(db, dataset_id, current_user.id)
+
+
+@router.get(
+    "/{dataset_id}/quick-labels/recent",
+    response_model=List[RecentLabelResponse],
+)
+def get_my_recent_labels(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Distinct labels from the caller's latest annotations on this dataset,
+    newest first.
+
+    The window counts annotations, not labels (see RECENT_LABELS_WINDOW), so a
+    site with few species yields a short row without any per-dataset tuning.
+    Only the caller's own USER rows count: imported ground truth says nothing
+    about what this annotator is currently hearing.
+    """
+    from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
+
+    _require_dataset(db, dataset_id)
+
+    rows = (
+        db.query(ALSnippetAnnotation.label, ALSnippetAnnotation.created_at)
+        .filter(
+            ALSnippetAnnotation.dataset_id == dataset_id,
+            ALSnippetAnnotation.user_id == current_user.id,
+            ALSnippetAnnotation.source == ALAnnotationSource.USER,
+        )
+        .order_by(ALSnippetAnnotation.created_at.desc(), ALSnippetAnnotation.id.desc())
+        .limit(settings.RECENT_LABELS_WINDOW)
+        .all()
+    )
+
+    # Case-insensitive dedupe to match how the chip list dedupes; rows are
+    # newest first, so the first spelling seen is the most recent one.
+    seen = set()
+    recent = []
+    for label, created_at in rows:
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        recent.append(RecentLabelResponse(label=label, last_used_at=created_at))
+    return recent
+
+
+@router.delete("/{dataset_id}/quick-labels/mine", status_code=status.HTTP_204_NO_CONTENT)
+def delete_my_quick_label(
+    dataset_id: int,
+    taxon_id: str = Query(..., description="Namespaced taxon ID, e.g. gbif:2480932"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Remove one of the caller's own entries.
+
+    Dataset-wide entries are not deletable here — hiding those per user would
+    need a separate suppression table, which nothing currently needs.
+    """
+    _require_dataset(db, dataset_id)
+
+    deleted = (
+        db.query(QuickLabelEntry)
+        .filter(
+            QuickLabelEntry.dataset_id == dataset_id,
+            QuickLabelEntry.user_id == current_user.id,
+            QuickLabelEntry.taxon_id == taxon_id,
+        )
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Quick label not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

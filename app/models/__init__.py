@@ -41,6 +41,11 @@ from app.models.pam_active_learning import (
     ALFeedbackAction,
     ALRetrainStatus,
 )
+from app.models.study_event import StudyEvent
+from app.models.reference_link import DatasetReferenceLink
+from app.models.quick_label_entry import QuickLabelEntry
+from app.models.dataset_ingest_job import DatasetIngestJob, IngestJobStatus, IngestMode, IngestStage
+from app.models.recording_embedding_failure import RecordingEmbeddingFailure
 
 __all__ = [
     "User",
@@ -76,4 +81,16 @@ __all__ = [
     "ALModelStatus",
     "ALFeedbackAction",
     "ALRetrainStatus",
+    # Study interaction logging
+    "StudyEvent",
+    # Reference data pool
+    "DatasetReferenceLink",
+    # Runtime-added quick labels (GBIF picks today, OE label spaces later)
+    "QuickLabelEntry",
+    # Incremental "add recordings" runs
+    "DatasetIngestJob",
+    "IngestJobStatus",
+    "IngestStage",
+    "IngestMode",
+    "RecordingEmbeddingFailure",
 ]

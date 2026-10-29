@@ -6,17 +6,61 @@ DEFAULT_HIDDEN_DIM : 128
 DEFAULT_DROPOUT : 0.5
 
 # Default values for active learning inference
+# Kept at 0.3 rather than 0.0: inference also uses this value to decide which
+# labels to store in al_predictions.predicted_labels, and at 0.0 every class
+# passes for every snippet (e.g. all 82 species on a 1.9 M-snippet dataset,
+# ~1.6 KB extra per row). Lower it again only once the storage threshold is
+# decoupled from the query-time filter in app/schemas/explore.py.
 DEFAULT_INFERENCE_THRESHOLD : 0.3
-DEFAULT_DENSITY_K : 15
+# Minimum stored probability a snippet needs to stay in the feed when the user
+# focuses on species ("Focus on species"). Kept separate from the storage
+# threshold above: 0.0 hides nothing, so every snippet stays visible with its
+# confidence for the chosen species and the confidence slider does the narrowing.
+FOCUS_SPECIES_MIN_PROB : 0.0
+DEFAULT_DENSITY_K : 30
 DEFAULT_COMPOSITE_WU : 0.5
 DEFAULT_COMPOSITE_WD : 0.25
 DEFAULT_COMPOSITE_WR : 0.25
+
+
+# HNSW GRAPH CONFIG
+HNSW_NEIGHBORS : 64
+HNSW_EF_SEARCH : 128
 
 # diversity() switches from exact brute-force (Flat) search to approximate
 # HNSW search once the labelled set (Nl) exceeds this size. Below it, HNSW's
 # graph-build overhead isn't worth it -- Flat is already fast at small Nl.
 # Placeholder pending a benchmark rerun (see paper Fig. 5d / Section 2.6);
 # not yet tuned against measured error rate or timing.
-DIVERSITY_HNSW_MIN_NL : 500
+HNSW_MIN_NL : 500
+HNSW_MIN_NU: 500
 
-RETRAIN_AFTER : 100
+# Number of greedy farthest-point picks (batch centers) diversity() selects,
+# and how many nearest neighbors get their distance score corrected after
+# each pick when using the HNSW-accelerated path (n_u >= DIVERSITY_HNSW_MIN_NU).
+# NUM_CENTERS is an internal tuning constant, not a labeling budget. Points
+# just outside the UPDATE_K neighbor list keep a stale score for that pick --
+
+DIVERSITY_NUM_CENTERS : 100
+DIVERSITY_UPDATE_K : 200
+
+
+RETRAIN_AFTER : 10
+
+# Reserved sentinel labels for confirmed-negative snippets -- match the
+# frontend quick-label modal's slug convention (display text -> taxon_id
+# "local:<slug>"), e.g. "No biophony" (no biological sound at all) and
+# "Other biophony" (a biological sound is present, but not one of the
+# target species -- still a genuine negative for every target class). Add
+# more entries here as needed. All are excluded from the trainable label
+# space everywhere species_list/species_candidates are built from
+# annotations; snippets carrying only one (or more) of these labels are
+# trained as explicit all-zero (confirmed-negative) rows instead of a class
+# of their own, so confidence/composite/label_scope never see any of them
+# as a species. The first entry is the canonical label used when
+# persisting a collapsed confirmed-negative GROUND_TRUTH annotation row
+# (see store_snippet_annotations).
+NO_EVENT_LABELS :
+  - "local:no_biophony"
+  - "local:other_biophony"
+

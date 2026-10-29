@@ -28,3 +28,19 @@ class Recording(RecordingBase):
 
     class Config:
         from_attributes = True
+
+
+class RecordingMetadataItem(BaseModel):
+    """Compact per-recording metadata used by the annotation-hub location and
+    date/time filters — just the three fields those filters read out of
+    extra_metadata, so the client no longer has to page the full recordings
+    table to build them."""
+    recording_id: int
+    location: Optional[str] = None
+    recorded_date: Optional[str] = None
+    recorded_time: Optional[float] = None
+
+
+class RecordingMetadataSummary(BaseModel):
+    dataset_id: int
+    items: list[RecordingMetadataItem]

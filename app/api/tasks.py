@@ -9,6 +9,7 @@ from celery.result import AsyncResult
 from app.api.deps import get_db, get_current_active_user
 from app.models.user import User
 from app.celery_app import celery_app
+from app.services import scan_progress
 
 # Import the actual, existing tasks
 from app.tasks.processing_tasks import (
@@ -72,6 +73,9 @@ def trigger_dataset_scan(
     if ds is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
+    # Mark queued before dispatch so the card shows "waiting for a worker" at once
+    # and a fast worker's "listing" update is never overwritten afterwards.
+    scan_progress.mark_queued(dataset_id)
     task = scan_dataset.delay(dataset_id)
 
     return {
@@ -99,6 +103,7 @@ def trigger_dataset_processing(
     if ds is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
+    scan_progress.mark_queued(dataset_id)
     task = process_dataset.delay(dataset_id)
 
     return {

@@ -7,10 +7,10 @@ import hashlib
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import soundfile as sf
-from sqlalchemy import exists, and_, or_
+from sqlalchemy import exists, and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,10 +23,23 @@ from app.models.user import User, UserRole
 from app.schemas.dataset import DatasetCreate, DatasetUpdate
 from app.core.permissions import check_team_owner_membership
 from app.config import settings
+from app.utils.recording_filename_metadata import (
+    location_source_for_filename,
+    parse_location_from_filename,
+    parse_datetime_from_filename,
+)
 
 logger = logging.getLogger(__name__)
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
+
+
+class ReferenceMetadataNotFound(ValueError):
+    """A reference dataset's label CSV does not exist where the scanner will look."""
+
+    def __init__(self, expected_path: str):
+        super().__init__("reference_metadata_not_found")
+        self.expected_path = expected_path
 
 
 class DatasetService:
@@ -46,11 +59,18 @@ class DatasetService:
             ValueError("duplicate_dataset") if the dataset already exists.
             ValueError("team_not_found") if team_id is invalid.
             ValueError("invalid_source_uri") if source_uri path does not exist.
+            ValueError("reference_admin_only") if a non-admin sets reference fields.
+            ReferenceMetadataNotFound if a reference dataset's label CSV is missing.
         """
 
         # Non-admin users MUST supply a team_id
         if current_user.role != UserRole.ADMIN and dataset_in.team_id is None:
             raise ValueError("team_id_required")
+
+        if (dataset_in.is_reference or dataset_in.reference_metadata_path) and (
+            current_user.role != UserRole.ADMIN
+        ):
+            raise ValueError("reference_admin_only")
 
         # Validate team
         if dataset_in.team_id is not None:
@@ -60,6 +80,11 @@ class DatasetService:
 
         # Validate source_uri path before committing
         self.validate_source_uri(dataset_in.source_uri)
+
+        if dataset_in.is_reference:
+            self.validate_reference_metadata(
+                dataset_in.source_uri, dataset_in.reference_metadata_path
+            )
 
         # Proactive duplicate check for (team_id, source_uri)
         duplicate = (
@@ -94,15 +119,21 @@ class DatasetService:
         self.db.delete(dataset)
         self.db.commit()
 
-    def list_datasets(self, current_user: User, skip: int = 0, limit: int = 100):
+    def list_datasets(
+        self,
+        current_user: User,
+        skip: int = 0,
+        limit: int = 100,
+        include_reference: bool = False,
+    ):
+        # Reference-only datasets (is_reference=True) are training data, not
+        # something to annotate -- hidden from normal listings unless asked for.
         # Admins see everything
         if current_user.role == UserRole.ADMIN:
-            return (
-                self.db.query(DatasetModel)
-                .offset(skip)
-                .limit(limit)
-                .all()
-            )
+            query = self.db.query(DatasetModel)
+            if not include_reference:
+                query = query.filter(DatasetModel.is_reference.is_(False))
+            return query.offset(skip).limit(limit).all()
 
         # Non-admin users: datasets from teams where user is any member (owner or user)
         member_team_ids = (
@@ -130,13 +161,11 @@ class DatasetService:
         if direct_access_ids:
             filters.append(DatasetModel.id.in_(direct_access_ids))
 
-        return (
-            self.db.query(DatasetModel)
-            .filter(or_(*filters))
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
+        query = self.db.query(DatasetModel).filter(or_(*filters))
+        if not include_reference:
+            query = query.filter(DatasetModel.is_reference.is_(False))
+
+        return query.offset(skip).limit(limit).all()
 
     def user_can_access_dataset(self, user: User, dataset_id: int) -> bool:
         dataset = self.get_dataset(dataset_id)
@@ -253,8 +282,26 @@ class DatasetService:
         if not data:
             return dataset
 
+        reference_fields_changed = any(
+            key in data and data[key] != getattr(dataset, key)
+            for key in ("is_reference", "reference_metadata_path")
+        )
+        if reference_fields_changed and current_user.role != UserRole.ADMIN:
+            raise ValueError("reference_admin_only")
+
         if "source_uri" in data and data["source_uri"] is not None:
             self.validate_source_uri(data["source_uri"])
+
+        # Re-check the label CSV whenever the change could move or enable it,
+        # using the values the dataset will have after this update.
+        next_is_reference = data.get("is_reference", dataset.is_reference)
+        if next_is_reference and (
+            reference_fields_changed or "source_uri" in data
+        ):
+            self.validate_reference_metadata(
+                data.get("source_uri") or dataset.source_uri,
+                data.get("reference_metadata_path", dataset.reference_metadata_path),
+            )
 
         next_f_min = data.get("spectrogram_f_min_hz", dataset.spectrogram_f_min_hz)
         next_f_max = data.get("spectrogram_f_max_hz", dataset.spectrogram_f_max_hz)
@@ -283,19 +330,37 @@ class DatasetService:
             raise ValueError("invalid_source_uri")
 
         DATA_ROOT = settings.DATA_ROOT or "/data"
+        dataset_path = os.path.normpath(os.path.join(DATA_ROOT, source_uri))
 
-        # Allow absolute paths that exist directly; relative paths are joined with DATA_ROOT
-        if os.path.isabs(source_uri):
-            dataset_path = os.path.normpath(source_uri)
-        else:
-            dataset_path = os.path.normpath(os.path.join(DATA_ROOT, source_uri))
-            # Reject path traversal outside DATA_ROOT for relative paths
-            data_root_norm = os.path.normpath(DATA_ROOT)
-            if not dataset_path.startswith(data_root_norm + os.sep) and dataset_path != data_root_norm:
-                raise ValueError("invalid_source_uri")
+        # Reject path traversal outside DATA_ROOT
+        data_root_norm = os.path.normpath(DATA_ROOT)
+        if not dataset_path.startswith(data_root_norm + os.sep) and dataset_path != data_root_norm:
+            raise ValueError("invalid_source_uri")
 
         if not os.path.isdir(dataset_path):
             raise ValueError("invalid_source_uri")
+
+    def validate_reference_metadata(
+        self, source_uri: str, reference_metadata_path: Optional[str]
+    ) -> None:
+        """
+        Require a reference dataset's label CSV to exist before it is saved.
+
+        Without it the scan falls back to registering every audio file with no
+        labels (see _filter_to_referenced_files), which silently produces a
+        useless reference pool. Uses the same path rules as the scanner.
+
+        Raises:
+            ReferenceMetadataNotFound with the expected path (relative to
+            DATA_ROOT) if the file is missing or resolves outside DATA_ROOT.
+        """
+        from app.utils.pam_training_paths import expected_pam_metadata_path
+
+        expected = expected_pam_metadata_path(source_uri, reference_metadata_path)
+        data_root_norm = os.path.normpath(settings.DATA_ROOT or "/data")
+        abs_path = os.path.normpath(os.path.join(data_root_norm, expected))
+        if not abs_path.startswith(data_root_norm + os.sep) or not os.path.isfile(abs_path):
+            raise ReferenceMetadataNotFound(expected)
 
     def _resolve_path_under_data_root(self, relative: Optional[str]) -> tuple[str, str, Optional[str]]:
         """
@@ -413,23 +478,55 @@ class DatasetService:
     # substantially without touching the DB from worker threads.
     SCAN_HASH_WORKERS = 8
 
-    def scan_recordings(self, dataset: DatasetModel) -> List[RecordingModel]:
+    def scan_recordings(
+        self,
+        dataset: DatasetModel,
+        progress: Optional[Callable[[str, int, int], None]] = None,
+        *,
+        stats: Optional[Dict[str, int]] = None,
+        on_files_to_read: Optional[Callable[[int], None]] = None,
+        on_file_read: Optional[Callable[[], None]] = None,
+    ) -> List[RecordingModel]:
         """
         Walk dataset.source_uri (relative to DATA_ROOT),
         detect audio files, and create Recording rows.
 
+        ``progress(stage, done, total)`` is called as the scan advances
+        (stages: listing, reading, saving) so the caller can publish live
+        progress; the service itself stays free of any transport (Redis).
+
         Returns a list of newly created recordings.
+
+        Optional hooks for callers that report progress (the add-recordings
+        pipeline): `stats` is filled with files_found / files_skipped /
+        files_unreadable / recordings_new, `on_files_to_read(n)` is called once
+        with the number of new files to read, and `on_file_read()` after each.
         """
+        stats = stats if stats is not None else {}
+        stats.update(
+            files_found=0,
+            files_skipped=0,
+            files_unreadable=0,
+            recordings_new=0,
+            recordings_with_metadata=0,
+            recordings_missing_metadata=0,
+        )
+
         DATA_ROOT = settings.DATA_ROOT or "/data"
-        source_uri = dataset.source_uri
-        dataset_path = source_uri if os.path.isabs(source_uri) else os.path.join(DATA_ROOT, source_uri)
+        dataset_path = os.path.join(DATA_ROOT, dataset.source_uri)
 
         if not os.path.isdir(dataset_path):
             raise ValueError(f"Invalid dataset path: {dataset_path}")
 
+        self._report(progress, "listing", 0, 0)
         audio_files = self._scan_audio_files(dataset_path)
         if not audio_files:
             return []
+
+        if dataset.is_reference:
+            audio_files = self._filter_to_referenced_files(dataset, audio_files)
+            if not audio_files:
+                return []
 
         # Resolve relative (DB-stored) paths up front, then filter out files
         # we already have in a single query instead of one SELECT per file.
@@ -438,48 +535,280 @@ class DatasetService:
             for fpath in audio_files
         ]
         existing_paths = self._existing_file_paths(dataset.id)
+        # Hashing below can take hours on big folders; don't sit idle in the
+        # read transaction the query above opened.
+        self.db.commit()
         to_process = [
             (fpath, rel) for fpath, rel in candidates if rel not in existing_paths
         ]
+        stats["files_found"] = len(candidates)
+        stats["files_skipped"] = len(candidates) - len(to_process)
         if not to_process:
             return []
+
+        if on_files_to_read is not None:
+            on_files_to_read(len(to_process))
 
         # Read audio headers + compute checksums concurrently. Threads only
         # do file I/O/CPU work and return plain data — the DB session stays
         # single-threaded on the main thread below.
-        file_infos = self._read_file_infos_parallel([fpath for fpath, _ in to_process])
+        total_files = len(to_process)
+        self._report(progress, "reading", 0, total_files)
+
+        def on_file_done(done: int) -> None:
+            self._report(progress, "reading", done, total_files)
+            if on_file_read is not None:
+                on_file_read()
+
+        file_infos = self._read_file_infos_parallel(
+            [fpath for fpath, _ in to_process],
+            on_file_done=on_file_done,
+        )
 
         new_recordings: List[RecordingModel] = []
         batch: List[RecordingModel] = []
+        # Unreadable files are skipped below, so "saving" counts readable files only.
+        total_rows = sum(1 for fpath, _ in to_process if file_infos.get(fpath) is not None)
+        saved = 0
+        self._report(progress, "saving", 0, total_rows)
 
         for fpath, relative_path in to_process:
             info = file_infos.get(fpath)
             if info is None:
+                stats["files_unreadable"] += 1
                 continue  # unreadable/failed file; already logged, skip it
 
             duration, sample_rate, checksum = info
+            file_name = os.path.basename(fpath)
             rec = RecordingModel(
                 dataset_id=dataset.id,
                 file_path=relative_path,
-                file_name=os.path.basename(fpath),
+                file_name=file_name,
                 duration=duration,
                 sample_rate=sample_rate,
-                extra_metadata=None,
+                extra_metadata=self._location_metadata_from_filename(file_name),
                 audio_sha256=checksum,
             )
             batch.append(rec)
             new_recordings.append(rec)
 
             if len(batch) >= self.SCAN_COMMIT_BATCH_SIZE:
+                saved += len(batch)
                 self._flush_batch(batch)
+                self._report(progress, "saving", saved, total_rows)
 
+        saved += len(batch)
         self._flush_batch(batch)
+        self._report(progress, "saving", saved, total_rows)
 
+        stats["recordings_new"] = len(new_recordings)
+        complete = sum(1 for rec in new_recordings if self._has_hub_metadata(rec.extra_metadata))
+        stats["recordings_with_metadata"] = complete
+        stats["recordings_missing_metadata"] = len(new_recordings) - complete
         return new_recordings
+
+    @staticmethod
+    def _report(
+        progress: Optional[Callable[[str, int, int], None]],
+        stage: str,
+        done: int,
+        total: int,
+    ) -> None:
+        """Forward scan progress to the caller. Progress is informational only, so a
+        failing callback is logged and never allowed to abort the scan."""
+        if progress is None:
+            return
+        try:
+            progress(stage, done, total)
+        except Exception as exc:
+            logger.warning("scan progress callback failed (%s %s/%s): %s", stage, done, total, exc)
+
+    # The recording fields the Annotation Hub filters on (location, date, time
+    # facets); a new recording with all three needs no metadata upload.
+    HUB_METADATA_KEYS = ("location", "recorded_date", "recorded_time")
+
+    @classmethod
+    def _has_hub_metadata(cls, extra_metadata: Optional[dict]) -> bool:
+        meta = extra_metadata or {}
+        return all(meta.get(key) not in (None, "") for key in cls.HUB_METADATA_KEYS)
+
+    @classmethod
+    def hub_metadata_complete_clause(cls):
+        """SQL twin of _has_hub_metadata, for counting recordings in the database."""
+        return and_(*[
+            func.nullif(RecordingModel.extra_metadata[key].as_string(), "").isnot(None)
+            for key in cls.HUB_METADATA_KEYS
+        ])
+
+    def _filter_to_referenced_files(
+        self, dataset: DatasetModel, audio_files: List[str]
+    ) -> List[str]:
+        """
+        For reference datasets (Dataset.is_reference=True), only register
+        recordings whose filename is actually referenced by pam_metadata.csv
+        -- avoids spending scan/embed compute on files the reference pool
+        will never use as ground truth. Lets source_uri point at a larger
+        directory (e.g. an upstream corpus's full folder) without pulling in
+        everything in it.
+
+        The metadata CSV location itself defaults to {source_uri}/pam_metadata.csv
+        but can be overridden per-dataset via Dataset.reference_metadata_path
+        (bare filename -> resolved within source_uri; path with "/" -> resolved
+        relative to DATA_ROOT instead, fully independent of source_uri). This
+        keeps a shared raw-audio corpus untouched by any given reference pool's
+        metadata -- see docs/reference-data-pool-design.md.
+
+        Falls back to registering every file found if no metadata CSV exists
+        yet (e.g. dataset registered before the CSV was placed) rather than
+        silently registering zero recordings.
+        """
+        from app.utils.pam_training_paths import resolve_pam_metadata_path
+        from app.services.pam_al._data_helpers import get_referenced_filenames
+
+        source_uri = dataset.source_uri
+        DATA_ROOT = settings.DATA_ROOT or "/data"
+
+        try:
+            meta_rel = resolve_pam_metadata_path(
+                DATA_ROOT, source_uri, metadata_path=dataset.reference_metadata_path,
+            )
+        except ValueError:
+            logger.warning(
+                "Reference dataset id=%s source_uri=%s has no pam_metadata.csv yet "
+                "(reference_metadata_path=%r); registering all %d file(s) found instead "
+                "of filtering.",
+                dataset.id, source_uri, dataset.reference_metadata_path, len(audio_files),
+            )
+            return audio_files
+
+        meta_abs = os.path.join(DATA_ROOT, meta_rel)
+        try:
+            referenced = get_referenced_filenames(meta_abs)
+        except ValueError as e:
+            logger.warning(
+                "Could not read pam_metadata.csv at %s (%s); registering all %d file(s) found.",
+                meta_abs, e, len(audio_files),
+            )
+            return audio_files
+
+        filtered = [f for f in audio_files if os.path.basename(f) in referenced]
+        skipped = len(audio_files) - len(filtered)
+        if skipped:
+            logger.info(
+                "Reference dataset scan (id=%s, source_uri=%s, metadata=%s): %d file(s) "
+                "not referenced in pam_metadata.csv were skipped, %d registered.",
+                dataset.id, source_uri, meta_abs, skipped, len(filtered),
+            )
+        return filtered
 
     # ---------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------
+
+    @staticmethod
+    def _location_metadata_from_filename(file_name: str) -> Optional[dict]:
+        """
+        Extract every piece of extra_metadata derivable from a filename in one
+        pass — location (PAM site / FNJV locality) and, independently,
+        recorded_date/recorded_time (PAM convention only). Each key is present
+        only when its own parser matched; a filename can yield location alone,
+        date/time alone, both, or neither.
+        """
+        meta: dict = {}
+
+        location = parse_location_from_filename(file_name)
+        if location:
+            meta["location"] = location
+            source = location_source_for_filename(file_name)
+            if source:
+                meta["location_source"] = source
+
+        datetime_parsed = parse_datetime_from_filename(file_name)
+        if datetime_parsed:
+            recorded_date, recorded_time_seconds = datetime_parsed
+            meta["recorded_date"] = recorded_date
+            meta["recorded_time"] = recorded_time_seconds
+
+        return meta or None
+
+    def backfill_recording_locations(self, dataset_id: int) -> int:
+        """
+        Parse location and recorded date/time from file names for recordings
+        missing either in extra_metadata. Returns the number of rows updated.
+        Only queries recordings actually missing a value, to avoid a full
+        table scan on every filter-feed request for datasets already backfilled.
+        """
+        from sqlalchemy import cast, String as SAString
+
+        bind = self.db.get_bind()
+        dialect = bind.dialect.name
+
+        # Filter to rows missing location OR recorded_date — either means
+        # this row hasn't been through the current parser yet.
+        base_q = self.db.query(RecordingModel).filter(
+            RecordingModel.dataset_id == dataset_id
+        )
+        if dialect == "postgresql":
+            base_q = base_q.filter(
+                or_(
+                    RecordingModel.extra_metadata.op("->>")("location").is_(None),
+                    RecordingModel.extra_metadata.op("->>")("recorded_date").is_(None),
+                )
+            )
+        elif dialect == "sqlite":
+            from sqlalchemy import func as sa_func
+
+            base_q = base_q.filter(
+                or_(
+                    sa_func.json_extract(
+                        RecordingModel.extra_metadata, "$.location"
+                    ).is_(None),
+                    sa_func.json_extract(
+                        RecordingModel.extra_metadata, "$.recorded_date"
+                    ).is_(None),
+                )
+            )
+        else:
+            base_q = base_q.filter(
+                or_(
+                    cast(RecordingModel.extra_metadata["location"], SAString).is_(None),
+                    cast(RecordingModel.extra_metadata["recorded_date"], SAString).is_(None),
+                )
+            )
+
+        recs = base_q.all()
+        updated = 0
+        for rec in recs:
+            parsed = self._location_metadata_from_filename(rec.file_name)
+            if not parsed:
+                continue
+            meta = dict(rec.extra_metadata or {})
+            meta.update(parsed)
+            rec.extra_metadata = meta
+            updated += 1
+        if updated:
+            self.db.commit()
+            from app.services.explore.hooks import invalidate_dataset_base
+
+            invalidate_dataset_base(self.db, dataset_id)
+        return updated
+
+    def list_recording_locations(self, dataset_id: int) -> List[str]:
+        """Distinct location values for a dataset (after optional backfill)."""
+        self.backfill_recording_locations(dataset_id)
+        rows = (
+            self.db.query(RecordingModel.extra_metadata)
+            .filter(RecordingModel.dataset_id == dataset_id)
+            .all()
+        )
+        locations: set[str] = set()
+        for (meta,) in rows:
+            if not meta or not isinstance(meta, dict):
+                continue
+            loc = meta.get("location")
+            if isinstance(loc, str) and loc.strip():
+                locations.add(loc.strip())
+        return sorted(locations)
 
     def _scan_audio_files(self, root_dir: str) -> List[str]:
         audio_files: List[str] = []
@@ -538,8 +867,14 @@ class DatasetService:
         return duration, sample_rate, checksum
 
     def _read_file_infos_parallel(
-            self, filepaths: List[str]
+            self,
+            filepaths: List[str],
+            on_file_done: Optional[Callable[[int], None]] = None,
     ) -> Dict[str, Optional[Tuple[float, int, str]]]:
+        """Read header + checksum for every file on a thread pool.
+
+        ``on_file_done(count)`` runs on the calling thread after each file
+        finishes (successfully or not), with the number finished so far."""
         results: Dict[str, Optional[Tuple[float, int, str]]] = {}
         if not filepaths:
             return results
@@ -556,6 +891,8 @@ class DatasetService:
                 except Exception as e:
                     logger.warning(f"Unexpected error reading {fpath}: {e}")
                     results[fpath] = None
+                if on_file_done is not None:
+                    on_file_done(len(results))
 
         return results
 
@@ -593,9 +930,8 @@ class DatasetService:
             }
         """
         DATA_ROOT = settings.DATA_ROOT or "/data"
-        source_uri = dataset.source_uri
-        dataset_path = source_uri if os.path.isabs(source_uri) else os.path.join(DATA_ROOT, source_uri)
-
+        dataset_path = os.path.join(DATA_ROOT, dataset.source_uri)
+        
         if not os.path.isdir(dataset_path):
             raise ValueError(f"Invalid dataset path: {dataset_path}")
         

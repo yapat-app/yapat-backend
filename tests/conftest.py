@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import soundfile as sf
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
@@ -14,16 +14,14 @@ from app.database import Base
 
 @pytest.fixture(autouse=True)
 def reset_db(engine):
-    # SQLite can't compute a safe DROP order when tables have an unresolvable
-    # FK cycle (e.g. datasets <-> snippet_sets), so foreign key enforcement
-    # must be off for the drop step only. Re-enabled immediately after so
-    # tests still run with FK enforcement on.
+    # datasets <-> snippet_sets is a foreign-key cycle, so SQLAlchemy cannot
+    # topologically sort the DROPs and emits them in an order that trips the
+    # FK enforcement the engine fixture switches on. Disable enforcement for
+    # the teardown only -- leaving it on would fail every test at setup.
     with engine.connect() as conn:
-        conn.execute(text("PRAGMA foreign_keys=OFF"))
-        conn.commit()
-    Base.metadata.drop_all(bind=engine)
-    with engine.connect() as conn:
-        conn.execute(text("PRAGMA foreign_keys=ON"))
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        Base.metadata.drop_all(bind=conn)
+        conn.exec_driver_sql("PRAGMA foreign_keys=ON")
         conn.commit()
     Base.metadata.create_all(bind=engine)
     yield

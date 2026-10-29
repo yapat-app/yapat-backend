@@ -32,6 +32,7 @@ from app.models.pam_active_learning import (
     ALAnnotationSource,
 )
 from app.models.snippet import Snippet
+from app.models.dataset import Dataset
 from app.models.embedding import SnippetSet
 from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
@@ -41,6 +42,7 @@ from app.schemas.pam_active_learning import (
     SamplingMode,
 )
 
+from app.utils.pam_training_paths import resolve_pam_training_paths
 from active_learning.model_zoo.mlp_multilabel_classifier import MultiLabelMLPClassifier
 from active_learning.model_zoo.linear_multilabel_classifier import MultiLabelLinearClassifier
 from active_learning.config import (
@@ -60,7 +62,7 @@ from app.services.pam_al import _data_helpers as data_h
 from app.services.pam_al import _annotation_helpers as ann_h
 from app.services.pam_al import _inference_helpers as inf_h
 from app.services.pam_al import _feedback_helpers as fb_h
-from benchmarks.stage_timer import stage_timer
+from app.services.pam_al import _prediction_retention as retention_h
 
 
 logger = logging.getLogger(__name__)
@@ -79,11 +81,54 @@ def _resolve_device(*candidates: Any) -> str:
     return str(settings.PAM_DEFAULT_DEVICE or "cpu")
 
 
+def _bulk_snippet_meta(
+    db: Session, snippet_ids: list[int]
+) -> tuple[dict[int, int], dict[int, float]]:
+    """Return ({snippet_id: recording_id}, {snippet_id: duration}) in one query."""
+    if not snippet_ids:
+        return {}, {}
+    rows = (
+        db.query(Snippet.id, Snippet.recording_id, Snippet.duration)
+        .filter(Snippet.id.in_(snippet_ids))
+        .all()
+    )
+    rec_ids = {row[0]: row[1] for row in rows if row[1] is not None}
+    durations = {row[0]: row[2] for row in rows if row[2] is not None}
+    return rec_ids, durations
+
+
+def _bulk_recording_ids(db: Session, snippet_ids: list[int]) -> dict[int, int]:
+    """Return {snippet_id: recording_id} for a list of snippet IDs in one query."""
+    rec_ids, _ = _bulk_snippet_meta(db, snippet_ids)
+    return rec_ids
+
+
 class PAMActiveLearningService:
     """Thin orchestrator that wires helper functions together."""
 
     def __init__(self, db: Session):
         self.db = db
+
+    def _prune_old_predictions(self, dataset_id: int, model_family_name: str) -> None:
+        """Drop superseded checkpoints' predictions after a successful training.
+
+        Best effort: the new checkpoint is already committed and active, so a
+        failure here is logged and must never turn a finished training into a
+        failed one. A later training retries the same pruning.
+        """
+        if not settings.PAM_PRUNE_OLD_PREDICTIONS:
+            return
+        try:
+            retention_h.prune_family_predictions(
+                self.db, dataset_id, model_family_name,
+                batch_size=settings.PAM_PREDICTION_PRUNE_BATCH_SIZE,
+            )
+        except Exception:
+            self.db.rollback()
+            logger.exception(
+                "Pruning old predictions failed dataset_id=%d family=%s",
+                dataset_id, model_family_name,
+            )
 
     def _cleanup_failed_training_checkpoint(
         self,
@@ -121,48 +166,6 @@ class PAMActiveLearningService:
             )
             raise
 
-    def _finalize_retrain_success(
-        self,
-        job_id: int,
-        dataset_id: int,
-        model_family_name: str,
-        checkpoint_id: int,
-        result_metrics: dict,
-    ) -> None:
-        """
-        Mark the retrain job COMPLETED and promote the new checkpoint, on a fresh
-        session.
-
-        ``self.db`` has been held open across the entire train + inference window and run_and_store_inference() commits
-        on it partway through, expiring every ORM attribute.  Finalizing on that
-        session fails with "Can't reconnect until invalid transaction is rolled
-        back", which leaves the job stuck RUNNING and the new checkpoint never
-        promoted even though training, scoring and the prediction writes all
-        succeeded.  save_prediction_rows() already writes on its own session for
-        the same reason.
-        """
-        from app.database import SessionLocal
-
-        try:
-            self.db.rollback()
-        except Exception:
-            logger.warning(
-                "Could not roll back stale retrain session job_id=%d", job_id, exc_info=True
-            )
-
-        final_db = SessionLocal()
-        try:
-            job = final_db.query(ALRetrainJob).filter(ALRetrainJob.id == job_id).one()
-            job.status = ALRetrainStatus.COMPLETED
-            job.completed_at = datetime.now(timezone.utc)
-            job.result_metrics = result_metrics
-            ckpt_h.set_active_family_checkpoint(
-                final_db, dataset_id, model_family_name, checkpoint_id
-            )
-            final_db.commit()
-        finally:
-            final_db.close()
-
     # ==================================================================
     # Checkpoint management
     # ==================================================================
@@ -179,6 +182,50 @@ class PAMActiveLearningService:
     def _get_checkpoint(self, checkpoint_id: int) -> Optional[ALModelCheckpoint]:
         return ckpt_h.get_checkpoint(self.db, checkpoint_id)
 
+    def get_dataset_for_training_paths(self, dataset_id: int) -> Dataset:
+        return ckpt_h.get_pam_dataset(self.db, dataset_id)
+
+    # ==================================================================
+    # Reference data pool
+    # ==================================================================
+
+    def _mix_in_reference_pool(
+        self,
+        ds: Dataset,
+        embedding_model_id: int,
+        species_list: List[str],
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        snippet_ids: List[Optional[int]],
+    ) -> tuple[np.ndarray, np.ndarray, List[Optional[int]], List[str], Dict[str, Any]]:
+        """
+        Concatenate this dataset's linked reference pool (see
+        docs/reference-data-pool-design.md) into a training set before
+        filter_and_balance_classes. Always on -- every cold-start and
+        retrain mixes in the full linked reference pool, no sampling ratio.
+
+        Reference-pool rows are appended with snippet_id=None in the
+        returned snippet_ids list, since they belong to a different
+        dataset's snippets -- callers must exclude None entries before
+        persisting anything keyed by snippet_id for ``ds``.
+        """
+        X_ref, y_ref, unified_species, ref_info = data_h.load_reference_pool_training_data(
+            self.db, ds, embedding_model_id, species_list,
+        )
+
+        if unified_species != species_list:
+            pad_width = len(unified_species) - len(species_list)
+            if pad_width > 0:
+                y_train = np.hstack([y_train, np.zeros((y_train.shape[0], pad_width), dtype=y_train.dtype)])
+            species_list = unified_species
+
+        if X_ref.shape[0] > 0:
+            X_train = np.concatenate([X_train, X_ref], axis=0)
+            y_train = np.concatenate([y_train, y_ref], axis=0)
+            snippet_ids = list(snippet_ids) + [None] * X_ref.shape[0]
+
+        return X_train, y_train, snippet_ids, species_list, ref_info
+
     # ==================================================================
     # Train from scratch  (sync — kept for backward compat)
     # ==================================================================
@@ -191,10 +238,16 @@ class PAMActiveLearningService:
         if snippet_set_id is None:
             raise ValueError("No snippet_set_id provided and dataset has no default_snippet_set_id.")
 
-        use_metadata_labels = bool(body.metadata_path and body.label_config_path)
+        use_metadata_labels = bool(body.metadata_path or body.label_config_path)
         if use_metadata_labels:
-            metadata_path = os.path.join(DATA_ROOT, body.metadata_path)
-            label_config_path = os.path.join(DATA_ROOT, body.label_config_path)
+            meta_rel, label_rel = resolve_pam_training_paths(
+                DATA_ROOT,
+                ds.source_uri,
+                body.metadata_path,
+                body.label_config_path,
+            )
+            metadata_path = os.path.join(DATA_ROOT, meta_rel)
+            label_config_path = os.path.join(DATA_ROOT, label_rel)
             species_list = ckpt_h.load_species_from_label_config(label_config_path)
         else:
             metadata_path = None
@@ -208,10 +261,17 @@ class PAMActiveLearningService:
             if not annotations_by_snippet:
                 raise ValueError("No user annotations available for bootstrap training.")
 
+            # Exclude the reserved confirmed-negative sentinels (No biophony /
+            # Other biophony) from the trainable label space -- those
+            # snippets are retained as explicit all-zero rows below, not as
+            # a real class. Resolved per-dataset since quick labels persist
+            # their display_name, not taxon_id, as the annotation label.
+            no_event_labels = ann_h.resolve_no_event_labels(self.db, body.dataset_id)
             species_list = sorted({
                 label
                 for labels in annotations_by_snippet.values()
                 for label in labels
+                if not ann_h.is_no_event_label(label, no_event_labels)
             })
 
             if not species_list:
@@ -281,12 +341,22 @@ class PAMActiveLearningService:
                     annotations_by_snippet,
                 )
 
+            X_train, y_train, used_snippet_ids, species_list, ref_info = self._mix_in_reference_pool(
+                ds, body.embedding_model_id, species_list, X_train, y_train, used_snippet_ids,
+            )
+            logger.info(
+                "Mixed reference pool into bootstrap cold-start dataset_id=%d reference_samples=%d",
+                body.dataset_id, ref_info.get("reference_sample_count", 0),
+            )
+
+            is_negative_mask = y_train.sum(axis=1) == 0
             X_train, y_train, labeled_snippet_ids, used_species, excluded_species, class_counts = (
-                model.filter_and_balance_classes(
-                    X=X_train, y=y_train, snippet_ids=used_snippet_ids,
-                    species_list=species_list,
+                data_h.split_filter_reattach_negatives(
+                    X=X_train, y_full=y_train, snippet_ids=used_snippet_ids,
+                    species_candidates=species_list, model=model,
                     min_samples_per_class=body.min_samples_per_class,
                     max_samples_per_class=body.max_samples_per_class,
+                    is_negative_mask=is_negative_mask,
                 )
             )
 
@@ -321,8 +391,21 @@ class PAMActiveLearningService:
                 "resolved_snippet_set_id": snippet_set_id, "n_dim": n_dim, "num_classes": num_classes,
                 "train_samples": int(X_train.shape[0]), "label_order": used_species,
                 "used_species": used_species, "excluded_species": excluded_species, "class_counts": class_counts,
+                "reference_pool": ref_info,
             }
-            ann_h.store_snippet_annotations(self.db, body.dataset_id, labeled_snippet_ids, y_train, used_species, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
+
+            # Only metadata labels are ground truth worth storing. In the bootstrap
+            # case the training rows are the users' own labels, already stored as
+            # USER rows: a GROUND_TRUTH copy would outlive a later reject and keep
+            # training the model on a label the user removed.
+            if use_metadata_labels:
+                # Reference-pool rows carry snippet_id=None (they belong to a different
+                # dataset's snippets) -- exclude them so we never write another
+                # dataset's snippet ids into this dataset's GROUND_TRUTH annotations.
+                own_mask = [sid is not None for sid in labeled_snippet_ids]
+                own_sids = [sid for sid, keep in zip(labeled_snippet_ids, own_mask) if keep]
+                own_y = y_train[np.asarray(own_mask, dtype=bool)] if own_sids else y_train[:0]
+                ann_h.store_snippet_annotations(self.db, body.dataset_id, own_sids, own_y, used_species, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
 
             inference_metrics = None
             if body.run_inference:
@@ -339,7 +422,7 @@ class PAMActiveLearningService:
                 "label_config_path": body.label_config_path, "aligned_snippet_count": len(used_snippet_ids),
                 "train_samples": int(X_train.shape[0]), "num_classes": int(num_classes),
                 "used_species": used_species, "excluded_species": excluded_species,
-                "class_counts": class_counts, **train_metrics,
+                "class_counts": class_counts, "reference_pool": ref_info, **train_metrics,
             }
             ckpt_h.set_active_family_checkpoint(self.db, body.dataset_id, body.model_family_name, model_ckpt.id)
             self.db.commit()
@@ -520,10 +603,40 @@ class PAMActiveLearningService:
             return
 
         resolved_items: list[dict[str, str]] = []
+
+        # Quick labels pair the button text (often a project code such as
+        # "HYLMER") with a namespaced taxon ID. Using that pairing first links
+        # the annotation to the real taxon instead of an auto-created code
+        # entry. `local:` IDs carry no taxonomy, so they fall through to the
+        # cases below.
+        ds = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        quick_label_taxa = {
+            str(item.get("display_name", "")).strip().lower(): str(item.get("taxon_id", ""))
+            for item in ((ds.quick_labels if ds else None) or [])
+            if isinstance(item, dict)
+            and item.get("taxon_id")
+            and not str(item["taxon_id"]).startswith("local:")
+        }
+
         for label in labels:
             label = (label or "").strip()
             if not label:
                 continue
+
+            # Case 0: label is a quick label linked to a taxon
+            linked_taxon_id = quick_label_taxa.get(label.lower())
+            if linked_taxon_id:
+                resolved = taxonomy.resolve_taxon_id(linked_taxon_id, db_session=self.db)
+                if resolved:
+                    resolved_items.append(
+                        {
+                            "taxon_id": linked_taxon_id,
+                            "resolved_name_snapshot": resolved.get("canonical_name")
+                            or resolved.get("scientific_name")
+                            or label,
+                        }
+                    )
+                    continue
 
             # Case 1: label already is a taxon_id
             if taxonomy.parse_taxon_id(label):
@@ -628,10 +741,6 @@ class PAMActiveLearningService:
           that fit that constraint.
         - Creating a minimal CustomTaxonomy per code yields a valid, resolvable ID
           and keeps dataset stats consistent.
-
-        The row is reused per label code, scoped to the team when the dataset has
-        one and to the dataset itself when it does not. Reuse is the whole point:
-        a taxon id that changes per annotation is not an identifier.
         """
         code = (code or "").strip()
         if not code:
@@ -648,27 +757,17 @@ class PAMActiveLearningService:
                 .first()
             )
             team_id = membership.team_id if membership else None
-
-        # A dataset with no team is a supported mode, not an edge case: an admin
-        # may create one (see `create_dataset`), and four of five datasets here
-        # are that shape. This used to return a fresh uuid per call, which meant
-        # every annotation of the same species got its own "taxon_id" resolving
-        # to nothing -- 768 ids for 9 labels on one dataset, and `group_by
-        # (taxon_id)` in any downstream analysis silently produced one group per
-        # row. Such labels are scoped to the dataset instead, which is what
-        # `custom_taxonomies.dataset_id` exists for.
+        # If we cannot associate this dataset/user with a team (e.g. admin-created
+        # dataset + user has no team memberships), we still return a valid custom
+        # taxon id so we can store canonical final annotations and dataset stats
+        # reflect AL progress. In that edge case, taxonomy resolution will not
+        # be available (no CustomTaxonomy row), but stats and exports work.
         if team_id is None:
-            scope = (CustomTaxonomy.team_id.is_(None),
-                     CustomTaxonomy.dataset_id == dataset_id)
-        else:
-            # Team-scoped labels stay team-wide (dataset_id NULL): a team's label
-            # code means the same thing across every dataset it owns.
-            scope = (CustomTaxonomy.team_id == team_id,
-                     CustomTaxonomy.dataset_id.is_(None))
+            return f"custom:{uuid.uuid4()}"
 
         existing = (
             self.db.query(CustomTaxonomy)
-            .filter(*scope, CustomTaxonomy.name == code)
+            .filter(CustomTaxonomy.team_id == team_id, CustomTaxonomy.name == code)
             .first()
         )
         if existing:
@@ -690,7 +789,6 @@ class PAMActiveLearningService:
         row = CustomTaxonomy(
             taxonomy_id=taxonomy_id,
             team_id=team_id,
-            dataset_id=dataset_id if team_id is None else None,
             created_by_user_id=user_id,
             name=code,
             description=f"Auto-created label code from AL for dataset {dataset_id}",
@@ -772,7 +870,12 @@ class PAMActiveLearningService:
             body.snippet_set_id,
         )
 
-        if not predictions_exist or body.force_refresh:
+        # Only re-run the model when the predictions are actually missing, or when
+        # the caller explicitly asks for inference. `force_refresh` used to land
+        # here too, which meant a UI cache refresh triggered a full pass over the
+        # snippet set -- ~18 minutes at 3M snippets, for rows that already existed.
+        # See docs/superpowers/plans/2026-09-22-retrain-scaling-fixes.md (R1).
+        if not predictions_exist or body.force_inference:
             X, snippet_rows = data_h.load_embeddings(self.db, body.snippet_set_id, embedding_model_id)
 
             # End the read transaction now: load_model_from_checkpoint below is a
@@ -819,18 +922,25 @@ class PAMActiveLearningService:
                         f"Legacy checkpoint {model_ckpt.id} missing 'state_dict'; cannot rebuild classifier."
                     )
 
-                model = ckpt_h.make_model(model_ckpt.model_type)
-                model.create_classifier(
-                    n_dim=int(X.shape[1]),
-                    num_classes=len(label_order),
-                    hidden_dim=int((model_ckpt.hyperparameters or {}).get("hidden_dim"))
-                    if (model_ckpt.hyperparameters or {}).get("hidden_dim") is not None
-                    else None,
-                    dropout=float((model_ckpt.hyperparameters or {}).get("dropout"))
-                    if (model_ckpt.hyperparameters or {}).get("dropout") is not None
-                    else None,
-                )
-                model.load_state_dict(state_dict)
+                if isinstance(state_dict, dict) and ckpt_h.detect_checkpoint_layout(state_dict) == "mlp":
+                    model = MultiLabelMLPClassifier.load_from_checkpoint(
+                        model_ckpt.checkpoint_path, device=device
+                    )
+                else:
+                    if isinstance(state_dict, dict):
+                        state_dict = ckpt_h.remap_legacy_linear_state_dict(state_dict)
+                    model = ckpt_h.make_model(model_ckpt.model_type)
+                    model.create_classifier(
+                        n_dim=int(X.shape[1]),
+                        num_classes=len(label_order),
+                        hidden_dim=int((model_ckpt.hyperparameters or {}).get("hidden_dim"))
+                        if (model_ckpt.hyperparameters or {}).get("hidden_dim") is not None
+                        else None,
+                        dropout=float((model_ckpt.hyperparameters or {}).get("dropout"))
+                        if (model_ckpt.hyperparameters or {}).get("dropout") is not None
+                        else None,
+                    )
+                    model.load_state_dict(state_dict)
                 model.to(device)
                 model.eval()
                 model.label_order = label_order
@@ -854,13 +964,38 @@ class PAMActiveLearningService:
             )
             self.db.commit()
 
+        # When no label_scope is requested, default to the species the model was
+        # actually trained on (used_species). This gives a semantically correct
+        # noisy-OR confidence — "how likely is any trained species present?" —
+        # rather than falling back to max(p) which ignores the training context.
+        hyper = model_ckpt.hyperparameters or {}
+        effective_scope = body.label_scope or hyper.get("used_species") or None
+
         if not body.sample_suggestion:
-            predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(self.db, model_ckpt.id, body.snippet_set_id)
+            predictions = inf_h.get_predictions_for_checkpoint_and_snippet_set(
+                self.db, model_ckpt.id, body.snippet_set_id,
+            )
+            if body.min_confidence is not None:
+                predictions = [
+                    p
+                    for p in predictions
+                    if inf_h.aggregate_confidence(p.predicted_probabilities or {}, effective_scope)
+                    >= body.min_confidence
+                ]
+            recording_id_by_snippet, duration_by_snippet = _bulk_snippet_meta(self.db, [p.snippet_id for p in predictions])
+            rows = [
+                ALPredictionResponse.from_prediction(
+                    p,
+                    recording_id=recording_id_by_snippet.get(p.snippet_id),
+                    duration_sec=duration_by_snippet.get(p.snippet_id),
+                )
+                for p in predictions
+            ]
             return {
                 "mode": "predictions", "model_family_name": body.model_family_name,
-                "used_checkpoint_id": model_ckpt.id, "total_predictions": len(predictions),
-                "returned_count": len(predictions), "suggestion_strategy": body.suggestion_strategy,
-                "k": body.k, "rows": [ALPredictionResponse.from_orm_with_snippet(p) for p in predictions],
+                "used_checkpoint_id": model_ckpt.id, "total_predictions": len(rows),
+                "returned_count": len(rows), "suggestion_strategy": body.suggestion_strategy,
+                "k": body.k, "rows": rows, "label_scope": effective_scope,
             }
 
         strategy = body.suggestion_strategy.value if hasattr(body.suggestion_strategy, "value") else body.suggestion_strategy
@@ -879,14 +1014,31 @@ class PAMActiveLearningService:
             body.snippet_set_id,
             strategy,
             k,
-            label_scope=getattr(body, "label_scope", None) or None,
+            label_scope=effective_scope,
         )
 
+        if body.min_confidence is not None:
+            ranked = [
+                p
+                for p in ranked
+                if inf_h.aggregate_confidence(p.predicted_probabilities or {}, effective_scope)
+                >= body.min_confidence
+            ]
+
+        recording_id_by_snippet, duration_by_snippet = _bulk_snippet_meta(self.db, [p.snippet_id for p in ranked])
+        rows = [
+            ALPredictionResponse.from_prediction(
+                p,
+                recording_id=recording_id_by_snippet.get(p.snippet_id),
+                duration_sec=duration_by_snippet.get(p.snippet_id),
+            )
+            for p in ranked
+        ]
         return {
             "mode": "suggestions", "model_family_name": body.model_family_name,
             "used_checkpoint_id": model_ckpt.id, "total_predictions": total_predictions,
-            "returned_count": len(ranked), "suggestion_strategy": body.suggestion_strategy,
-            "k": k, "rows": [ALPredictionResponse.from_orm_with_snippet(p) for p in ranked],
+            "returned_count": len(rows), "suggestion_strategy": body.suggestion_strategy,
+            "k": k, "rows": rows, "label_scope": effective_scope,
         }
 
     # ==================================================================
@@ -1089,6 +1241,15 @@ class PAMActiveLearningService:
         if snippet_set_id is None:
             raise ValueError("No snippet_set_id provided and dataset has no default_snippet_set_id.")
 
+        meta_rel, label_rel = resolve_pam_training_paths(
+            DATA_ROOT,
+            ds.source_uri,
+            body.metadata_path,
+            body.label_config_path,
+        )
+        metadata_abs = os.path.join(DATA_ROOT, meta_rel)
+        label_abs = os.path.join(DATA_ROOT, label_rel)
+
         is_mlp = body.model_type == ALModelType.PAM_MLP_MULTILABEL
         device = _resolve_device(body.device)
 
@@ -1098,13 +1259,13 @@ class PAMActiveLearningService:
         model_ckpt = ALModelCheckpoint(
             dataset_id=body.dataset_id, model_family_name=body.model_family_name,
             version=body.version, checkpoint_path="",
-            label_config_path=body.label_config_path,
+            label_config_path=label_rel,
             model_type=body.model_type.value if hasattr(body.model_type, "value") else body.model_type,
             hyperparameters={
                 "training_mode": "cold_start", "embedding_model_id": body.embedding_model_id,
                 "snippet_set_id": snippet_set_id,
-                "metadata_path": os.path.join(DATA_ROOT, body.metadata_path),
-                "label_config_path": os.path.join(DATA_ROOT, body.label_config_path),
+                "metadata_path": metadata_abs,
+                "label_config_path": label_abs,
                 "min_samples_per_class": body.min_samples_per_class,
                 "max_samples_per_class": body.max_samples_per_class,
                 "epochs": body.epochs, "learning_rate": body.learning_rate,
@@ -1119,10 +1280,10 @@ class PAMActiveLearningService:
         self.db.add(model_ckpt)
         self.db.flush()
 
+        # started_at is set when the task claims the job (see setup_manual_retrain).
         job = ALRetrainJob(
             model_checkpoint_id=model_ckpt.id, dataset_id=body.dataset_id,
             trigger="cold_start", feedback_count=0, status=ALRetrainStatus.PENDING,
-            started_at=datetime.now(timezone.utc),
         )
         self.db.add(job)
         self.db.commit()
@@ -1168,11 +1329,25 @@ class PAMActiveLearningService:
                 int(y_train.shape[0]),
                 int(y_train.shape[1]),
             )
+
+            X_train, y_train, used_sids, species_list, ref_info = self._mix_in_reference_pool(
+                ds, hyper["embedding_model_id"], species_list, X_train, y_train, used_sids,
+            )
+            logger.info(
+                "Mixed reference pool into cold-start checkpoint_id=%d reference_samples=%d",
+                checkpoint_id, ref_info.get("reference_sample_count", 0),
+            )
+
             model = ckpt_h.make_model(model_ckpt.model_type)
-            X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = model.filter_and_balance_classes(
-                X=X_train, y=y_train, snippet_ids=used_sids, species_list=species_list,
-                min_samples_per_class=hyper.get("min_samples_per_class", 1),
-                max_samples_per_class=hyper.get("max_samples_per_class"),
+            is_negative_mask = y_train.sum(axis=1) == 0
+            X_train, y_train, labeled_sids, used_sp, excl_sp, class_counts = (
+                data_h.split_filter_reattach_negatives(
+                    X=X_train, y_full=y_train, snippet_ids=used_sids,
+                    species_candidates=species_list, model=model,
+                    min_samples_per_class=hyper.get("min_samples_per_class", 1),
+                    max_samples_per_class=hyper.get("max_samples_per_class"),
+                    is_negative_mask=is_negative_mask,
+                )
             )
 
             if y_train.shape[0] == 0:
@@ -1210,9 +1385,16 @@ class PAMActiveLearningService:
             model_ckpt.hyperparameters = {**(model_ckpt.hyperparameters or {}),
                 "resolved_snippet_set_id": snippet_set_id, "n_dim": n_dim, "num_classes": num_classes,
                 "train_samples": int(X_train.shape[0]), "label_order": used_sp,
-                "used_species": used_sp, "excluded_species": excl_sp, "class_counts": class_counts}
+                "used_species": used_sp, "excluded_species": excl_sp, "class_counts": class_counts,
+                "reference_pool": ref_info}
 
-            ann_h.store_snippet_annotations(self.db, model_ckpt.dataset_id, labeled_sids, y_train, used_sp, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
+            # Reference-pool rows carry snippet_id=None (they belong to a different
+            # dataset's snippets) -- exclude them so we never write another
+            # dataset's snippet ids into this dataset's GROUND_TRUTH annotations.
+            own_mask = [sid is not None for sid in labeled_sids]
+            own_sids = [sid for sid, keep in zip(labeled_sids, own_mask) if keep]
+            own_y = y_train[np.asarray(own_mask, dtype=bool)] if own_sids else y_train[:0]
+            ann_h.store_snippet_annotations(self.db, model_ckpt.dataset_id, own_sids, own_y, used_sp, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
 
             inference_metrics = None
             if hyper.get("run_inference"):
@@ -1228,7 +1410,8 @@ class PAMActiveLearningService:
             job.result_metrics = {"new_checkpoint_id": model_ckpt.id, "new_checkpoint_path": cp,
                 "aligned_snippet_count": len(used_sids), "train_samples": int(X_train.shape[0]),
                 "num_classes": int(num_classes), "used_species": used_sp, "excluded_species": excl_sp,
-                "class_counts": class_counts, "inference_metrics": inference_metrics, **train_metrics}
+                "class_counts": class_counts, "inference_metrics": inference_metrics,
+                "reference_pool": ref_info, **train_metrics}
 
             ckpt_h.set_active_family_checkpoint(self.db, model_ckpt.dataset_id, model_ckpt.model_family_name, model_ckpt.id)
             self.db.commit()
@@ -1238,6 +1421,7 @@ class PAMActiveLearningService:
                 checkpoint_id,
                 job_id,
             )
+            self._prune_old_predictions(model_ckpt.dataset_id, model_ckpt.model_family_name)
             return model_ckpt
 
         except Exception as e:
@@ -1257,8 +1441,7 @@ class PAMActiveLearningService:
         # Prefer the dataset's current default snippet set over the parent's
         # cached value: re-segmentation/reprocessing can leave a checkpoint
         # pointing at a stale snippet_set_id with no embeddings, which fails
-        # retrain with "No embeddings found" (e.g. ChorusRF's checkpoint 17
-        # carried snippet_set_id=2 after the dataset had moved to id=3).
+        # retrain with "No embeddings found" 
         ds = ckpt_h.get_pam_dataset(self.db, parent_ckpt.dataset_id)
         snippet_set_id = ds.default_snippet_set_id or hyper.get("resolved_snippet_set_id")
         if snippet_set_id is None:
@@ -1275,7 +1458,7 @@ class PAMActiveLearningService:
         do = float(hyper.get("dropout")) if is_mlp and hyper.get("dropout") is not None else None
         dev = _resolve_device(body.device)
 
-        new_version = f"manual_{int(datetime.now(timezone.utc).timestamp())}"
+        new_version = f"{parent_ckpt.version}_manual_{int(datetime.now(timezone.utc).timestamp())}"
         new_ckpt = ALModelCheckpoint(
             dataset_id=parent_ckpt.dataset_id, model_family_name=parent_ckpt.model_family_name,
             version=new_version, checkpoint_path="", label_config_path=parent_ckpt.label_config_path,
@@ -1290,10 +1473,12 @@ class PAMActiveLearningService:
         self.db.add(new_ckpt)
         self.db.flush()
 
+        # started_at stays empty until the task claims the job: retrain_deferral
+        # reads "PENDING and never started" as held behind an add-recordings run.
         job = ALRetrainJob(
             model_checkpoint_id=new_ckpt.id, dataset_id=parent_ckpt.dataset_id, trigger="manual",
             feedback_count=fb_h.feedback_count_since_retrain(self.db, parent_ckpt.id),
-            status=ALRetrainStatus.PENDING, started_at=datetime.now(timezone.utc),
+            status=ALRetrainStatus.PENDING,
         )
         self.db.add(job)
         self.db.commit()
@@ -1310,8 +1495,8 @@ class PAMActiveLearningService:
             raise ValueError(f"Parent checkpoint {parent_checkpoint_id} not found.")
 
         hyper = parent_ckpt.hyperparameters or {}
-    # Auto-retrain checkpoints must carry all required hyperparameters so
-    # the worker can execute without additional lookups.
+        # Auto-retrain checkpoints must carry all required hyperparameters so
+        # the worker can execute without additional lookups.
         # Prefer the dataset's current default snippet set over the parent's
         # cached value -- see setup_manual_retrain for why (stale
         # snippet_set_id after re-segmentation causes retrain failures).
@@ -1327,11 +1512,14 @@ class PAMActiveLearningService:
         if embedding_model_id is None:
             raise ValueError(f"Parent checkpoint {parent_checkpoint_id} missing embedding_model_id.")
 
-        label_order = hyper.get("label_order")
-        if not label_order:
-            raise ValueError(f"Parent checkpoint {parent_checkpoint_id} missing label_order.")
+        label_order = ckpt_h.resolve_checkpoint_label_order(parent_ckpt)
+        if not hyper.get("label_order"):
+            # Backfill legacy parent checkpoints as well as carrying the resolved
+            # value into the self-contained auto-retrain checkpoint below.
+            parent_ckpt.hyperparameters = {**hyper, "label_order": label_order}
+            hyper = parent_ckpt.hyperparameters
 
-        new_version = f"r{int(datetime.now(timezone.utc).timestamp())}"
+        new_version = f"{parent_ckpt.version}_r{int(datetime.now(timezone.utc).timestamp())}"
 
         new_ckpt = ALModelCheckpoint(
             dataset_id=parent_ckpt.dataset_id, model_family_name=parent_ckpt.model_family_name,
@@ -1356,10 +1544,11 @@ class PAMActiveLearningService:
         self.db.add(new_ckpt)
         self.db.flush()
 
+        # started_at is set when the task claims the job (see setup_manual_retrain).
         job = ALRetrainJob(
             model_checkpoint_id=new_ckpt.id, dataset_id=parent_ckpt.dataset_id, trigger="auto_feedback",
             feedback_count=fb_h.feedback_count_since_retrain(self.db, parent_checkpoint_id),
-            status=ALRetrainStatus.PENDING, started_at=datetime.now(timezone.utc),
+            status=ALRetrainStatus.PENDING,
         )
         self.db.add(job)
         self.db.commit()
@@ -1423,21 +1612,6 @@ class PAMActiveLearningService:
                 "Loaded trusted annotations for retrain checkpoint_id=%d annotated_snippets=%d",
                 checkpoint_id, len(annotations_by_snippet),
             )
-            if not annotations_by_snippet:
-                raise ValueError(
-                    f"No trusted annotations available for retraining "
-                    f"(dataset_id={dataset_id}). "
-                    "Ensure ground-truth or user labels exist before retraining."
-                )
-
-            # Recompute the label candidate set fresh each retrain. This is the
-            # full candidate list before min_samples_per_class filtering;
-            # filter_and_balance_classes narrows it to `used_species` below,
-            # which becomes the final, persisted label_order.
-            species_candidates = sorted({lbl for labels in annotations_by_snippet.values() for lbl in labels})
-            if not species_candidates:
-                raise ValueError(f"No labels found in trusted annotations for dataset_id={dataset_id}.")
-
             X, snippet_rows = data_h.load_embeddings(self.db, snippet_set_id, embedding_model_id)
             snippet_ids = [r["snippet_id"] for r in snippet_rows]
             logger.info(
@@ -1445,17 +1619,54 @@ class PAMActiveLearningService:
                 checkpoint_id, len(snippet_rows),
             )
 
+            # Recompute the label candidate set fresh each retrain. Target
+            # annotations are optional when a linked reference pool supplies
+            # ground-truth training rows; _mix_in_reference_pool expands this
+            # initially empty label space from reference metadata. Exclude
+            # the reserved confirmed-negative sentinels (No/Other biophony)
+            # -- those snippets are retained as explicit all-zero rows below,
+            # not as a real class. Resolved per-dataset since quick labels
+            # persist their display_name, not taxon_id, as the annotation
+            # label.
+            no_event_labels = ann_h.resolve_no_event_labels(self.db, dataset_id)
+            species_candidates = sorted({
+                lbl for labels in annotations_by_snippet.values() for lbl in labels
+                if not ann_h.is_no_event_label(lbl, no_event_labels)
+            })
             keep = [i for i, sid in enumerate(snippet_ids) if sid in annotations_by_snippet]
-            if not keep:
-                raise ValueError(
-                    f"No embeddings found for snippets with trusted annotations "
-                    f"(annotated snippet ids: {list(annotations_by_snippet.keys())[:10]}..., "
-                    f"snippet_set snippet ids sample: {snippet_ids[:10]}...)."
-                )
-
-            X_train = X[keep]
+            X_train = X[keep] if keep else np.empty((0, X.shape[1]), dtype=X.dtype)
             train_sids = [snippet_ids[i] for i in keep]
-            y_train_full = ann_h.build_multihot_from_annotations(train_sids, species_candidates, annotations_by_snippet)
+            # Keep one target row per annotated snippet even when every target
+            # annotation is a reserved no-event label.  In that case the
+            # trainable label space is initially empty and the correct target
+            # matrix has shape (len(train_sids), 0), not (0, 0).  The reference
+            # pool expands the columns below, leaving these rows as explicit
+            # all-zero confirmed negatives.
+            y_train_full = ann_h.build_multihot_from_annotations(
+                train_sids,
+                species_candidates,
+                annotations_by_snippet,
+            )
+
+            ds = ckpt_h.get_pam_dataset(self.db, dataset_id)
+            X_train, y_train_full, train_sids, species_candidates, ref_info = self._mix_in_reference_pool(
+                ds, embedding_model_id, species_candidates, X_train, y_train_full, train_sids,
+            )
+            logger.info(
+                "Mixed reference pool into retrain checkpoint_id=%d reference_samples=%d",
+                checkpoint_id, ref_info.get("reference_sample_count", 0),
+            )
+
+            if X_train.shape[0] == 0:
+                raise ValueError(
+                    f"No training data available for retraining (dataset_id={dataset_id}). "
+                    "Ensure trusted target annotations or a valid linked reference pool exists."
+                )
+            if not species_candidates:
+                raise ValueError(
+                    f"No training labels available for retraining (dataset_id={dataset_id}). "
+                    "Ensure trusted target annotations or labeled reference metadata exists."
+                )
 
             is_mlp = new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL or new_ckpt.model_type == ALModelType.PAM_MLP_MULTILABEL.value
             hd = int(hyper.get("hidden_dim")) if is_mlp and hyper.get("hidden_dim") is not None else None
@@ -1464,12 +1675,14 @@ class PAMActiveLearningService:
 
             model = ckpt_h.make_model(new_ckpt.model_type)
 
+            is_negative_mask = y_train_full.sum(axis=1) == 0
             X_train, y_train, labeled_sids, used_species, excluded_species, class_counts = (
-                model.filter_and_balance_classes(
-                    X=X_train, y=y_train_full, snippet_ids=train_sids,
-                    species_list=species_candidates,
+                data_h.split_filter_reattach_negatives(
+                    X=X_train, y_full=y_train_full, snippet_ids=train_sids,
+                    species_candidates=species_candidates, model=model,
                     min_samples_per_class=int(hyper.get("min_samples_per_class", 1)),
                     max_samples_per_class=hyper.get("max_samples_per_class"),
+                    is_negative_mask=is_negative_mask,
                 )
             )
 
@@ -1499,21 +1712,13 @@ class PAMActiveLearningService:
                 dropout=do,
             )
             model.to(dev)
-            with stage_timer("retrain", str(dev), str(dataset_id), n=int(X_train.shape[0])):
-                train_metrics = model.fit(X=X_train, y=y_train,
-                                          epochs=int(hyper.get("epochs", 20)),
-                                          learning_rate=float(hyper.get("learning_rate", 1e-3)),
-                                          batch_size=int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)), device=dev)
+            train_metrics = model.fit(X=X_train, y=y_train,
+                epochs=int(hyper.get("epochs", 20)), learning_rate=float(hyper.get("learning_rate", 1e-3)),
+                batch_size=int(hyper.get("batch_size", DEFAULT_BATCH_SIZE)), device=dev)
             logger.info("Finished retrain model fit checkpoint_id=%d", checkpoint_id)
 
             cp = ckpt_h.make_checkpoint_path(dataset_id, new_ckpt.model_family_name, new_ckpt.version, new_ckpt.id)
             ckpt_h.save_classifier_checkpoint(model, cp, hd, do, label_order)
-
-            # Read now, while the session is still usable: run_and_store_inference()
-            # commits on self.db, which expires every ORM attribute, and re-reading
-            # one afterwards issues a query on a connection that has been held open
-            # across the whole train + inference window.
-            family_name = new_ckpt.model_family_name
 
             new_ckpt.checkpoint_path = cp
             new_ckpt.status = ALModelStatus.AVAILABLE
@@ -1523,7 +1728,8 @@ class PAMActiveLearningService:
                                         "used_species": used_species,
                                         "excluded_species": excluded_species, "class_counts": class_counts,
                                         "resolved_snippet_set_id": snippet_set_id,
-                                        "embedding_model_id": embedding_model_id}
+                                        "embedding_model_id": embedding_model_id,
+                                        "reference_pool": ref_info}
 
             labeled_ids = ann_h.get_labeled_snippet_ids_for_dataset(self.db, dataset_id)
             inference_metrics = None
@@ -1534,17 +1740,19 @@ class PAMActiveLearningService:
                     hyper.get("composite_wu"), hyper.get("composite_wd"), hyper.get("composite_wr"))
                 logger.info("Completed post-retrain inference checkpoint_id=%d", checkpoint_id)
 
-            self._finalize_retrain_success(
-                job_id=job_id,
-                dataset_id=dataset_id,
-                model_family_name=family_name,
-                checkpoint_id=checkpoint_id,
-                result_metrics={"new_checkpoint_id": checkpoint_id, "new_checkpoint_path": cp,
-                                "train_samples": int(X_train.shape[0]), "num_classes": int(y_train.shape[1]),
-                                "excluded_species": excluded_species, "class_counts": class_counts,
-                                "inference_metrics": inference_metrics, **train_metrics},
-            )
+            job.status = ALRetrainStatus.COMPLETED
+            job.completed_at = datetime.now(timezone.utc)
+            job.result_metrics = {"new_checkpoint_id": new_ckpt.id, "new_checkpoint_path": cp,
+                                  "train_samples": int(X_train.shape[0]), "num_classes": int(y_train.shape[1]),
+                                  "excluded_species": excluded_species, "class_counts": class_counts,
+                                  "inference_metrics": inference_metrics, "reference_pool": ref_info,
+                                  **train_metrics}
+
+            ckpt_h.set_active_family_checkpoint(self.db, dataset_id, new_ckpt.model_family_name, new_ckpt.id)
+            self.db.commit()
+            self.db.refresh(new_ckpt)
             logger.info("Retrain execution completed checkpoint_id=%d job_id=%d", checkpoint_id, job_id)
+            self._prune_old_predictions(dataset_id, new_ckpt.model_family_name)
             return new_ckpt
 
         except Exception as e:
@@ -1570,21 +1778,24 @@ class PAMActiveLearningService:
     # ==================================================================
 
     def _build_random_snippet_suggestions(self, body) -> dict:
+        from sqlalchemy import func as sa_func
+
         k = body.k or 20
 
-        snippets = (
+        sampled = (
             self.db.query(Snippet)
             .filter(Snippet.snippet_set_id == body.snippet_set_id)
+            .order_by(sa_func.random())
+            .limit(k)
             .all()
         )
-        if not snippets:
+        if not sampled:
             raise ValueError(f"No snippets found for snippet_set_id={body.snippet_set_id}.")
-
-        sampled = random.sample(snippets, min(k, len(snippets)))
 
         rows = [
             ALPredictionResponse(
                 snippet_id=snippet.id,
+                recording_id=snippet.recording_id,
                 predicted_labels=None,
                 predicted_probabilities=None,
                 uncertainty=None,
@@ -1592,7 +1803,6 @@ class PAMActiveLearningService:
                 density=None,
                 composite_score=None,
                 duration_sec=snippet.end_time - snippet.start_time,
-                recording_id=snippet.recording_id,
             )
             for snippet in sampled
         ]
@@ -1648,6 +1858,16 @@ class PAMActiveLearningService:
             model_checkpoint_id=None,
             user_id=body.user_id,
         )
+        # Keep the canonical `annotations` table in sync, as submit_feedback does
+        # once a model exists: dataset stats and exports read only that table.
+        if getattr(body, "persist_annotations", True):
+            self._try_store_final_annotations(
+                dataset_id=body.dataset_id,
+                snippet_id=body.snippet_id,
+                labels=normalized_labels,
+                user_id=body.user_id,
+                notes=body.notes,
+            )
 
         self.db.commit()
         self.db.refresh(feedback)
