@@ -394,13 +394,18 @@ class PAMActiveLearningService:
                 "reference_pool": ref_info,
             }
 
-            # Reference-pool rows carry snippet_id=None (they belong to a different
-            # dataset's snippets) -- exclude them so we never write another
-            # dataset's snippet ids into this dataset's GROUND_TRUTH annotations.
-            own_mask = [sid is not None for sid in labeled_snippet_ids]
-            own_sids = [sid for sid, keep in zip(labeled_snippet_ids, own_mask) if keep]
-            own_y = y_train[np.asarray(own_mask, dtype=bool)] if own_sids else y_train[:0]
-            ann_h.store_snippet_annotations(self.db, body.dataset_id, own_sids, own_y, used_species, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
+            # Only metadata labels are ground truth worth storing. In the bootstrap
+            # case the training rows are the users' own labels, already stored as
+            # USER rows: a GROUND_TRUTH copy would outlive a later reject and keep
+            # training the model on a label the user removed.
+            if use_metadata_labels:
+                # Reference-pool rows carry snippet_id=None (they belong to a different
+                # dataset's snippets) -- exclude them so we never write another
+                # dataset's snippet ids into this dataset's GROUND_TRUTH annotations.
+                own_mask = [sid is not None for sid in labeled_snippet_ids]
+                own_sids = [sid for sid, keep in zip(labeled_snippet_ids, own_mask) if keep]
+                own_y = y_train[np.asarray(own_mask, dtype=bool)] if own_sids else y_train[:0]
+                ann_h.store_snippet_annotations(self.db, body.dataset_id, own_sids, own_y, used_species, ALAnnotationSource.GROUND_TRUTH, model_ckpt.id)
 
             inference_metrics = None
             if body.run_inference:
@@ -1853,6 +1858,16 @@ class PAMActiveLearningService:
             model_checkpoint_id=None,
             user_id=body.user_id,
         )
+        # Keep the canonical `annotations` table in sync, as submit_feedback does
+        # once a model exists: dataset stats and exports read only that table.
+        if getattr(body, "persist_annotations", True):
+            self._try_store_final_annotations(
+                dataset_id=body.dataset_id,
+                snippet_id=body.snippet_id,
+                labels=normalized_labels,
+                user_id=body.user_id,
+                notes=body.notes,
+            )
 
         self.db.commit()
         self.db.refresh(feedback)
