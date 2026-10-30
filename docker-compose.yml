@@ -61,6 +61,8 @@ services:
       - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-admin12345}
       - API_STR=/api
       - PROJECT_NAME=YAPAT Backend
+      # User-study interaction logging; keep false outside study deployments.
+      - STUDY_EVENTS_ENABLED=${STUDY_EVENTS_ENABLED:-false}
       - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}
       - DATA_ROOT=/data
       - OE_YAPAT_SERVICE_URL=http://host.docker.internal:8002
