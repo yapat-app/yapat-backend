@@ -38,6 +38,15 @@ class Annotation(Base):
     id = Column(Integer, primary_key=True, index=True)
     snippet_id = Column(Integer, ForeignKey("snippets.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # Which embedding model the user had selected when they made this label. It
+    # is a record only: annotations belong to the clip, so every model sharing
+    # the snippet set sees them.
+    embedding_model_id = Column(
+        Integer,
+        ForeignKey("embedding_models.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     taxon_id = Column(String(255), nullable=False, index=True)
     resolved_name_snapshot = Column(String(255), nullable=False)

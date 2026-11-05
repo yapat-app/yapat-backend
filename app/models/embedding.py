@@ -10,6 +10,7 @@ import enum
 from sqlalchemy import (
     ARRAY,
     JSON,
+    Boolean,
     Column,
     Integer,
     String,
@@ -17,6 +18,8 @@ from sqlalchemy import (
     ForeignKey,
     Float,
     Text,
+    UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.orm import relationship
@@ -61,14 +64,17 @@ class EnumValue(TypeDecorator):
 class VectorType(TypeDecorator):
     """
     Stores list[float] as pgvector's vector type on Postgres, JSON for SQLite.
+
+    The column has no fixed size because models produce different sizes. Each
+    row's size is in EmbeddingVector.dim, and each model has its own partial
+    HNSW index (see app/services/embedding_service.py).
     """
     impl = JSON  # fallback for SQLite
     cache_ok = True
 
     def load_dialect_impl(self, dialect):
         if dialect.name == "postgresql" and PGVECTOR_AVAILABLE:
-            # Use pgvector's native Vector type (dimension 1024 for BirdNET)
-            return dialect.type_descriptor(Vector(1024))
+            return dialect.type_descriptor(Vector())
         elif dialect.name == "postgresql":
             # Fallback to ARRAY if pgvector not installed
             return dialect.type_descriptor(PG_ARRAY(Float))
@@ -113,11 +119,23 @@ class EmbeddingModel(Base):
     requires_fixed_step = Column(Integer, default=True)
     requires_fixed_overlap = Column(Integer, default=True)
 
+    # Length of the vectors this model produces.
+    dim = Column(Integer, nullable=False)
+    sample_rate = Column(Integer, nullable=True)
+    # Key of the embedder class in app/services/embedders. NULL = cannot be run.
+    implementation_key = Column(String, nullable=True, unique=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    snippet_sets = relationship("SnippetSet", back_populates="embedding_model")
     embedding_jobs = relationship("EmbeddingJob", back_populates="embedding_model")
+
+    @property
+    def weights_available(self) -> bool:
+        from app.services.embedders import weights_available
+
+        return weights_available(self.implementation_key)
 
 
 # ---------------------------
@@ -131,8 +149,12 @@ class SnippetSetStatus(str, enum.Enum):
 
 class SnippetSet(Base):
     """
-    Defines segmentation for a dataset × embedding_model with fixed parameters.
-    Owns the snippets produced by segmentation.
+    Defines one way of cutting a dataset's recordings into clips, and owns the
+    snippets that produces.
+
+    Embedding models with the same window, step and overlap share a snippet set,
+    and with it the clips' annotations. Which models have embedded a set is
+    recorded by its EmbeddingJobs (see app/services/embedding_scope.py).
     """
 
     __tablename__ = "snippet_sets"
@@ -142,12 +164,6 @@ class SnippetSet(Base):
     dataset_id = Column(
         Integer,
         ForeignKey("datasets.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-
-    embedding_model_id = Column(
-        Integer,
-        ForeignKey("embedding_models.id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -170,9 +186,15 @@ class SnippetSet(Base):
         back_populates="snippet_sets",
         foreign_keys=[dataset_id]
     )
-    embedding_model = relationship("EmbeddingModel", back_populates="snippet_sets")
     snippets = relationship("Snippet", back_populates="snippet_set", cascade="all, delete-orphan")
     embedding_jobs = relationship("EmbeddingJob", back_populates="snippet_set", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_id", "window_size", "step_size", "overlap",
+            name="uq_snippet_set_dataset_segmentation",
+        ),
+    )
 
 
 # ---------------------------
@@ -240,7 +262,7 @@ class EmbeddingJob(Base):
 class EmbeddingVector(Base):
     """
     Stores a single embedding vector for a snippet × model × job.
-    This is intentionally minimal for first integration step.
+    A snippet holds at most one vector per model.
     """
 
     __tablename__ = "embedding_vectors"
@@ -250,7 +272,6 @@ class EmbeddingVector(Base):
     snippet_id = Column(
         Integer,
         ForeignKey("snippets.id", ondelete="CASCADE"),
-        unique=True,
         nullable=False,
         index=True,
     )
@@ -278,3 +299,7 @@ class EmbeddingVector(Base):
     snippet = relationship("Snippet")
     job = relationship("EmbeddingJob")
     embedding_model = relationship("EmbeddingModel")
+
+    __table_args__ = (
+        UniqueConstraint("snippet_id", "embedding_model_id", name="uq_embedding_vector_snippet_model"),
+    )

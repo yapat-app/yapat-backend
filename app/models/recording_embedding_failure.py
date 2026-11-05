@@ -21,12 +21,14 @@ class RecordingEmbeddingFailure(Base):
 
     dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False)
     snippet_set_id = Column(Integer, ForeignKey("snippet_sets.id", ondelete="CASCADE"), nullable=False)
+    # A recording can fail for one model and succeed for another sharing the set.
+    embedding_model_id = Column(Integer, ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
     recording_id = Column(Integer, ForeignKey("recordings.id", ondelete="CASCADE"), nullable=False)
 
     # Snippets of this recording still without an embedding after the last attempt.
     snippets_missing = Column(Integer, nullable=False)
     # Error of the whole recording (file missing, decode error, ...) or a note
-    # that BirdNET returned nothing for some of its snippets.
+    # that the model returned nothing for some of its snippets.
     reason = Column(Text, nullable=False)
 
     last_job_id = Column(Integer, ForeignKey("dataset_ingest_jobs.id", ondelete="SET NULL"), nullable=True)
@@ -41,6 +43,8 @@ class RecordingEmbeddingFailure(Base):
     recording = relationship("Recording")
 
     __table_args__ = (
-        UniqueConstraint("recording_id", "snippet_set_id", name="uq_recording_embedding_failure"),
+        UniqueConstraint(
+            "recording_id", "snippet_set_id", "embedding_model_id", name="uq_recording_embedding_failure"
+        ),
         Index("ix_recording_embedding_failures_dataset", "dataset_id", "dismissed_at"),
     )
