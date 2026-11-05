@@ -32,7 +32,7 @@ class OnnxEmbedder(AudioEmbedder):
 
     @classmethod
     def _providers(cls) -> list:
-        if settings.DEVICE != "gpu":
+        if settings.EMBEDDING_ONNX_DEVICE != "gpu":
             return ["CPUExecutionProvider"]
         # Steps with no GPU version (the spectrogram) need the CPU provider too. Each
         # worker process loads its own copy, so take GPU memory only as it is needed.
@@ -59,9 +59,9 @@ class OnnxEmbedder(AudioEmbedder):
             options.intra_op_num_threads = settings.EMBEDDING_ONNX_THREADS
             session = ort.InferenceSession(str(path), sess_options=options, providers=cls._providers())
             active = session.get_providers()
-            if settings.DEVICE == "gpu" and "CUDAExecutionProvider" not in active:
+            if settings.EMBEDDING_ONNX_DEVICE == "gpu" and "CUDAExecutionProvider" not in active:
                 raise RuntimeError(
-                    f"DEVICE=gpu, but {cls.IMPLEMENTATION_KEY} could not load on the GPU "
+                    f"EMBEDDING_ONNX_DEVICE=gpu, but {cls.IMPLEMENTATION_KEY} could not load on the GPU "
                     f"(running on {active}). Check the container's GPU access and CUDA libraries."
                 )
             logger.info("%s running on %s", cls.IMPLEMENTATION_KEY, active[0])

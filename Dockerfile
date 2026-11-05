@@ -4,8 +4,6 @@ WORKDIR /app
 
 # cpu (default) or gpu — set via DEVICE in .env
 ARG DEVICE=cpu
-# Lets the app know which build it is running on (see OnnxEmbedder)
-ENV DEVICE=$DEVICE
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1

@@ -1,4 +1,4 @@
-"""ONNX embedding models use the device the image was built for."""
+"""ONNX embedding models use the device set for their service."""
 
 import sys
 from types import SimpleNamespace
@@ -34,26 +34,26 @@ def load_session(monkeypatch, tmp_path):
             InferenceSession=inference_session,
         )
         monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
-        monkeypatch.setattr(settings, "DEVICE", device)
+        monkeypatch.setattr(settings, "EMBEDDING_ONNX_DEVICE", device)
         return BirdNetV3Embedder._load_session(), requested
 
     return load
 
 
-def test_cpu_build_only_asks_for_cpu(load_session):
+def test_cpu_only_asks_for_cpu(load_session):
     session, requested = load_session("cpu", ["CPUExecutionProvider"])
     assert requested == ["CPUExecutionProvider"]
     assert BirdNetV3Embedder._session is session
 
 
-def test_gpu_build_runs_on_cuda(load_session):
+def test_gpu_runs_on_cuda(load_session):
     session, requested = load_session("gpu", ["CUDAExecutionProvider", "CPUExecutionProvider"])
     assert requested[0][0] == "CUDAExecutionProvider"
     assert requested[1] == "CPUExecutionProvider"
     assert BirdNetV3Embedder._session is session
 
 
-def test_gpu_build_refuses_to_fall_back_to_cpu(load_session):
+def test_gpu_refuses_to_fall_back_to_cpu(load_session):
     with pytest.raises(RuntimeError, match="could not load on the GPU"):
         load_session("gpu", ["CPUExecutionProvider"])
     assert BirdNetV3Embedder._session is None
