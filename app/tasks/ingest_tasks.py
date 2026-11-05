@@ -5,14 +5,15 @@ Pipeline: scanning -> segmenting -> embedding -> finalizing -> scoring.
 Job state lives in dataset_ingest_jobs; live counts in app/services/ingest_progress.
 
 Only what is new is touched: the scan skips known file paths, segmentation only
-covers recordings without snippets in the set, and embedding only covers snippets
-without a vector. The snippet set stays READY throughout, so the Annotation Hub
-keeps working while a run is in progress.
+covers recordings without snippets in a set, and embedding only covers snippets
+without a vector. A dataset can have several embedding models and snippet sets, and
+new recordings go through all of them. Snippet sets stay READY throughout, so the
+Annotation Hub keeps working while a run is in progress.
 """
 
 import logging
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from celery import chord
 from sqlalchemy import exists, select
@@ -23,7 +24,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models.dataset import Dataset
 from app.models.dataset_ingest_job import DatasetIngestJob, IngestJobStatus, IngestMode, IngestStage
-from app.models.embedding import EmbeddingVector, SnippetSet
+from app.models.embedding import EmbeddingJob, EmbeddingJobStatus, EmbeddingVector, SnippetSet
 from app.models.recording import Recording
 from app.models.recording_embedding_failure import RecordingEmbeddingFailure
 from app.models.snippet import Snippet
@@ -118,31 +119,57 @@ def _scan(db, job: DatasetIngestJob) -> None:
     _update_summary(db, job, **stats)
 
 
-def _segment(db, job: DatasetIngestJob) -> None:
-    """Create snippets for recordings that have none in the set. Progress unit: recordings."""
-    snippet_set = db.get(SnippetSet, job.snippet_set_id)
-    has_snippets = exists().where(
-        Snippet.recording_id == Recording.id,
-        Snippet.snippet_set_id == snippet_set.id,
-    )
-    recordings = (
-        db.query(Recording.id, Recording.duration)
-        .filter(Recording.dataset_id == job.dataset_id, ~has_snippets)
+def _embedding_jobs_to_extend(db, job: DatasetIngestJob) -> List[EmbeddingJob]:
+    """The (snippet set, model) pairs new recordings must go through.
+
+    Every model that finished on this dataset, plus the job the run was started
+    from. A model still running or failed is left out: it has its own job.
+    """
+    return (
+        db.query(EmbeddingJob)
+        .filter(
+            EmbeddingJob.dataset_id == job.dataset_id,
+            (EmbeddingJob.status == EmbeddingJobStatus.COMPLETED)
+            | (EmbeddingJob.id == job.embedding_job_id),
+        )
+        .order_by(EmbeddingJob.created_at.asc(), EmbeddingJob.id.asc())
         .all()
     )
-    _set_stage(db, job, IngestStage.SEGMENTING, total=len(recordings))
-    new_count = 0
-    if recordings:
-        _ids, new_count = segment_recordings(
-            db, snippet_set, recordings, only_these_recordings=True
+
+
+def _segment(db, job: DatasetIngestJob) -> None:
+    """Create snippets for recordings that have none in a set. Progress unit: recordings."""
+    set_ids = sorted({ej.snippet_set_id for ej in _embedding_jobs_to_extend(db, job)})
+    plans: List[Tuple[SnippetSet, list]] = []
+    for set_id in set_ids:
+        has_snippets = exists().where(
+            Snippet.recording_id == Recording.id,
+            Snippet.snippet_set_id == set_id,
         )
-        db.commit()
-        ingest_progress.incr(job.id, len(recordings))
+        recordings = (
+            db.query(Recording.id, Recording.duration)
+            .filter(Recording.dataset_id == job.dataset_id, ~has_snippets)
+            .all()
+        )
+        plans.append((db.get(SnippetSet, set_id), recordings))
+
+    _set_stage(db, job, IngestStage.SEGMENTING, total=sum(len(r) for _, r in plans))
+    new_count = 0
+    for snippet_set, recordings in plans:
+        if recordings:
+            _ids, added = segment_recordings(
+                db, snippet_set, recordings, only_these_recordings=True
+            )
+            new_count += added
+            db.commit()
+            ingest_progress.incr(job.id, len(recordings))
     _update_summary(db, job, snippets_new=new_count)
 
 
-def _snippets_without_vectors(db, snippet_set_id: int, mode: IngestMode) -> Dict[int, List[int]]:
-    """{recording_id: [snippet_id, ...]} for the snippets this run should embed.
+def _snippets_without_vectors(
+    db, snippet_set_id: int, embedding_model_id: int, mode: IngestMode
+) -> Dict[int, List[int]]:
+    """{recording_id: [snippet_id, ...]} for the snippets this run should embed with this model.
 
     SCAN: every snippet in the set with no vector, i.e. this run's new snippets
     plus earlier failures, except recordings the user dismissed ("continue
@@ -150,11 +177,16 @@ def _snippets_without_vectors(db, snippet_set_id: int, mode: IngestMode) -> Dict
     RETRY_FAILED: only the snippets of recorded failures, dismissed or not.
     """
     failed = select(RecordingEmbeddingFailure.recording_id).where(
-        RecordingEmbeddingFailure.snippet_set_id == snippet_set_id
+        RecordingEmbeddingFailure.snippet_set_id == snippet_set_id,
+        RecordingEmbeddingFailure.embedding_model_id == embedding_model_id,
     )
     query = (
         db.query(Snippet.recording_id, Snippet.id)
-        .outerjoin(EmbeddingVector, EmbeddingVector.snippet_id == Snippet.id)
+        .outerjoin(
+            EmbeddingVector,
+            (EmbeddingVector.snippet_id == Snippet.id)
+            & (EmbeddingVector.embedding_model_id == embedding_model_id),
+        )
         .filter(Snippet.snippet_set_id == snippet_set_id, EmbeddingVector.id.is_(None))
     )
     if mode == IngestMode.RETRY_FAILED:
@@ -172,23 +204,28 @@ def _snippets_without_vectors(db, snippet_set_id: int, mode: IngestMode) -> Dict
 def _dispatch_embedding(db, job: DatasetIngestJob) -> int:
     """Fan out per-recording embedding tasks; finalize_dataset_ingest runs after.
 
-    Same chunked chord as run_embedding. Vectors are attached to the set's
-    original EmbeddingJob (job.embedding_job_id). Progress unit: snippets.
+    Same chunked chord as run_embedding, with one entry per recording per model.
+    Vectors are attached to each model's original EmbeddingJob. Progress unit:
+    snippets, counted once per model.
     """
-    snippet_set = db.get(SnippetSet, job.snippet_set_id)
-    plan = _snippets_without_vectors(db, snippet_set.id, job.mode)
-    total = sum(len(ids) for ids in plan.values())
+    entries = []
+    for embedding_job in _embedding_jobs_to_extend(db, job):
+        plan = _snippets_without_vectors(
+            db, embedding_job.snippet_set_id, embedding_job.embedding_model_id, job.mode
+        )
+        for recording_id, snippet_ids in plan.items():
+            entries.append(
+                (recording_id, snippet_ids, embedding_job.embedding_model_id, embedding_job.id, job.id)
+            )
+    total = sum(len(entry[1]) for entry in entries)
     _set_stage(db, job, IngestStage.EMBEDDING, total=total)
 
-    if not plan:
+    if not entries:
         finalize_dataset_ingest.delay([], job.id, 0)
         return 0
 
     chunked_group = generate_embeddings_for_recording.chunks(
-        (
-            (recording_id, snippet_ids, snippet_set.embedding_model_id, job.embedding_job_id, job.id)
-            for recording_id, snippet_ids in plan.items()
-        ),
+        iter(entries),
         settings.EMBEDDING_CHORD_CHUNK_SIZE,
     ).group()
     chord(chunked_group)(finalize_dataset_ingest.s(job.id, total))
@@ -207,25 +244,35 @@ def _record_embedding_failures(db, job: DatasetIngestJob, results: List[dict]) -
 
     `results` are the per-recording returns of generate_embeddings_for_recording:
     status "error" means none of its snippets were embedded (`snippets_planned`),
-    "success" may still carry `failed_snippets` that BirdNET returned nothing for.
+    "success" may still carry `failed_snippets` that the model returned nothing for.
     Returns this run's totals for the job summary.
     """
     totals = {"recordings": 0, "snippets": 0}
+    embedding_jobs = {ej.id: ej for ej in _embedding_jobs_to_extend(db, job)}
     for r in results:
         recording_id = r.get("recording_id")
         if recording_id is None:
             continue
+        embedding_job = embedding_jobs.get(r.get("embedding_job_id"))
+        if embedding_job is None:
+            continue
+        snippet_set_id = embedding_job.snippet_set_id
+        embedding_model_id = embedding_job.embedding_model_id
         if r.get("status") == "success":
             missing = int(r.get("failed_snippets", 0) or 0)
             processed = int(r.get("snippets_processed", 0) or 0)
-            reason = f"BirdNET returned no embedding for {missing} of {processed} snippets"
+            reason = f"The model returned no embedding for {missing} of {processed} snippets"
         else:
             missing = int(r.get("snippets_planned", 0) or 0)
             reason = str(r.get("message") or "Unknown error")
 
         row = (
             db.query(RecordingEmbeddingFailure)
-            .filter_by(recording_id=recording_id, snippet_set_id=job.snippet_set_id)
+            .filter_by(
+                recording_id=recording_id,
+                snippet_set_id=snippet_set_id,
+                embedding_model_id=embedding_model_id,
+            )
             .one_or_none()
         )
         if missing <= 0:
@@ -238,7 +285,8 @@ def _record_embedding_failures(db, job: DatasetIngestJob, results: List[dict]) -
         if row is None:
             row = RecordingEmbeddingFailure(
                 dataset_id=job.dataset_id,
-                snippet_set_id=job.snippet_set_id,
+                snippet_set_id=snippet_set_id,
+                embedding_model_id=embedding_model_id,
                 recording_id=recording_id,
             )
             db.add(row)
@@ -272,20 +320,22 @@ def _refresh_derived_data(db, job: DatasetIngestJob, *, vectors_added: bool) -> 
     from app.services.explore.hooks import invalidate_dataset_base
     from app.tasks.embedding_tasks import generate_fpv_for_dataset
 
-    snippet_set = db.get(SnippetSet, job.snippet_set_id)
     if vectors_added:
         invalidate_dataset_base(db, job.dataset_id)
-        try:
-            _invalidate_embedding_cache(snippet_set.id, snippet_set.embedding_model_id)
-        except Exception:
-            logger.exception("ingest job %s: embedding cache invalidation failed", job.id)
-        try:
-            generate_fpv_for_dataset.delay(
-                dataset_id=job.dataset_id,
-                embedding_model_id=snippet_set.embedding_model_id,
-            )
-        except Exception:
-            logger.exception("ingest job %s: could not enqueue projection rebuild", job.id)
+        for embedding_job in _embedding_jobs_to_extend(db, job):
+            try:
+                _invalidate_embedding_cache(
+                    embedding_job.snippet_set_id, embedding_job.embedding_model_id
+                )
+            except Exception:
+                logger.exception("ingest job %s: embedding cache invalidation failed", job.id)
+            try:
+                generate_fpv_for_dataset.delay(
+                    dataset_id=job.dataset_id,
+                    embedding_model_id=embedding_job.embedding_model_id,
+                )
+            except Exception:
+                logger.exception("ingest job %s: could not enqueue projection rebuild", job.id)
 
 
 # ----------------------------------------------------------------------

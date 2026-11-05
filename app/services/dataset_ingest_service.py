@@ -106,7 +106,7 @@ class DatasetIngestService:
                 raise IngestRequestError(400, "source_uri_not_allowed_with_retry")
             has_failures = (
                 self.db.query(RecordingEmbeddingFailure.id)
-                .filter(RecordingEmbeddingFailure.snippet_set_id == snippet_set.id)
+                .filter(RecordingEmbeddingFailure.dataset_id == dataset.id)
                 .first()
             )
             if has_failures is None:
@@ -185,7 +185,7 @@ class DatasetIngestService:
             raise IngestRequestError(409, "retrain_job_running", job_id=running_retrain[0])
 
     def _require_embedded(self, dataset: DatasetModel) -> tuple[SnippetSet, EmbeddingJob]:
-        """The default snippet set must exist and be READY: new snippets are added to it."""
+        """The default snippet set must exist and be READY. The run extends it and every other set."""
         if dataset.default_snippet_set_id is None:
             raise IngestRequestError(400, "no_embeddings_yet")
         snippet_set = self.db.get(SnippetSet, dataset.default_snippet_set_id)
