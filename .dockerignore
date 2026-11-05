@@ -25,6 +25,7 @@ tests/
 
 # Runtime model/checkpoint/cache dirs (mounted via docker-compose volumes)
 models_AL/
+embedding_weights/
 data/
 embedding_cache/
 backup.sql

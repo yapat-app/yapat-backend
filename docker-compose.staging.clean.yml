@@ -3,6 +3,7 @@ services:
     image: pgvector/pgvector:pg15
     command: postgres -c shared_buffers=2GB -c work_mem=32MB -c effective_cache_size=6GB -c maintenance_work_mem=256MB
     container_name: yapat-postgres-staging
+    shm_size: "24gb"
     environment:
       POSTGRES_USER: yapat_user
       POSTGRES_PASSWORD: yapat_password
@@ -69,6 +70,7 @@ services:
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_EMBEDDING_WEIGHTS:-./embedding_weights}:/app/embedding_weights:ro
       - /data/yapat-datasets:/data/bulk:ro
       - /srv/demos/apps/yapat-tool/WSSED-YAPAT/focal-data:/wssed-focal-data:ro
     restart: unless-stopped
@@ -94,7 +96,7 @@ services:
       DATABASE_URL: postgresql://yapat_user:yapat_password@db/yapat
       CELERY_BROKER_URL: redis://redis:6379/0
       WSSED_GPU_SERVER_URL: ${WSSED_GPU_SERVER_URL:-http://172.17.0.1:8004}
-      WSSED_TIMEOUT: ${WSSED_TIMEOUT:-300}     
+      WSSED_TIMEOUT: ${WSSED_TIMEOUT:-300}
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       SECRET_KEY: ${SECRET_KEY}
       DATA_ROOT: /data
@@ -104,6 +106,7 @@ services:
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_EMBEDDING_WEIGHTS:-./embedding_weights}:/app/embedding_weights:ro
       - /data/yapat-datasets:/data/bulk:ro
     restart: unless-stopped
     deploy:
@@ -137,6 +140,7 @@ services:
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_EMBEDDING_WEIGHTS:-./embedding_weights}:/app/embedding_weights:ro
       - /data/yapat-datasets:/data/bulk:ro
     restart: unless-stopped
     deploy:
@@ -169,6 +173,7 @@ services:
     volumes:
       - .:/app
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_EMBEDDING_WEIGHTS:-./embedding_weights}:/app/embedding_weights:ro
       - /data/yapat-datasets:/data/bulk:ro
     restart: unless-stopped
 
@@ -200,4 +205,3 @@ volumes:
   redis_data:
     external: true
     name: yapat-backend-staging_redis_data
-

@@ -6,7 +6,7 @@ services:
     # DSM segments during sorts/hash joins. Large similarity-search queries over
     # bigger datasets exceed that and fail with "could not resize shared memory
     # segment ... No space left on device" (psycopg2.errors.DiskFull).
-    shm_size: '1gb'
+    shm_size: "24gb"
     environment:
       POSTGRES_USER: yapat_user
       POSTGRES_PASSWORD: yapat_password
@@ -44,7 +44,17 @@ services:
       args:
         DEVICE: ${DEVICE:-cpu}
     container_name: yapat-api
-    command: ["bash", "/app/startup.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command:
+      [
+        "bash",
+        "/app/startup.sh",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+      ]
     depends_on:
       db:
         condition: service_healthy
@@ -75,6 +85,7 @@ services:
       - "8000:8000"
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_EMBEDDING_WEIGHTS:-./embedding_weights}:/app/embedding_weights:ro
       # Mount host directory for species models (read-write so retraining can save checkpoints)
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
       - ${HOST_MODELS_AL:-./models_AL}:/app/assets/models/single_species_models:ro
@@ -136,6 +147,7 @@ services:
       - SCAN_TASK_SOFT_TIME_LIMIT=${SCAN_TASK_SOFT_TIME_LIMIT:-86400}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_EMBEDDING_WEIGHTS:-./embedding_weights}:/app/embedding_weights:ro
       # Read-write so Celery worker can save checkpoints when retraining
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
@@ -170,6 +182,7 @@ services:
       - ACTIVE_LEARNING_MODELS_DIR=${ACTIVE_LEARNING_MODELS_DIR:-/app/models_AL}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_EMBEDDING_WEIGHTS:-./embedding_weights}:/app/embedding_weights:ro
       # Read-write: worker saves new checkpoint files here after retraining
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
@@ -198,6 +211,7 @@ services:
       - AUTO_REGISTER_SPECIES_MODELS=${AUTO_REGISTER_SPECIES_MODELS:-true}
     volumes:
       - ${HOST_DATA_ROOT}:/data:ro
+      - ${HOST_EMBEDDING_WEIGHTS:-./embedding_weights}:/app/embedding_weights:ro
       - ${HOST_MODELS_AL:-./models_AL}:/app/models_AL
     restart: unless-stopped
 

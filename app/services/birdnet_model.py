@@ -5,8 +5,10 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import TFSMLayer
 
+from app.services.embedders.base import AudioEmbedder
 
-class BirdNetEmbedder:
+
+class BirdNetEmbedder(AudioEmbedder):
     """
     BirdNET V2.4 embedder (raw waveform → 1024-d embedding).
 
@@ -23,6 +25,8 @@ class BirdNetEmbedder:
     )
 
     SAMPLE_RATE = 48000
+    WINDOW_SECONDS = 3.0
+    DIM = 1024
     WINDOW_SAMPLES = 144000  # 3 seconds
     # Windows per model call. A whole long recording in one call (e.g. 822
     # windows for a 41-minute file) exhausts GPU memory on shared GPUs and

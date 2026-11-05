@@ -2,6 +2,7 @@
 Configuration
 """
 
+from pathlib import Path
 from typing import Optional, Union
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -77,6 +78,15 @@ class Settings(BaseSettings):
     # than dataset size — a dataset with tens of thousands of recordings
     # would otherwise create tens of thousands of chord entries.
     EMBEDDING_CHORD_CHUNK_SIZE: int = 25
+
+    # Weights of embedding models too large for git; filled by
+    # scripts/download_embedding_weights.py.
+    EMBEDDING_WEIGHTS_DIR: str = str(Path(__file__).resolve().parent.parent / "embedding_weights")
+    # Build this image was made for (cpu or gpu), set by the Dockerfile. With gpu,
+    # ONNX embedding models refuse to run rather than fall back to the CPU.
+    DEVICE: str = "cpu"
+    # Threads per worker process for ONNX embedding models.
+    EMBEDDING_ONNX_THREADS: int = 2
 
     # scan_dataset gets its own, longer time budget instead of the app-wide
     # default above — it can legitimately run for hours on very large

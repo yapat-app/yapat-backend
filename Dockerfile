@@ -4,6 +4,8 @@ WORKDIR /app
 
 # cpu (default) or gpu — set via DEVICE in .env
 ARG DEVICE=cpu
+# Lets the app know which build it is running on (see OnnxEmbedder)
+ENV DEVICE=$DEVICE
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
@@ -18,8 +20,8 @@ RUN apt-get update && apt-get install -y \
 
 COPY requirements.txt .
 
-# Install all dependencies except torch first (separate layer for better caching)
-RUN grep -v '^torch' requirements.txt > /tmp/req-base.txt && \
+# Install all dependencies except torch and onnxruntime first (separate layer for better caching)
+RUN grep -vE '^(torch|onnxruntime)' requirements.txt > /tmp/req-base.txt && \
     pip install --prefer-binary --progress-bar off -r /tmp/req-base.txt
 
 # Install torch: CPU uses --no-deps to skip ~900 MB of NVIDIA CUDA runtime libs
@@ -40,6 +42,15 @@ RUN if [ "$DEVICE" = "gpu" ]; then \
         pip install tensorflow-cpu; \
     else \
         pip install tensorflow; \
+    fi
+
+# Install ONNX Runtime at the version in requirements.txt. The GPU build has no
+# CUDA libs of its own: it uses the ones tensorflow[and-cuda] installed above.
+RUN ONNXRUNTIME_VERSION=$(sed -n 's/^onnxruntime==//p' requirements.txt) && \
+    if [ "$DEVICE" = "gpu" ]; then \
+        pip install "onnxruntime-gpu==$ONNXRUNTIME_VERSION"; \
+    else \
+        pip install "onnxruntime==$ONNXRUNTIME_VERSION"; \
     fi
 
 # For GPU: register the pip-bundled CUDA libs with the dynamic linker so TF can
