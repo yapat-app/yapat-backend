@@ -82,10 +82,9 @@ class Settings(BaseSettings):
     # Weights of embedding models too large for git; filled by
     # scripts/download_embedding_weights.py.
     EMBEDDING_WEIGHTS_DIR: str = str(Path(__file__).resolve().parent.parent / "embedding_weights")
-    # Where ONNX embedding models run: cpu or gpu. Set per service, because one image
-    # serves services with and without a GPU. With gpu, they refuse to run rather than
-    # fall back to the CPU, so give that service a GPU too.
-    EMBEDDING_ONNX_DEVICE: str = "cpu"
+    # cpu or gpu, set by the Dockerfile from DEVICE in .env. With gpu, ONNX embedding
+    # models use the GPU in services that have one, and the CPU in those that don't.
+    DEVICE: str = "cpu"
     # Threads per worker process for ONNX embedding models.
     EMBEDDING_ONNX_THREADS: int = 2
 
