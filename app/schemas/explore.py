@@ -23,7 +23,11 @@ class ExploreScope(BaseModel):
         default=None, description="Model checkpoint whose predictions drive scores; null = no model."
     )
     embedding_model_id: Optional[int] = Field(
-        default=None, description="Required for projection endpoints; defaults to the snippet set's model."
+        default=None,
+        description=(
+            "Embedding model whose clips, similarity search and projection to use. "
+            "Defaults to the checkpoint's model, else the first model to embed the snippet set."
+        ),
     )
 
 

@@ -16,6 +16,8 @@ import numpy as np
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.models.embedding import EmbeddingModel
+from app.services.embedding_service import vector_cast
 from app.services.explore.query import BaseData
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,7 @@ def nearest_neighbours(
     The anchor is kept (similarity 1.0) so the feed can stay on the snippet the
     user searched from; the next row is then the closest match.
     """
+    cast = vector_cast(db.get(EmbeddingModel, embedding_model_id).dim)
     anchor = db.execute(
         text(
             "SELECT ev.vector::text, s.snippet_set_id "
@@ -88,13 +91,14 @@ def nearest_neighbours(
         db.execute(text(f"SET LOCAL hnsw.max_scan_tuples = {_MAX_SCAN_TUPLES}"))
 
     # The query vector is bound as a parameter (not joined in) so the planner
-    # sees a constant and can use the HNSW index for ORDER BY ... LIMIT.
+    # sees a constant and can use the HNSW index for ORDER BY ... LIMIT. The cast
+    # and the model filter are what match this model's partial index.
     rows = db.execute(
         text(
-            "SELECT ev.snippet_id, ev.vector <=> CAST(:q AS vector) AS distance "
+            f"SELECT ev.snippet_id, ev.vector::{cast} <=> CAST(:q AS {cast}) AS distance "
             "FROM embedding_vectors ev JOIN snippets s ON s.id = ev.snippet_id "
             "WHERE ev.embedding_model_id = :mid AND s.snippet_set_id = :ssid "
-            "ORDER BY ev.vector <=> CAST(:q AS vector) LIMIT :k"
+            f"ORDER BY ev.vector::{cast} <=> CAST(:q AS {cast}) LIMIT :k"
         ),
         {"q": anchor[0], "mid": embedding_model_id, "ssid": snippet_set_id, "k": k},
     ).fetchall()
