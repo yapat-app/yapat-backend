@@ -88,11 +88,11 @@ def model(monkeypatch):
 def scored_set(db_session):
     """300 snippets with random vectors, 15 labelled, one active checkpoint."""
     rng = np.random.default_rng(42)
-    em = EmbeddingModel(name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
+    em = EmbeddingModel(dim=1024, name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
     ds = Dataset(name="scoring", source_uri="site", dataset_type=DatasetType.PAM)
     db_session.add_all([em, ds])
     db_session.flush()
-    ss = SnippetSet(dataset_id=ds.id, embedding_model_id=em.id, window_size=3.0, step_size=3.0,
+    ss = SnippetSet(dataset_id=ds.id, window_size=3.0, step_size=3.0,
                     overlap=0.0, status=SnippetSetStatus.READY)
     db_session.add(ss)
     db_session.flush()

@@ -11,6 +11,7 @@ from app.models.embedding import (
 
 def test_embedding_model_get(db_session):
     model = EmbeddingModel(
+        dim=1024,
         name="birdnet",
         version="2.4",
         window_size=3.0,
@@ -28,6 +29,7 @@ def test_embedding_model_get(db_session):
 def test_snippet_set_get_or_create_creates_new(db_session):
     ds = Dataset(name="D", source_uri="dummy")
     model = EmbeddingModel(
+        dim=1024,
         name="yamnet",
         version="1.0",
         window_size=1.0,
@@ -42,13 +44,13 @@ def test_snippet_set_get_or_create_creates_new(db_session):
     ss = svc.get_or_create_snippet_set(ds, model)
     assert ss.id is not None
     assert ss.window_size == model.window_size
-    assert ss.embedding_model_id == model.id
     assert ss.dataset_id == ds.id
 
 
 def test_snippet_set_get_or_create_reuses_existing(db_session):
     ds = Dataset(name="DS", source_uri="dummy")
     model = EmbeddingModel(
+        dim=1024,
         name="birdnet",
         version="2.4",
         window_size=3.0,
@@ -69,6 +71,7 @@ def test_snippet_set_get_or_create_reuses_existing(db_session):
 def test_create_embedding_job_creates_job_and_snippet_set(db_session):
     ds = Dataset(name="DS", source_uri="dummy")
     model = EmbeddingModel(
+        dim=1024,
         name="bcresnet",
         version="1",
         window_size=2.0,
@@ -87,4 +90,3 @@ def test_create_embedding_job_creates_job_and_snippet_set(db_session):
     ss = db_session.query(SnippetSet).get(job.snippet_set_id)
     assert ss is not None
     assert ss.dataset_id == ds.id
-    assert ss.embedding_model_id == model.id

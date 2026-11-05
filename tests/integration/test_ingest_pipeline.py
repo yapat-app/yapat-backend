@@ -60,6 +60,8 @@ def birdnet(monkeypatch):
     broken_files = set()
 
     class FakeEmbedder:
+        DIM = 1024
+
         @classmethod
         def embed_batch_from_recording(cls, audio_path, snippet_windows):
             calls.append(Path(audio_path).name)
@@ -115,12 +117,12 @@ def refreshes(monkeypatch):
 def embedded_dataset(db_session, data_root, birdnet):
     """A dataset already embedded once: site/old.wav, 6 s -> 2 snippets with vectors."""
     _wav(data_root / "site" / "old.wav", 6.0)
-    model = EmbeddingModel(name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
+    model = EmbeddingModel(dim=1024, implementation_key="birdnet_v2_4", name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
     ds = Dataset(name="pipeline", source_uri="site", dataset_type=DatasetType.PAM)
     db_session.add_all([model, ds])
     db_session.flush()
     ss = SnippetSet(
-        dataset_id=ds.id, embedding_model_id=model.id,
+        dataset_id=ds.id,
         window_size=3.0, step_size=3.0, overlap=0.0, status=SnippetSetStatus.READY,
     )
     db_session.add(ss)
@@ -386,7 +388,7 @@ def test_failed_recordings_are_recorded_with_reason(db_session, embedded_dataset
     assert failures["broken.wav"].snippets_missing == 2
     assert "corrupt header" in failures["broken.wav"].reason
     assert failures["gappy.wav"].snippets_missing == 1
-    assert failures["gappy.wav"].reason == "BirdNET returned no embedding for 1 of 3 snippets"
+    assert failures["gappy.wav"].reason == "The model returned no embedding for 1 of 3 snippets"
     assert failures["broken.wav"].last_job_id == job.id
 
 
@@ -443,3 +445,46 @@ def test_explicit_retry_includes_dismissed_and_reactivates_on_new_failure(db_ses
     assert birdnet.calls == ["broken.wav"]         # retried although dismissed
     assert job.summary["embedding_failures"] == {"recordings": 1, "snippets": 2}
     assert _failures(db_session)["broken.wav"].dismissed_at is None
+
+
+def test_new_recording_is_embedded_by_every_model_on_the_dataset(db_session, embedded_dataset, data_root, birdnet, progress):
+    from app.services.embedders import register_embedder, unregister_embedder
+
+    class SecondEmbedder:
+        DIM = 16
+
+        @classmethod
+        def embed_batch_from_recording(cls, audio_path, snippet_windows):
+            return [[0.2] * 16 for _ in snippet_windows]
+
+    register_embedder("second", SecondEmbedder)
+    second = EmbeddingModel(dim=16, implementation_key="second", name="second", window_size=3.0, step_size=3.0, overlap=0.0)
+    db_session.add(second)
+    db_session.flush()
+    second_job = EmbeddingJob(
+        dataset_id=embedded_dataset.dataset.id, embedding_model_id=second.id,
+        snippet_set_id=embedded_dataset.snippet_set.id, status=EmbeddingJobStatus.COMPLETED,
+    )
+    db_session.add(second_job)
+    db_session.commit()
+    _wav(data_root / "site" / "fresh.wav", 6.0)
+
+    try:
+        job = _run(db_session, _job(db_session, embedded_dataset))
+    finally:
+        unregister_embedder("second")
+
+    assert job.status == IngestJobStatus.COMPLETED, job.error_message
+    fresh_ids = [
+        row[0] for row in db_session.query(Snippet.id)
+        .join(Recording, Recording.id == Snippet.recording_id)
+        .filter(Recording.file_name == "fresh.wav")
+    ]
+    assert len(fresh_ids) == 2  # one clip grid, shared by both models
+    per_model = {
+        (v.snippet_id, v.embedding_model_id): v.embedding_job_id
+        for v in db_session.query(EmbeddingVector).filter(EmbeddingVector.snippet_id.in_(fresh_ids))
+    }
+    for snippet_id in fresh_ids:
+        assert per_model[(snippet_id, embedded_dataset.model.id)] != second_job.id
+        assert per_model[(snippet_id, second.id)] == second_job.id

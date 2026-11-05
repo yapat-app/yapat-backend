@@ -13,6 +13,7 @@ def test_create_embedding_job_api(client: TestClient, db_session):
 
     # 2. Create embedding model in DB
     model = EmbeddingModel(
+        dim=1024,
         name="birdnet",
         version="1.0",
         default_window_size=3.0,

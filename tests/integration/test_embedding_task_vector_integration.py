@@ -29,6 +29,8 @@ def fk_graph(db_session):
 
     # EmbeddingModel
     model = EmbeddingModel(
+        dim=1024,
+        implementation_key="birdnet_v2_4",
         name="model",
         version="1",
         description=None,
@@ -43,7 +45,6 @@ def fk_graph(db_session):
     # SnippetSet
     ss = SnippetSet(
         dataset_id=dataset.id,
-        embedding_model_id=model.id,
         window_size=1.0,
         step_size=0.5,
         overlap=0.0,

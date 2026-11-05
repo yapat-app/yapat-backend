@@ -31,6 +31,7 @@ def test_embedding_vector_basic(db_session):
 
     # Embedding model
     model = EmbeddingModel(
+        dim=1024,
         name="m",
         version="1",
         description=None,
@@ -45,7 +46,6 @@ def test_embedding_vector_basic(db_session):
     # SnippetSet
     ss = SnippetSet(
         dataset_id=dataset.id,
-        embedding_model_id=model.id,
         window_size=1.0,
         step_size=0.5,
         overlap=0.0,
@@ -116,6 +116,7 @@ def test_vector_store_insert(db_session):
 
     # Embedding model
     model = EmbeddingModel(
+        dim=1024,
         name="m",
         version="1",
         description=None,
@@ -130,7 +131,6 @@ def test_vector_store_insert(db_session):
     # SnippetSet
     ss = SnippetSet(
         dataset_id=dataset.id,
-        embedding_model_id=model.id,
         window_size=1.0,
         step_size=0.5,
         overlap=0.0,
@@ -198,6 +198,7 @@ def create_fk_graph(db):
     db.commit()
 
     model = EmbeddingModel(
+        dim=1024,
         name="m",
         version="1",
         description=None,
@@ -211,7 +212,6 @@ def create_fk_graph(db):
 
     ss = SnippetSet(
         dataset_id=dataset.id,
-        embedding_model_id=model.id,
         window_size=1.0,
         step_size=0.5,
         overlap=0.0,
@@ -282,6 +282,7 @@ def make_graph(db):
     db.commit()
 
     model = EmbeddingModel(
+        dim=1024,
         name="m",
         version="1",
         source_uri=None,
@@ -295,7 +296,6 @@ def make_graph(db):
 
     ss = SnippetSet(
         dataset_id=dataset.id,
-        embedding_model_id=model.id,
         window_size=1.0,
         step_size=0.5,
         overlap=0.0,

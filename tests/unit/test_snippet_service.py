@@ -12,6 +12,7 @@ def test_list_snippets_filters_correctly(db_session):
     # Dataset, model, snippet_set
     ds = Dataset(name="D", source_uri="dummy")
     model = EmbeddingModel(
+        dim=1024,
         name="birdnet",
         version="2.4",
         window_size=3.0,
@@ -20,7 +21,6 @@ def test_list_snippets_filters_correctly(db_session):
     )
     ss = SnippetSet(
         dataset_id=1,  # will be overwritten after commit
-        embedding_model_id=1,
         window_size=3.0,
         step_size=3.0,
         overlap=0.0,
@@ -74,6 +74,7 @@ def test_annotation_count(db_session):
     # Setup
     ds = Dataset(name="DS", source_uri="dummy")
     model = EmbeddingModel(
+        dim=1024,
         name="birdnet",
         version="2.4",
         window_size=3.0,
@@ -85,7 +86,6 @@ def test_annotation_count(db_session):
 
     ss = SnippetSet(
         dataset_id=ds.id,
-        embedding_model_id=model.id,
         window_size=3.0,
         step_size=3.0,
         overlap=0.0,

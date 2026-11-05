@@ -20,6 +20,7 @@ def test_create_embedding_job_creates_job_and_snippet_set(db_session):
     db_session.add(dataset)
 
     model = EmbeddingModel(
+        dim=1024,
         name="birdnet",
         version="2.4",
         window_size=3.0,
@@ -54,7 +55,6 @@ def test_create_embedding_job_creates_job_and_snippet_set(db_session):
     ss = db_session.query(SnippetSet).get(job.snippet_set_id)
     assert ss is not None
     assert ss.dataset_id == dataset.id
-    assert ss.embedding_model_id == model.id
 
     # SnippetSet parameters should match model's fixed parameters
     assert ss.window_size == model.window_size
