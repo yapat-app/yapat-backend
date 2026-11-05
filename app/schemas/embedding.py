@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, field_validator
 from datetime import datetime
 
@@ -19,6 +19,10 @@ class EmbeddingModel(BaseModel):
     requires_fixed_window: bool = True
     requires_fixed_step: bool = True
     requires_fixed_overlap: bool = True
+    dim: int
+    sample_rate: Optional[int] = None
+    # False when this deployment has no weights for the model, so it cannot be run yet.
+    weights_available: bool = False
 
     @field_validator("requires_fixed_window", "requires_fixed_step", "requires_fixed_overlap", mode="before")
     @classmethod
@@ -77,11 +81,36 @@ class EmbeddingJobProgress(BaseModel):
     error_message: Optional[str] = None
 
 
+class EmbeddingOption(BaseModel):
+    """One embedding model on a dataset, as offered by the hub's model switcher."""
+    embedding_model_id: int
+    name: str
+    version: Optional[str] = None
+    dim: int
+    snippet_set_id: int
+    window_size: float
+    step_size: float
+    overlap: float
+    embedding_job_id: int
+    status: str  # pending | running | completed | failed (EmbeddingJob.status)
+    # True for the model the hub opens first.
+    is_default: bool
+    # True when another model uses the same clips, so annotations are shared with it.
+    shares_snippet_set: bool
+    # Classifier of this model on this dataset; None until one is trained.
+    active_checkpoint_id: Optional[int] = None
+    # The classifier's family, or the family to use when training the first one.
+    model_family_name: str
+
+
 class SnippetSet(BaseModel):
     """Schema for snippet set response."""
     id: int
     dataset_id: int
-    embedding_model_id: int
+    # Models that finished embedding this set, first to finish first.
+    embedding_model_ids: List[int] = []
+    # The first of embedding_model_ids. Kept for existing clients; a set can have several.
+    embedding_model_id: Optional[int] = None
     window_size: float
     step_size: float
     overlap: float

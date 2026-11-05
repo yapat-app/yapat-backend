@@ -2,8 +2,11 @@
 Embedding service: manages embedding models, snippet sets, and embedding jobs.
 """
 
+import logging
 from typing import Optional, List
 
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
@@ -16,6 +19,50 @@ from app.models.embedding import (
     SnippetSet,
     SnippetSetStatus,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def vector_cast(dim: int) -> str:
+    """SQL type a model's vectors are cast to. Queries must use it to match the model's index."""
+    return f"vector({int(dim)})"
+
+
+def vector_index_name(embedding_model_id: int) -> str:
+    return f"embedding_vectors_model_{int(embedding_model_id)}_hnsw"
+
+
+def ensure_vector_index(engine: Engine, embedding_model_id: int, dim: int) -> None:
+    """Build a model's partial HNSW index if it does not exist yet (Postgres only).
+
+    HNSW needs a fixed size and the vector column has none, so each model gets
+    its own index over a cast. Built without blocking writes, so it can run
+    while other models are embedding. A failed build leaves an invalid index
+    behind, which is dropped here so the next attempt starts clean.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    name = vector_index_name(embedding_model_id)
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        leftover = conn.execute(
+            text(
+                "SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                "WHERE c.relname = :name AND NOT i.indisvalid "
+                "AND NOT EXISTS (SELECT 1 FROM pg_stat_progress_create_index p "
+                "                WHERE p.index_relid = i.indexrelid)"
+            ),
+            {"name": name},
+        ).first()
+        if leftover is not None:
+            logger.warning("Dropping invalid vector index %s left by a failed build", name)
+            conn.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
+        conn.execute(
+            text(
+                f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON embedding_vectors "
+                f"USING hnsw ((vector::{vector_cast(dim)}) vector_cosine_ops) "
+                f"WHERE embedding_model_id = {int(embedding_model_id)}"
+            )
+        )
 
 
 class EmbeddingService:
@@ -55,7 +102,9 @@ class EmbeddingService:
             overlap: Optional[float] = None,
     ) -> SnippetSet:
         """
-        Returns an existing SnippetSet if parameters match, otherwise creates a new one.
+        Returns the dataset's SnippetSet with these parameters, whichever model
+        created it, otherwise creates a new one. Models with the same window, step
+        and overlap therefore share clips, and with them the clips' annotations.
 
         Strict models enforce their fixed parameters.
         """
@@ -81,7 +130,6 @@ class EmbeddingService:
             self.db.query(SnippetSet)
             .filter(
                 SnippetSet.dataset_id == dataset.id,
-                SnippetSet.embedding_model_id == model.id,
                 SnippetSet.window_size == window,
                 SnippetSet.step_size == step,
                 SnippetSet.overlap == ov,
@@ -94,7 +142,6 @@ class EmbeddingService:
         # --- Create new SnippetSet -----------------------------------------
         snippet_set = SnippetSet(
             dataset_id=dataset.id,
-            embedding_model_id=model.id,
             window_size=window,
             step_size=step,
             overlap=ov,
@@ -244,8 +291,8 @@ class VectorStore:
         
         Returns:
             Number of embeddings inserted. Snippets that already have a vector
-            are skipped (ON CONFLICT (snippet_id) DO NOTHING), so re-embedding a
-            recording, or a retried chunk, never fails on the unique key.
+            from this model are skipped (ON CONFLICT DO NOTHING), so re-embedding
+            a recording, or a retried chunk, never fails on the unique key.
         """
         if not embeddings:
             return 0
@@ -277,7 +324,7 @@ class VectorStore:
         for start in range(0, len(rows), self.BULK_INSERT_BATCH_ROWS):
             batch = rows[start:start + self.BULK_INSERT_BATCH_ROWS]
             stmt = dialect_insert(EmbeddingVector).values(batch).on_conflict_do_nothing(
-                index_elements=["snippet_id"]
+                index_elements=["snippet_id", "embedding_model_id"]
             )
             result = self.db.execute(stmt)
             inserted += max(int(result.rowcount or 0), 0)
@@ -314,15 +361,14 @@ class VectorStore:
         Returns:
             List of (snippet_id, similarity_score) tuples, sorted by similarity (descending)
         """
-        from sqlalchemy import text
-        
         # Format vector for PostgreSQL: '[1,2,3]'
         vector_str = '[' + ','.join(str(x) for x in query_vector) + ']'
-        
+        cast = vector_cast(self.db.get(EmbeddingModel, model_id).dim)
+
         # Build SQL with pgvector's <=> cosine distance operator
         sql_parts = [
             "SELECT ev.snippet_id, ",
-            f"       (ev.vector <=> '{vector_str}'::vector) as distance ",
+            f"       (ev.vector::{cast} <=> '{vector_str}'::{cast}) as distance ",
             "FROM embedding_vectors ev "
         ]
         

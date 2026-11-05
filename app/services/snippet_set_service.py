@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.models.embedding import (
+    EmbeddingJob,
     EmbeddingModel,
     SnippetSet,
     SnippetSetStatus,
@@ -49,9 +50,10 @@ class SnippetSetService:
     ) -> List[SnippetSet]:
         return (
             self.db.query(SnippetSet)
+            .join(EmbeddingJob, EmbeddingJob.snippet_set_id == SnippetSet.id)
             .filter(
                 SnippetSet.dataset_id == dataset_id,
-                SnippetSet.embedding_model_id == embedding_model_id,
+                EmbeddingJob.embedding_model_id == embedding_model_id,
             )
             .order_by(SnippetSet.created_at)
             .all()
@@ -65,7 +67,6 @@ class SnippetSetService:
     def create(
         self,
         dataset: Dataset,
-        model: EmbeddingModel,
         *,
         window_size: float,
         step_size: float,
@@ -78,7 +79,6 @@ class SnippetSetService:
 
         ss = SnippetSet(
             dataset_id=dataset.id,
-            embedding_model_id=model.id,
             window_size=window_size,
             step_size=step_size,
             overlap=overlap,
@@ -107,10 +107,18 @@ class SnippetSetService:
 
     def assert_for_model(self, snippet_set_id: int, model_id: int) -> SnippetSet:
         """
-        Ensure snippet set is tied to the correct embedding model.
+        Ensure the embedding model has a job on this snippet set.
         """
         ss = self.get(snippet_set_id)
-        if ss.embedding_model_id != model_id:
+        has_job = (
+            self.db.query(EmbeddingJob.id)
+            .filter(
+                EmbeddingJob.snippet_set_id == snippet_set_id,
+                EmbeddingJob.embedding_model_id == model_id,
+            )
+            .first()
+        )
+        if has_job is None:
             raise ValueError(
                 f"SnippetSet(id={snippet_set_id}) does not belong to EmbeddingModel(id={model_id})"
             )

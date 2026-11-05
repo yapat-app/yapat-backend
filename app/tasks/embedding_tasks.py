@@ -20,7 +20,9 @@ from app.models.embedding import (
 from app.models.dataset import Dataset
 from app.models.recording import Recording
 from app.models.snippet import Snippet
-from app.services.embedding_service import EmbeddingService, VectorStore
+from app.database import engine
+from app.services.embedders import get_embedder
+from app.services.embedding_service import EmbeddingService, VectorStore, ensure_vector_index
 from app.services import embedding_progress
 from app.schemas.visualisation import FPVDatasetRequest
 
@@ -28,6 +30,20 @@ logger = logging.getLogger(__name__)
 
 
 # from sqlalchemy.orm import Session
+
+
+def _embedder_for(db, model_id: int):
+    model = db.get(EmbeddingModel, model_id)
+    if model is None:
+        raise ValueError(f"EmbeddingModel(id={model_id}) not found")
+    embedder = get_embedder(model.implementation_key)
+    if embedder.DIM != model.dim:
+        # A vector of the wrong size would break the cast its model's index uses.
+        raise ValueError(
+            f"Embedder {model.implementation_key} produces {embedder.DIM} dimensions "
+            f"but EmbeddingModel(id={model_id}) declares {model.dim}"
+        )
+    return embedder
 
 
 # ----------------------------------------------------------------------
@@ -44,16 +60,14 @@ def generate_embedding_for_snippet(self, snippet_id: int, model_id: int):
 
         service = EmbeddingService(db)
 
-        # --- BirdNET embedding ---
-        from app.services.birdnet_model import BirdNetEmbedder
-
-        vector = BirdNetEmbedder.embed(
+        # --- Model embedding ---
+        vector = _embedder_for(db, model_id).embed(
             audio_path=os.path.join(os.getenv("DATA_ROOT", "/data"), snippet.recording.file_path),
             start_time=snippet.start_time
         )
 
         if vector is None:
-            raise RuntimeError(f"BirdNET returned no vector for snippet {snippet_id}")
+            raise RuntimeError(f"Embedding model {model_id} returned no vector for snippet {snippet_id}")
 
         # --- Find matching EmbeddingJob ---
         job = (
@@ -120,6 +134,7 @@ def generate_embeddings_for_recording(
             return {
                 "status": "error",
                 "recording_id": recording_id,
+                "embedding_job_id": job_id,
                 "snippets_planned": len(snippet_ids),
                 "message": "recording_not_found"
             }
@@ -137,6 +152,7 @@ def generate_embeddings_for_recording(
             return {
                 "status": "success",
                 "recording_id": recording_id,
+                "embedding_job_id": job_id,
                 "snippets_processed": 0,
                 "message": "no_snippets_found"
             }
@@ -144,11 +160,9 @@ def generate_embeddings_for_recording(
         # --- Prepare snippet windows ---
         snippet_windows = [(s.start_time, s.end_time) for s in snippets]
         
-        # --- Batch embedding with BirdNET ---
-        from app.services.birdnet_model import BirdNetEmbedder
-        
+        # --- Batch embedding with this job's model ---
         audio_path = os.path.join(os.getenv("DATA_ROOT", "/data"), recording.file_path)
-        embeddings = BirdNetEmbedder.embed_batch_from_recording(audio_path, snippet_windows)
+        embeddings = _embedder_for(db, model_id).embed_batch_from_recording(audio_path, snippet_windows)
         
         # --- Prepare bulk insert data ---
         bulk_data = []
@@ -172,7 +186,7 @@ def generate_embeddings_for_recording(
             vector_store = VectorStore(db)
             inserted_count = vector_store.bulk_insert(bulk_data)
 
-        # Progress counts snippets processed (incl. ones BirdNET returned None for),
+        # Progress counts snippets processed (incl. ones the model returned None for),
         # so the bar reaches 100% exactly when every recording task has run.
         if ingest_job_id is not None:
             from app.services import ingest_progress
@@ -184,6 +198,7 @@ def generate_embeddings_for_recording(
         return {
             "status": "success",
             "recording_id": recording_id,
+            "embedding_job_id": job_id,
             "snippets_processed": len(snippets),
             "embeddings_inserted": inserted_count,
             "failed_snippets": failed_count,
@@ -193,6 +208,7 @@ def generate_embeddings_for_recording(
         return {
             "status": "error",
             "recording_id": recording_id,
+            "embedding_job_id": job_id,
             # How many snippets this failure leaves without an embedding.
             "snippets_planned": len(snippet_ids),
             "message": f"{type(e).__name__}: {e}"
@@ -418,8 +434,10 @@ def finalize_embedding_job(self, results, embedding_job_id):
                 message=f"{len(failures)} snippet failures",
             )
             # Embeddings didn't actually finish — don't let the SnippetSet claim
-            # READY regardless of how far segmentation got in run_embedding.
-            if snippet_set is not None:
+            # READY regardless of how far segmentation got in run_embedding. A set
+            # another model already embedded stays READY: it still works for that
+            # model, and this model's failure is on its own EmbeddingJob.
+            if snippet_set is not None and snippet_set.status != SnippetSetStatus.READY:
                 snippet_set.status = SnippetSetStatus.FAILED
                 db.commit()
         else:
@@ -444,6 +462,9 @@ def finalize_embedding_job(self, results, embedding_job_id):
                     dataset_id=job.dataset_id,
                     embedding_model_id=job.embedding_model_id,
                 )
+                # Built after the vectors so they go in as one bulk build. A later
+                # dataset using this model finds the index there already.
+                build_vector_index.delay(job.embedding_model_id)
 
     except Exception as e:
         service.update_job_status(
@@ -455,6 +476,21 @@ def finalize_embedding_job(self, results, embedding_job_id):
 
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, name="app.tasks.embedding_tasks.build_vector_index")
+def build_vector_index(self, embedding_model_id: int):
+    """Build a model's HNSW index. Until it exists similarity search is exact but slower."""
+    db = SessionLocal()
+    try:
+        model = db.get(EmbeddingModel, embedding_model_id)
+        if model is None:
+            return {"status": "error", "message": f"EmbeddingModel(id={embedding_model_id}) not found"}
+        dim = model.dim
+    finally:
+        db.close()
+    ensure_vector_index(engine, embedding_model_id, dim)
+    return {"status": "success", "embedding_model_id": embedding_model_id}
 
 
 @celery_app.task(bind=True, name="app.tasks.embedding.generate_fpv_for_dataset")
