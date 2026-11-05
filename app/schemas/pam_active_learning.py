@@ -86,6 +86,7 @@ class ALCheckpointResponse(BaseModel):
     version: str
     checkpoint_path: Optional[str] = None
     model_type: str
+    embedding_model_id: Optional[int] = None
     hyperparameters: Optional[ALCheckpointHyperparameters] = None
     is_base: int = 0
     parent_checkpoint_id: Optional[int] = None
@@ -242,8 +243,11 @@ class ALFeedbackSubmit(BaseModel):
     model_family_name: str = Field(..., description="Model family name shared across checkpoint versions")
     snippet_id: int = Field(..., description="Snippet being reviewed")
     embedding_model_id: Optional[int] = Field(
-        default=1,
-        description="Embedding model ID; required in bootstrap mode before the first checkpoint exists",
+        default=None,
+        description=(
+            "Embedding model selected while reviewing; required in bootstrap mode before "
+            "the first checkpoint exists. Otherwise the checkpoint's model is used."
+        ),
     )
     model_type: ALModelType = Field(
         default=ALModelType.PAM_LINEAR_MULTILABEL,
@@ -376,11 +380,18 @@ class ALTrainFromScratchRequest(BaseModel):
     dataset_id: int = Field(..., description="Dataset to train on")
     snippet_set_id: Optional[int] = Field(
         None,
-        description="Snippet set to use; defaults to dataset.default_snippet_set_id",
+        description="Snippet set to use; defaults to the embedding model's set on this dataset",
     )
     embedding_model_id: int = Field(
         ...,
         description="Embedding model whose vectors should be used for training",
+    )
+    use_existing_labels: bool = Field(
+        default=False,
+        description=(
+            "Train on the labels already on this snippet set instead of a metadata file. "
+            "Gives an embedding model its first classifier from labels it shares with another model."
+        ),
     )
     metadata_path: Optional[str] = Field(
         default=None,

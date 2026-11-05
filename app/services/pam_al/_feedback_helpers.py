@@ -17,6 +17,7 @@ from app.models.pam_active_learning import (
     ALRetrainStatus,
 )
 
+from app.models.snippet import Snippet
 from app.services.pam_al._annotation_helpers import replace_user_labels_for_snippet
 from active_learning.config import NO_EVENT_LABELS
 
@@ -61,6 +62,27 @@ def feedback_count_since_retrain(db:Session,
 
     count = query_count.scalar()
     return int(count or 0)
+
+
+def bootstrap_feedback_count(
+    db: Session,
+    dataset_id: int,
+    snippet_set_id: int,
+    since: datetime | None = None,
+) -> int:
+    """Snippets of one snippet set labelled while their model had no classifier."""
+    query = (
+        db.query(func.count(func.distinct(ALFeedbackEvent.snippet_id)))
+        .join(Snippet, Snippet.id == ALFeedbackEvent.snippet_id)
+        .filter(
+            ALFeedbackEvent.dataset_id == dataset_id,
+            ALFeedbackEvent.model_checkpoint_id.is_(None),
+            Snippet.snippet_set_id == snippet_set_id,
+        )
+    )
+    if since is not None:
+        query = query.filter(ALFeedbackEvent.created_at > since)
+    return int(query.scalar() or 0)
 
 
 def get_last_completed_retrain_cutoff(db: Session, checkpoint_id: int) -> datetime:

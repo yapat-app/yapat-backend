@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.models.embedding import EmbeddingVector
+from app.services.embedding_scope import snippet_set_for_model
 from app.services.pam_al._embedding_cache import load_embeddings_cached
 from app.utils.pam_training_paths import resolve_pam_metadata_path, resolve_pam_training_paths
 
@@ -618,7 +619,9 @@ def load_reference_pool_training_data(
     for ref_id, meta in ref_meta.items():
         ref_ds = meta["dataset"]
         try:
-            X, snippet_rows = load_embeddings(db, ref_ds.default_snippet_set_id, embedding_model_id)
+            # The reference dataset's clips embedded by the same model as this training run.
+            ref_set_id = snippet_set_for_model(db, ref_ds, embedding_model_id) or ref_ds.default_snippet_set_id
+            X, snippet_rows = load_embeddings(db, ref_set_id, embedding_model_id)
             gt_index = load_ground_truth_metadata(meta["metadata_path"], meta["own_species"], allowed_subsets=None)
             X_own, y_own, _ = align_embeddings_and_labels(X, snippet_rows, gt_index, meta["own_species"])
         except ValueError as e:

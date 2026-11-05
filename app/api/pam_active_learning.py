@@ -114,6 +114,7 @@ def register_checkpoint(
 @router.get("/checkpoints", response_model=List[ALCheckpointResponse])
 def list_checkpoints(
     dataset_id: Optional[int] = Query(None, description="Filter by dataset"),
+    embedding_model_id: Optional[int] = Query(None, description="Filter by embedding model"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -122,7 +123,10 @@ def list_checkpoints(
     This returns only checkpoints referenced by ALModelFamilyState.active_model_checkpoint_id.
     """
     svc = PAMActiveLearningService(db)
-    return svc.list_active_family_checkpoints(dataset_id=dataset_id)
+    checkpoints = svc.list_active_family_checkpoints(dataset_id=dataset_id)
+    if embedding_model_id is not None:
+        checkpoints = [c for c in checkpoints if c.embedding_model_id == embedding_model_id]
+    return checkpoints
 
 
 @router.get("/checkpoints/all", response_model=List[ALCheckpointResponse])

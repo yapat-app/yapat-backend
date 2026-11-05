@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.dataset import Dataset
 from app.models.embedding import EmbeddingJob, EmbeddingJobStatus, SnippetSet
+from app.services.embedding_scope import default_model_for_set
 from app.models.pam_active_learning import (
     ALModelCheckpoint,
     ALModelFamilyState,
@@ -886,7 +887,7 @@ class WSSEDService:
                 .one_or_none()
             )
             if snippet_set is not None:
-                return snippet_set.id, snippet_set.embedding_model_id
+                return snippet_set.id, default_model_for_set(self.db, snippet_set.id)
 
         job = (
             self.db.query(EmbeddingJob)
