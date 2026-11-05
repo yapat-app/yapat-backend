@@ -18,6 +18,7 @@ from app.models.dataset import Dataset
 from app.models.user import User
 from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
 from app.services.dataset_service import DatasetService
+from app.services.embedding_scope import models_for_set
 from app.core import taxonomy
 from sqlalchemy import func
 
@@ -42,6 +43,29 @@ def _require_snippet_annotation_access(db: Session, snippet_id: int, user: User)
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to annotate this dataset",
         )
+
+
+def _resolve_annotation_model(db: Session, snippet_id: int, requested: Optional[int]) -> Optional[int]:
+    """The embedding model to record on an annotation of this snippet.
+
+    A clip whose set has one model can only have been labelled under it. With
+    several models only the client knows which was selected, so it must say.
+    """
+    snippet_set_id = db.query(Snippet.snippet_set_id).filter(Snippet.id == snippet_id).scalar()
+    models = models_for_set(db, snippet_set_id)
+    if requested is not None:
+        if requested not in models:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Embedding model {requested} has not embedded this snippet's set.",
+            )
+        return requested
+    if len(models) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="embedding_model_id is required: this snippet's set has more than one embedding model.",
+        )
+    return models[0] if models else None
 
 
 def _mirror_to_al(db: Session, annotation: AnnotationModel) -> None:
@@ -110,6 +134,9 @@ def create_annotation(
     The scientific name is automatically resolved and snapshotted.
     """
     _require_snippet_annotation_access(db, annotation_in.snippet_id, current_user)
+    embedding_model_id = _resolve_annotation_model(
+        db, annotation_in.snippet_id, annotation_in.embedding_model_id
+    )
 
     taxon_id = annotation_in.taxon_id
     resolved = None
@@ -187,6 +214,7 @@ def create_annotation(
     )
     annotation_data['resolved_name_snapshot'] = snapshot or taxon_id
     annotation_data['user_id'] = current_user.id
+    annotation_data['embedding_model_id'] = embedding_model_id
     
     annotation = AnnotationModel(**annotation_data)
     db.add(annotation)
@@ -214,6 +242,7 @@ def create_annotations_batch(
     """
     snippet_id = batch_in.snippet_id
     _require_snippet_annotation_access(db, snippet_id, current_user)
+    embedding_model_id = _resolve_annotation_model(db, snippet_id, batch_in.embedding_model_id)
 
     # Existing taxon_ids on this snippet (no duplicates allowed)
     existing_taxon_ids = {
@@ -300,6 +329,7 @@ def create_annotations_batch(
         )
         annotation_data['resolved_name_snapshot'] = snapshot or taxon_id
         annotation_data['user_id'] = current_user.id
+        annotation_data['embedding_model_id'] = embedding_model_id
         
         annotation = AnnotationModel(**annotation_data)
         db.add(annotation)

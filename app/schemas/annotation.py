@@ -49,6 +49,13 @@ class AnnotationBase(BaseModel):
 
 class AnnotationCreate(AnnotationBase):
     snippet_id: int
+    embedding_model_id: Optional[int] = Field(
+        None,
+        description=(
+            "Embedding model selected while annotating. Required when the snippet's set "
+            "has more than one embedding model."
+        ),
+    )
     # display_name from AnnotationBase: optional, used as resolved_name_snapshot for wiki/envo/ols
 
 
@@ -56,12 +63,23 @@ class AnnotationBatchCreate(BaseModel):
     """Create multiple annotations for a single snippet"""
     snippet_id: int
     annotations: list[AnnotationBase]
+    embedding_model_id: Optional[int] = Field(
+        None,
+        description=(
+            "Embedding model selected while annotating. Required when the snippet's set "
+            "has more than one embedding model."
+        ),
+    )
 
 
 class Annotation(AnnotationBase):
     id: int
     snippet_id: int
     user_id: int
+    embedding_model_id: Optional[int] = Field(
+        None,
+        description="Embedding model selected when this label was made, if recorded.",
+    )
     username: Optional[str] = Field(
         None,
         description="Username of the annotator (when available)."
