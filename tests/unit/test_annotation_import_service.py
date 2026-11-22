@@ -38,6 +38,13 @@ def world(db_session, monkeypatch):
                 "canonical_name": f"Species {taxon_id[5:]}",
                 "taxonomy_type": "gbif",
             }
+        if taxon_id.startswith("local:"):
+            # Like the real resolver: the id itself is echoed back as the name.
+            return {
+                "taxon_id": taxon_id,
+                "canonical_name": taxon_id,
+                "taxonomy_type": "local",
+            }
         return None
 
     monkeypatch.setattr(taxonomy, "resolve_taxon_id", fake_resolve)
@@ -86,6 +93,8 @@ def world(db_session, monkeypatch):
         db=db_session,
         user=user,
         ds=ds,
+        ss=ss,
+        rec=rec,
         s1=s1,
         s2=s2,
     )
@@ -213,7 +222,7 @@ def test_import_adds_next_to_existing_and_marks_source(world):
     )
     assert first.source == IMPORT_SOURCE
     assert first.user_id == world.user.id
-    assert first.resolved_name_snapshot == "My name for 1"
+    assert first.resolved_name_snapshot == "Species 1"  # the taxonomy's name, not the file's
     assert first.confidence == 0.7
 
     second = (
@@ -221,7 +230,7 @@ def test_import_adds_next_to_existing_and_marks_source(world):
         .filter(Annotation.snippet_id == world.s2.id, Annotation.taxon_id == "gbif:3")
         .one()
     )
-    assert second.resolved_name_snapshot == "Species 3"  # no name in file -> resolved name
+    assert second.resolved_name_snapshot == "Species 3"
 
     untouched = (
         world.db.query(Annotation)
@@ -232,7 +241,7 @@ def test_import_adds_next_to_existing_and_marks_source(world):
 
     labels = world.db.query(ALSnippetAnnotation).all()
     assert {(l.snippet_id, l.label) for l in labels} == {
-        (world.s1.id, "My name for 1"),
+        (world.s1.id, "Species 1"),
         (world.s2.id, "Species 3"),
     }
 
@@ -293,3 +302,130 @@ def test_accepts_the_json_export_format(world):
 def test_unusable_files_are_rejected(world, content, filename, message):
     with pytest.raises(AnnotationImportError, match=message):
         world.svc.preview(world.ds.id, world.user, content, filename)
+
+
+# -- review fixes: matching, loading, species names, upload size -------------
+
+def _add_recording(world, file_name, file_path, windows=((0.0, 3.0), (3.0, 6.0))):
+    rec = Recording(
+        dataset_id=world.ds.id, file_path=file_path, file_name=file_name,
+        duration=10.0, sample_rate=44100,
+    )
+    world.db.add(rec)
+    world.db.commit()
+    snippets = [
+        Snippet(
+            recording_id=rec.id, snippet_set_id=world.ss.id,
+            start_time=start, end_time=end, duration=end - start,
+        )
+        for start, end in windows
+    ]
+    world.db.add_all(snippets)
+    world.db.commit()
+    return rec, snippets
+
+
+PATH_HEADER = (
+    "recording_file_name,recording_file_path,snippet_start_time,snippet_end_time,taxon_id\n"
+)
+
+
+def test_same_file_name_in_two_folders_is_never_guessed(world):
+    rec1, snips1 = _add_recording(world, "dup.wav", "site1/dup.wav")
+    rec2, snips2 = _add_recording(world, "dup.wav", "site2/dup.wav")
+
+    file = (
+        PATH_HEADER
+        + "dup.wav,,0,3,gbif:1\n"              # name only, two recordings: ambiguous
+        + "dup.wav,site2/dup.wav,0,3,gbif:1\n"  # the path picks the second one
+        + "dup.wav,elsewhere/dup.wav,0,3,gbif:1\n"  # path matches neither: still ambiguous
+    ).encode()
+    preview = world.svc.preview(world.ds.id, world.user, file, "x.csv")
+
+    by_row = {r["row"]: r for r in preview["rows"]}
+    assert by_row[2]["status"] == "invalid" and "matches 2 recordings" in by_row[2]["reason"]
+    assert by_row[3]["status"] == "will_import"
+    assert by_row[4]["status"] == "invalid"
+
+    world.svc.import_annotations(world.ds.id, world.user, file, "x.csv")
+    saved = world.db.query(Annotation).all()
+    assert [a.snippet_id for a in saved] == [snips2[0].id]  # on site2's recording only
+
+
+def test_unique_name_still_matches_when_the_path_differs(world):
+    # A file from another dataset: same recording name, different folder layout.
+    file = (PATH_HEADER + "a.wav,other/folder/a.wav,0,3,gbif:1\n").encode()
+    result = world.svc.preview(world.ds.id, world.user, file, "x.csv")
+    assert result["will_import"] == 1
+
+
+def test_file_names_are_normalised_before_comparing(world):
+    # Stored in decomposed Unicode with an upper-case extension ...
+    _add_recording(world, "cafe\u0301.WAV", "cafe\u0301.WAV")
+    # ... and written in composed Unicode with a lower-case extension in the file.
+    file = _csv("caf\u00e9.wav,0,3,gbif:1,,")
+    assert world.svc.preview(world.ds.id, world.user, file, "x.csv")["will_import"] == 1
+
+
+def test_only_what_the_file_mentions_is_loaded(world):
+    _add_recording(world, "other.wav", "other.wav")
+    ctx = world.svc._load_context(world.ds.id, {"a.wav"}, {"gbif:1"})
+
+    assert set(ctx.recordings) == {"a.wav"}
+    loaded = {snippet_id for snippets in ctx.snippets.values() for snippet_id, *_ in snippets}
+    assert loaded == {world.s1.id, world.s2.id}  # not other.wav's snippets
+
+
+def test_species_keep_the_name_the_dataset_already_uses(world):
+    world.db.add(
+        Annotation(
+            snippet_id=world.s2.id, user_id=world.user.id,
+            taxon_id="gbif:1", resolved_name_snapshot="Existing name",
+        )
+    )
+    world.db.commit()
+
+    # The file calls the same species something else, on a different snippet.
+    file = _csv("a.wav,0,3,gbif:1,Name from the file,0.9")
+    world.svc.import_annotations(world.ds.id, world.user, file, "x.csv")
+
+    imported = world.db.query(Annotation).filter(Annotation.source == IMPORT_SOURCE).one()
+    assert imported.resolved_name_snapshot == "Existing name"  # one label, not two
+
+
+def test_the_files_name_is_used_when_the_taxonomy_only_echoes_the_id(world):
+    file = _csv(
+        "a.wav,0,3,local:x,Local name,",
+        "a.wav,3,6,local:x,Another spelling,",
+    )
+    world.svc.import_annotations(world.ds.id, world.user, file, "x.csv")
+
+    names = {a.resolved_name_snapshot for a in world.db.query(Annotation).all()}
+    assert names == {"Local name"}  # the first name seen, used for every row of that species
+
+
+def test_a_large_import_is_saved_in_batches_without_duplicates(world, monkeypatch):
+    from app.services import annotation_import_service as module
+
+    monkeypatch.setattr(module, "_COMMIT_BATCH_SIZE", 100)
+    windows = [(float(i * 3), float(i * 3 + 3)) for i in range(250)]
+    _add_recording(world, "big.wav", "big.wav", windows=windows)
+    rows = [f"big.wav,{start:g},{end:g},gbif:1,," for start, end in windows]
+
+    result = world.svc.import_annotations(world.ds.id, world.user, _csv(*rows), "x.csv")
+
+    assert result["imported"] == 250
+    assert world.db.query(Annotation).count() == 250
+    labels = world.db.query(ALSnippetAnnotation).all()
+    assert len(labels) == 250 and {l.label for l in labels} == {"Species 1"}
+
+    again = world.svc.import_annotations(world.ds.id, world.user, _csv(*rows), "x.csv")
+    assert again["imported"] == 0 and again["already_exist"] == 250
+
+
+def test_a_file_over_the_size_limit_is_refused(world):
+    from app.services.annotation_import_service import MAX_UPLOAD_BYTES
+
+    too_big = b"x" * (MAX_UPLOAD_BYTES + 1)  # what the endpoints pass on: limit + 1 byte
+    with pytest.raises(AnnotationImportError, match="exceeds"):
+        world.svc.preview(world.ds.id, world.user, too_big, "x.csv")

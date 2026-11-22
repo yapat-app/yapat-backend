@@ -1,19 +1,17 @@
 """
-Import annotations into a dataset from an uploaded file.
+Import annotations into a dataset from a file made by the annotation export
+(CSV or JSON).
 
-The file is the one the annotation export produces (CSV or JSON). Two
-operations share one parse/match code path:
-- ``preview``: parse + check every row, return counts and reasons, NO writes.
-- ``import_annotations``: same checks, then add the matching rows.
+``preview`` checks every row and reports what would happen without writing
+anything. ``import_annotations`` runs the same checks and saves the matching rows.
 
-A row is only imported when it matches an existing snippet of this dataset:
-the recording is found by ``recording_file_name`` and the snippet by its
-``snippet_start_time`` / ``snippet_end_time``. Rows that do not match are
-skipped and reported. Imported annotations are added next to whatever a
-snippet already has; a snippet that already has the same species is left
-alone. Each imported annotation is attributed to the user who ran the import,
-is marked ``source="import"`` (database only) and is mirrored into the
-active-learning labels exactly like an annotation created in the app.
+A row is imported only if it matches a snippet of this dataset: the recording is
+found by file name (and path, when the file has one) and the snippet by its start
+and end time. A file name shared by several recordings is not guessed; the path
+picks one, otherwise the row is reported as ambiguous. Rows that don't match are
+skipped and listed. New annotations are added next to the ones a snippet already
+has, credited to the user who runs the import, marked source="import" and copied
+into the active-learning labels the way annotations created in the app are.
 """
 
 from __future__ import annotations
@@ -23,15 +21,19 @@ import io
 import json
 import logging
 import math
+import os
+import unicodedata
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import taxonomy
 from app.models.annotation import Annotation as AnnotationModel
 from app.models.dataset import Dataset
+from app.models.pam_active_learning import ALAnnotationSource, ALSnippetAnnotation
 from app.models.recording import Recording
 from app.models.snippet import Snippet
 from app.models.user import User
@@ -47,7 +49,7 @@ REQUIRED_COLUMNS = (
     "taxon_id",
 )
 
-_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _MAX_ROWS = 200_000
 _MAX_ISSUES_RETURNED = 50
 # Rows listed per status in a preview; the counts always cover the whole file.
@@ -58,6 +60,34 @@ _COMMIT_BATCH_SIZE = 500
 # Times in the export are the stored floats; allow for rounding in edited files.
 _TIME_TOLERANCE_S = 0.001
 _MAX_NAME_LENGTH = 255
+# Values per SQL "IN (...)" list, so a large file never builds one huge query.
+_SQL_IN_CHUNK = 1000
+
+
+def _chunks(values: Iterable[Any], size: int = _SQL_IN_CHUNK) -> Iterator[List[Any]]:
+    batch: List[Any] = []
+    for value in values:
+        batch.append(value)
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def _norm_name(name: str) -> str:
+    """File name for comparing: NFC Unicode, extension in lower case."""
+    stem, ext = os.path.splitext(unicodedata.normalize("NFC", name.strip()))
+    return stem + ext.lower()
+
+
+def _norm_path(path: str) -> str:
+    """Path for comparing: NFC Unicode, forward slashes, extension in lower case."""
+    path = unicodedata.normalize("NFC", path.strip()).replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    stem, ext = os.path.splitext(path)
+    return stem + ext.lower()
 
 
 class AnnotationImportError(ValueError):
@@ -67,6 +97,7 @@ class AnnotationImportError(ValueError):
 @dataclass
 class _Row:
     file_name: str
+    file_path: Optional[str]
     start: float
     end: float
     taxon_id: str
@@ -76,9 +107,11 @@ class _Row:
 
 @dataclass
 class _Context:
-    recordings: Dict[str, List[int]]  # trimmed file_name -> recording ids
+    # normalised file name -> (recording id, normalised path) of each recording with it
+    recordings: Dict[str, List[Tuple[int, str]]]
     snippets: Dict[int, List[Tuple[int, float, float, int]]]  # recording id -> (id, start, end, set id)
     existing: Set[Tuple[int, str]]  # (snippet id, taxon id) already annotated
+    taxon_names: Dict[str, str]  # taxon id -> name this dataset already uses for it
     default_snippet_set_id: Optional[int]
 
 
@@ -109,30 +142,9 @@ class AnnotationImportService:
         to_create = outcome["to_create"]
 
         if to_create:
-            # Imported here: the API module imports services, not the reverse.
-            from app.api.annotations import _mirror_to_al
-
             try:
-                pending = 0
-                for snippet_id, row, name in to_create:
-                    values: Dict[str, Any] = {}
-                    if row.confidence is not None:
-                        values["confidence"] = row.confidence
-                    annotation = AnnotationModel(
-                        snippet_id=snippet_id,
-                        user_id=user.id,
-                        taxon_id=row.taxon_id,
-                        resolved_name_snapshot=name,
-                        source=IMPORT_SOURCE,
-                        **values,
-                    )
-                    self.db.add(annotation)
-                    _mirror_to_al(self.db, annotation)
-                    pending += 1
-                    if pending >= _COMMIT_BATCH_SIZE:
-                        self.db.commit()
-                        pending = 0
-                if pending:
+                for batch in _chunks(to_create, _COMMIT_BATCH_SIZE):
+                    self._save_batch(dataset_id, user, batch)
                     self.db.commit()
             except IntegrityError:
                 self.db.rollback()
@@ -150,13 +162,92 @@ class AnnotationImportService:
             "issues": outcome["issues"],
         }
 
+    # -- saving -------------------------------------------------------------
+
+    def _save_batch(
+        self, dataset_id: int, user: User, batch: List[Tuple[int, _Row, str]]
+    ) -> None:
+        """Insert one batch of annotations and their active-learning labels in bulk."""
+        default_confidence = getattr(
+            AnnotationModel.__table__.c.confidence.default, "arg", None
+        )
+        self.db.bulk_insert_mappings(
+            AnnotationModel,
+            [
+                {
+                    "snippet_id": snippet_id,
+                    "user_id": user.id,
+                    "taxon_id": row.taxon_id,
+                    "resolved_name_snapshot": name,
+                    "confidence": (
+                        row.confidence if row.confidence is not None else default_confidence
+                    ),
+                    "source": IMPORT_SOURCE,
+                }
+                for snippet_id, row, name in batch
+            ],
+        )
+        self._mirror_batch(dataset_id, user, batch)
+
+    def _mirror_batch(
+        self, dataset_id: int, user: User, batch: List[Tuple[int, _Row, str]]
+    ) -> None:
+        """Copy a batch into the active-learning labels, like _mirror_to_al does for
+        one annotation, but with one lookup and one insert per batch."""
+        wanted = {
+            (snippet_id, (name or "").strip())
+            for snippet_id, _row, name in batch
+            if (name or "").strip()
+        }
+        if not wanted:
+            return
+
+        existing = {
+            (snippet_id, label)
+            for snippet_id, label in self.db.query(
+                ALSnippetAnnotation.snippet_id, ALSnippetAnnotation.label
+            )
+            .filter(
+                ALSnippetAnnotation.snippet_id.in_({s for s, _l in wanted}),
+                ALSnippetAnnotation.source == ALAnnotationSource.USER,
+                ALSnippetAnnotation.user_id == user.id,
+                ALSnippetAnnotation.model_checkpoint_id.is_(None),
+            )
+            .all()
+        }
+        mappings = [
+            {
+                "dataset_id": dataset_id,
+                "snippet_id": snippet_id,
+                "label": label,
+                "source": ALAnnotationSource.USER,
+                "user_id": user.id,
+                "model_checkpoint_id": None,
+            }
+            for snippet_id, label in wanted
+            if (snippet_id, label) not in existing
+        ]
+        if mappings:
+            self.db.bulk_insert_mappings(ALSnippetAnnotation, mappings)
+
     # -- checking -----------------------------------------------------------
 
     def _check(
         self, dataset_id: int, user: User, file_bytes: bytes, filename: str
     ) -> Dict[str, Any]:
         raw_rows, numbers = self._parse(file_bytes, filename)
-        ctx = self._load_context(dataset_id)
+
+        # Only what the file mentions is loaded, not the whole dataset.
+        file_names: Set[str] = set()
+        taxon_ids: Set[str] = set()
+        for raw in raw_rows:
+            file_name = self._text(raw.get("recording_file_name"))
+            if file_name:
+                file_names.add(_norm_name(file_name))
+            taxon_id = self._text(raw.get("taxon_id"))
+            if taxon_id:
+                taxon_ids.add(taxon_id)
+        ctx = self._load_context(dataset_id, file_names, taxon_ids)
 
         to_create: List[Tuple[int, _Row, str]] = []
         seen: Set[Tuple[int, str]] = set()
@@ -165,6 +256,7 @@ class AnnotationImportService:
         counts = {"already_exist": 0, "no_match": 0, "invalid": 0}
         label_stats: Dict[str, Dict[str, Any]] = {}
         taxa: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+        names_used: Dict[str, str] = {}
 
         def record(
             status: str,
@@ -212,9 +304,9 @@ class AnnotationImportService:
                 record("invalid", index, raw, reason=problem or "unusable row")
                 continue
 
-            snippet_id, problem = self._find_snippet(ctx, row)
+            snippet_id, miss, problem = self._find_snippet(ctx, row)
             if snippet_id is None:
-                record("no_match", index, raw, row, reason=problem or "no matching snippet")
+                record(miss or "no_match", index, raw, row, reason=problem or "no matching snippet")
                 continue
 
             if row.taxon_id not in taxa:
@@ -224,7 +316,16 @@ class AnnotationImportService:
                 record("invalid", index, raw, row, reason=problem or "species could not be resolved")
                 continue
 
-            name = row.name or resolved_name
+            # One name per species, so it cannot split into two labels: the name
+            # this dataset already uses, else the taxonomy's own name, else the
+            # file's name (for ids the taxonomy only echoes back).
+            if row.taxon_id not in names_used:
+                names_used[row.taxon_id] = ctx.taxon_names.get(row.taxon_id) or (
+                    resolved_name
+                    if resolved_name != row.taxon_id
+                    else (row.name or resolved_name)
+                )
+            name = names_used[row.taxon_id]
             key = (snippet_id, row.taxon_id)
             if key in ctx.existing:
                 record(
@@ -271,8 +372,8 @@ class AnnotationImportService:
         the line in a CSV (the header is line 1), the position from 1 in a JSON list."""
         if not file_bytes:
             raise AnnotationImportError("Uploaded file is empty")
-        if len(file_bytes) > _MAX_UPLOAD_BYTES:
-            limit_mb = _MAX_UPLOAD_BYTES / (1024 * 1024)
+        if len(file_bytes) > MAX_UPLOAD_BYTES:
+            limit_mb = MAX_UPLOAD_BYTES / (1024 * 1024)
             raise AnnotationImportError(f"File exceeds the {limit_mb:.0f} MB upload limit")
         try:
             text = file_bytes.decode("utf-8-sig")
@@ -346,6 +447,8 @@ class AnnotationImportService:
         if not taxon_id:
             return None, "taxon_id is empty"
 
+        file_path = self._text(raw.get("recording_file_path")) or None
+
         confidence: Optional[float] = None
         if self._text(raw.get("confidence")):
             confidence = self._number(raw.get("confidence"))
@@ -356,76 +459,137 @@ class AnnotationImportService:
         if len(name) > _MAX_NAME_LENGTH:
             name = ""
 
-        return _Row(file_name, start, end, taxon_id, name or None, confidence), None
+        return (
+            _Row(file_name, file_path, start, end, taxon_id, name or None, confidence),
+            None,
+        )
 
     # -- matching -----------------------------------------------------------
 
-    def _load_context(self, dataset_id: int) -> _Context:
-        recordings: Dict[str, List[int]] = {}
-        for rec_id, file_name in (
-            self.db.query(Recording.id, Recording.file_name)
-            .filter(Recording.dataset_id == dataset_id)
-            .all()
-        ):
-            recordings.setdefault((file_name or "").strip(), []).append(rec_id)
-
-        snippets: Dict[int, List[Tuple[int, float, float, int]]] = {}
-        for snip_id, rec_id, start, end, set_id in (
-            self.db.query(
-                Snippet.id,
-                Snippet.recording_id,
-                Snippet.start_time,
-                Snippet.end_time,
-                Snippet.snippet_set_id,
-            )
-            .join(Recording, Snippet.recording_id == Recording.id)
-            .filter(Recording.dataset_id == dataset_id)
-            .all()
-        ):
-            snippets.setdefault(rec_id, []).append((snip_id, start, end, set_id))
-
-        existing = {
-            (snippet_id, taxon_id)
-            for snippet_id, taxon_id in (
-                self.db.query(AnnotationModel.snippet_id, AnnotationModel.taxon_id)
-                .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
-                .join(Recording, Snippet.recording_id == Recording.id)
-                .filter(Recording.dataset_id == dataset_id)
-                .all()
+    def _load_context(
+        self, dataset_id: int, file_names: Set[str], taxon_ids: Set[str]
+    ) -> _Context:
+        """Load the recordings, snippets and labels the file refers to, and no others."""
+        # The database may hold another Unicode form or extension case, so the
+        # lookup is case-insensitive and tries both forms; the exact comparison
+        # on the normalised names happens below.
+        variants = {
+            form(name).lower()
+            for name in file_names
+            for form in (
+                lambda n: unicodedata.normalize("NFC", n),
+                lambda n: unicodedata.normalize("NFD", n),
             )
         }
+        recordings: Dict[str, List[Tuple[int, str]]] = {}
+        recording_ids: List[int] = []
+        for chunk in _chunks(sorted(variants)):
+            for rec_id, file_name, file_path in (
+                self.db.query(Recording.id, Recording.file_name, Recording.file_path)
+                .filter(
+                    Recording.dataset_id == dataset_id,
+                    func.lower(func.trim(Recording.file_name)).in_(chunk),
+                )
+                .all()
+            ):
+                key = _norm_name(file_name or "")
+                if key not in file_names:
+                    continue
+                recordings.setdefault(key, []).append((rec_id, _norm_path(file_path or "")))
+                recording_ids.append(rec_id)
+
+        snippets: Dict[int, List[Tuple[int, float, float, int]]] = {}
+        existing: Set[Tuple[int, str]] = set()
+        for chunk in _chunks(recording_ids):
+            for snip_id, rec_id, start, end, set_id in (
+                self.db.query(
+                    Snippet.id,
+                    Snippet.recording_id,
+                    Snippet.start_time,
+                    Snippet.end_time,
+                    Snippet.snippet_set_id,
+                )
+                .filter(Snippet.recording_id.in_(chunk))
+                .all()
+            ):
+                snippets.setdefault(rec_id, []).append((snip_id, start, end, set_id))
+            existing.update(
+                (snippet_id, taxon_id)
+                for snippet_id, taxon_id in self.db.query(
+                    AnnotationModel.snippet_id, AnnotationModel.taxon_id
+                )
+                .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
+                .filter(Snippet.recording_id.in_(chunk))
+                .all()
+            )
+
+        taxon_names: Dict[str, str] = {}
+        for chunk in _chunks(sorted(taxon_ids)):
+            for taxon_id, name in (
+                self.db.query(
+                    AnnotationModel.taxon_id,
+                    func.min(AnnotationModel.resolved_name_snapshot),
+                )
+                .join(Snippet, AnnotationModel.snippet_id == Snippet.id)
+                .join(Recording, Snippet.recording_id == Recording.id)
+                .filter(
+                    Recording.dataset_id == dataset_id,
+                    AnnotationModel.taxon_id.in_(chunk),
+                )
+                .group_by(AnnotationModel.taxon_id)
+                .all()
+            ):
+                if name:
+                    taxon_names[taxon_id] = name
 
         default_set_id = (
             self.db.query(Dataset.default_snippet_set_id)
             .filter(Dataset.id == dataset_id)
             .scalar()
         )
-        return _Context(recordings, snippets, existing, default_set_id)
+        return _Context(recordings, snippets, existing, taxon_names, default_set_id)
 
     @staticmethod
-    def _find_snippet(ctx: _Context, row: _Row) -> Tuple[Optional[int], Optional[str]]:
-        rec_ids = ctx.recordings.get(row.file_name)
-        if not rec_ids:
-            return None, f"recording '{row.file_name}' is not in this dataset"
+    def _find_snippet(
+        ctx: _Context, row: _Row
+    ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+        """Return (snippet id, None, None) or (None, "no_match" | "invalid", reason)."""
+        candidates = ctx.recordings.get(_norm_name(row.file_name), [])
+        if not candidates:
+            return None, "no_match", f"recording '{row.file_name}' is not in this dataset"
 
-        candidates = [
+        # The path tells recordings with the same name apart. Without a usable
+        # path a name shared by several recordings is never guessed.
+        chosen: Optional[int] = None
+        if row.file_path:
+            by_path = [c for c in candidates if c[1] == _norm_path(row.file_path)]
+            if len(by_path) == 1:
+                chosen = by_path[0][0]
+        if chosen is None:
+            if len(candidates) > 1:
+                return None, "invalid", (
+                    f"'{row.file_name}' matches {len(candidates)} recordings in this "
+                    "dataset; add recording_file_path to choose one"
+                )
+            chosen = candidates[0][0]
+
+        matches = [
             snippet
-            for rec_id in rec_ids
-            for snippet in ctx.snippets.get(rec_id, [])
+            for snippet in ctx.snippets.get(chosen, [])
             if abs(snippet[1] - row.start) <= _TIME_TOLERANCE_S
             and abs(snippet[2] - row.end) <= _TIME_TOLERANCE_S
         ]
-        if not candidates:
-            return None, (
+        if not matches:
+            return None, "no_match", (
                 f"no snippet at {row.start:g}-{row.end:g} s in '{row.file_name}'"
             )
 
         # The same window can exist in more than one snippet set: prefer the
         # dataset's default set, otherwise the oldest snippet.
-        candidates.sort(
+        matches.sort(
             key=lambda s: (0 if s[3] == ctx.default_snippet_set_id else 1, s[0])
         )
-        return candidates[0][0], None
+        return matches[0][0], None, None
 
     # -- species ------------------------------------------------------------
 

@@ -67,6 +67,7 @@ from app.services.recording_metadata_import_service import (
     RecordingMetadataImportService,
 )
 from app.services.annotation_import_service import (
+    MAX_UPLOAD_BYTES as ANNOTATION_IMPORT_MAX_BYTES,
     AnnotationImportError,
     AnnotationImportService,
 )
@@ -654,7 +655,11 @@ def preview_annotation_import(
 
     try:
         return AnnotationImportService(db).preview(
-            dataset_id, current_user, file.file.read(), file.filename or ""
+            dataset_id,
+            current_user,
+            # One byte over the limit is enough to tell the file is too big.
+            file.file.read(ANNOTATION_IMPORT_MAX_BYTES + 1),
+            file.filename or "",
         )
     except AnnotationImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -680,7 +685,11 @@ def import_annotations(
 
     try:
         return AnnotationImportService(db).import_annotations(
-            dataset_id, current_user, file.file.read(), file.filename or ""
+            dataset_id,
+            current_user,
+            # One byte over the limit is enough to tell the file is too big.
+            file.file.read(ANNOTATION_IMPORT_MAX_BYTES + 1),
+            file.filename or "",
         )
     except AnnotationImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
