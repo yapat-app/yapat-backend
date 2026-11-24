@@ -2,6 +2,7 @@
 
 from typing import Any, Optional
 
+from active_learning.config import RETRAIN_AFTER
 from app.models.dataset import Dataset as DatasetModel
 
 
@@ -27,6 +28,7 @@ def dataset_to_dict(
         "spectrogram_f_min_hz": dataset.spectrogram_f_min_hz,
         "spectrogram_f_max_hz": dataset.spectrogram_f_max_hz,
         "retrain_after_threshold": dataset.retrain_after_threshold,
+        "default_retrain_threshold": RETRAIN_AFTER,
         "is_reference": dataset.is_reference,
         "reference_metadata_path": dataset.reference_metadata_path,
         "created_at": dataset.created_at,

@@ -96,6 +96,8 @@ class Dataset(DatasetBase):
     spectrogram_f_max_hz: Optional[float] = None
     quick_labels: Optional[List[Dict[str, Any]]] = None
     retrain_after_threshold: Optional[int] = None
+    # Platform default used when retrain_after_threshold is not set.
+    default_retrain_threshold: Optional[int] = None
     is_reference: bool = False
     reference_metadata_path: Optional[str] = None
     created_at: datetime
