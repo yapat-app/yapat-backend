@@ -45,6 +45,9 @@ class Annotation(Base):
     confidence = Column(Float, nullable=True, default=0.8)
     notes = Column(Text, nullable=True)
     extra_metadata = Column(JSON, nullable=True)
+    # Where the annotation came from. NULL = created in the app; "import" =
+    # imported from a file. Kept in the database only, not exposed by the API.
+    source = Column(String(32), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     snippet = relationship("Snippet", back_populates="annotations")

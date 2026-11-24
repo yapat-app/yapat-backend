@@ -51,7 +51,11 @@ from app.schemas.dataset import (
     SpeciesFolder,
     AudioFile
 )
-from app.schemas.annotation import AnnotationExport
+from app.schemas.annotation import (
+    AnnotationExport,
+    AnnotationImportPreview,
+    AnnotationImportResult,
+)
 from app.schemas.quick_label import (
     QuickLabelEntryBatchCreate,
     QuickLabelEntryResponse,
@@ -61,6 +65,11 @@ from app.services.dataset_service import DatasetService, ReferenceMetadataNotFou
 from app.services.dataset_ingest_service import DatasetIngestService
 from app.services.recording_metadata_import_service import (
     RecordingMetadataImportService,
+)
+from app.services.annotation_import_service import (
+    MAX_UPLOAD_BYTES as ANNOTATION_IMPORT_MAX_BYTES,
+    AnnotationImportError,
+    AnnotationImportService,
 )
 from app.utils.recording_metadata_csv import MetadataCsvError
 from app.utils.dataset_response import dataset_to_dict
@@ -604,6 +613,86 @@ def export_dataset_annotations(
     else:
         # Return JSON (using Pydantic for validation)
         return [AnnotationExport(**data) for data in annotations_data]
+
+
+# ── Annotation import ─────────────────────────────────────────────────────────
+
+def _require_annotation_import_access(
+    svc: DatasetService, dataset_id: int, current_user: User
+):
+    """Admins and team owners may import; reference datasets are never annotated."""
+    dataset = svc.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if not svc.user_can_manage_dataset(current_user, dataset):
+        raise HTTPException(
+            status_code=403, detail="Not authorized to import annotations into this dataset"
+        )
+    if dataset.is_reference:
+        raise HTTPException(
+            status_code=400,
+            detail="Annotations cannot be imported into a reference dataset",
+        )
+    return dataset
+
+
+@router.post(
+    "/{dataset_id}/annotations/import/preview",
+    response_model=AnnotationImportPreview,
+)
+def preview_annotation_import(
+    dataset_id: int,
+    file: UploadFile = File(..., description="Annotation export file (CSV or JSON) to preview"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Dry-run an annotation import: check every row against this dataset's
+    recordings and snippets and return counts with reasons. No DB writes.
+    """
+    svc = DatasetService(db)
+    _require_annotation_import_access(svc, dataset_id, current_user)
+
+    try:
+        return AnnotationImportService(db).preview(
+            dataset_id,
+            current_user,
+            # One byte over the limit is enough to tell the file is too big.
+            file.file.read(ANNOTATION_IMPORT_MAX_BYTES + 1),
+            file.filename or "",
+        )
+    except AnnotationImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{dataset_id}/annotations/import",
+    response_model=AnnotationImportResult,
+)
+def import_annotations(
+    dataset_id: int,
+    file: UploadFile = File(..., description="Annotation export file (CSV or JSON) to import"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Import annotations from a file produced by the annotation export. Only rows
+    that match an existing snippet are added, next to the annotations already
+    there; the rest are skipped and reported.
+    """
+    svc = DatasetService(db)
+    _require_annotation_import_access(svc, dataset_id, current_user)
+
+    try:
+        return AnnotationImportService(db).import_annotations(
+            dataset_id,
+            current_user,
+            # One byte over the limit is enough to tell the file is too big.
+            file.file.read(ANNOTATION_IMPORT_MAX_BYTES + 1),
+            file.filename or "",
+        )
+    except AnnotationImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── Recording metadata CSV import ─────────────────────────────────────────────

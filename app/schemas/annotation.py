@@ -4,7 +4,7 @@ Annotation schemas
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 import re
 
 
@@ -104,6 +104,67 @@ class AnnotationExport(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+class AnnotationImportIssue(BaseModel):
+    """One row of an import file that cannot be imported, and why."""
+    row: int = Field(
+        description="Line in a CSV file (the header is line 1), or position from 1 in a JSON list"
+    )
+    reason: str
+
+
+class AnnotationImportRow(BaseModel):
+    """One row of an import file and what would happen to it."""
+    row: int = Field(
+        description="Line in a CSV file (the header is line 1), or position from 1 in a JSON list"
+    )
+    status: Literal["will_import", "already_exist", "no_match", "invalid"]
+    recording: str
+    start: str
+    end: str
+    taxon_id: str
+    name: Optional[str] = None
+    reason: Optional[str] = Field(
+        None, description="Why the row is not imported (already_exist, no_match, invalid)"
+    )
+
+
+class AnnotationImportLabel(BaseModel):
+    """A species in an import file, with how many of its rows fall in each status."""
+    taxon_id: str
+    name: Optional[str] = None
+    will_import: int = 0
+    already_exist: int = 0
+    no_match: int = 0
+    invalid: int = 0
+
+
+class AnnotationImportPreview(BaseModel):
+    """Dry-run summary of an annotation import file (no DB writes)."""
+    total_rows: int
+    will_import: int = Field(description="Rows that match a snippet and would be added")
+    already_exist: int = Field(
+        description="Rows whose snippet already has that species, or that repeat an earlier row of the file"
+    )
+    no_match: int = Field(description="Rows whose recording or snippet is not in this dataset")
+    invalid: int = Field(description="Rows with missing or unusable values")
+    rows: list[AnnotationImportRow] = Field(
+        description="The first rows of each status (capped per status), in file order"
+    )
+    labels: list[AnnotationImportLabel] = Field(
+        description="Every species in the file with its row counts per status, most rows first"
+    )
+
+
+class AnnotationImportResult(BaseModel):
+    """Result of committing an annotation import."""
+    total_rows: int
+    imported: int
+    already_exist: int
+    no_match: int
+    invalid: int
+    issues: list[AnnotationImportIssue]
 
 
 class DatasetAnnotationStats(BaseModel):
