@@ -730,7 +730,7 @@ def delete_snippet_label(
     dataset_id: int = Query(..., description="Dataset ID"),
     snippet_id: int = Query(..., description="Snippet ID"),
     label: str = Query(..., description="Exact label to remove"),
-    source: str = Query("user", description="'user' or 'ground_truth'"),
+    source: str = Query("user", description="'user', 'ground_truth' or 'derived' (shared from another snippet set)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -760,8 +760,10 @@ def delete_snippet_label(
         source_enum = ALAnnotationSource.GROUND_TRUTH
     elif source == ALAnnotationSource.USER.value:
         source_enum = ALAnnotationSource.USER
+    elif source == ALAnnotationSource.DERIVED.value:
+        source_enum = ALAnnotationSource.DERIVED
     else:
-        raise HTTPException(status_code=400, detail="source must be 'user' or 'ground_truth'")
+        raise HTTPException(status_code=400, detail="source must be 'user', 'ground_truth' or 'derived'")
 
     (
         db.query(ALSnippetAnnotation)
@@ -774,15 +776,27 @@ def delete_snippet_label(
         .delete(synchronize_session=False)
     )
 
-    if source_enum == ALAnnotationSource.USER:
-        (
-            db.query(AnnotationModel)
-            .filter(
-                AnnotationModel.snippet_id == snippet_id,
-                AnnotationModel.resolved_name_snapshot == label,
-            )
-            .delete(synchronize_session=False)
-        )
+    if source_enum in (ALAnnotationSource.USER, ALAnnotationSource.DERIVED):
+        from app.services import label_sharing
+
+        on_snippet = db.query(AnnotationModel).filter(AnnotationModel.snippet_id == snippet_id).all()
+        if source_enum == ALAnnotationSource.DERIVED:
+            removed = [
+                a for a in on_snippet
+                if a.origin == label_sharing.ORIGIN_AUTO
+                and ((a.extra_metadata or {}).get("al_label") or a.resolved_name_snapshot) == label
+            ]
+        else:
+            removed = [
+                a for a in on_snippet
+                if a.origin != label_sharing.ORIGIN_AUTO
+                and (a.resolved_name_snapshot == label or (a.extra_metadata or {}).get("al_label") == label)
+            ]
+        lost_copies_on = label_sharing.before_annotations_deleted(db, removed, deleted_by=current_user.id)
+        for annotation in removed:
+            db.delete(annotation)
+        db.flush()
+        label_sharing.share_after_change(db, [], lost_copies_on=lost_copies_on)
 
     db.commit()
     return None

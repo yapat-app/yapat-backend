@@ -465,6 +465,15 @@ def finalize_embedding_job(self, results, embedding_job_id):
                 # Built after the vectors so they go in as one bulk build. A later
                 # dataset using this model finds the index there already.
                 build_vector_index.delay(job.embedding_model_id)
+                # The new snippet set gets the labels already made on the
+                # dataset's other sets, shared onto its clips only (the other
+                # sets already share among themselves as labels are made).
+                # Runs again harmlessly when the set had them already.
+                from app.tasks.label_sharing_tasks import share_labels_for_dataset
+
+                share_labels_for_dataset.delay(
+                    job.dataset_id, target_snippet_set_id=job.snippet_set_id
+                )
 
     except Exception as e:
         service.update_job_status(

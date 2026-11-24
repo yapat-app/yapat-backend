@@ -48,6 +48,19 @@ class Annotation(Base):
         index=True,
     )
 
+    # How the label got onto this clip: "manual" (a person labelled this clip),
+    # "auto_shared" (copied from an overlapping clip of another snippet set) or
+    # "reviewed_shared" (a person accepted or relabelled a shared suggestion).
+    # Only manual labels are shared on; see app/services/label_sharing.py.
+    origin = Column(String(20), nullable=False, default="manual", server_default="manual")
+    # For shared labels: the manual label this one was copied from.
+    derived_from_id = Column(
+        Integer,
+        ForeignKey("annotations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     taxon_id = Column(String(255), nullable=False, index=True)
     resolved_name_snapshot = Column(String(255), nullable=False)
 

@@ -19,6 +19,7 @@ from app.models.user import User
 from app.models.pam_active_learning import ALSnippetAnnotation, ALAnnotationSource
 from app.services.dataset_service import DatasetService
 from app.services.embedding_scope import models_for_set
+from app.services import label_sharing
 from app.core import taxonomy
 from sqlalchemy import func
 
@@ -197,6 +198,20 @@ def create_annotation(
         )
         .first()
     )
+    from app.schemas.annotation import Annotation as AnnotationSchema
+    if existing is not None and existing.origin == label_sharing.ORIGIN_AUTO:
+        # The clip has this label as an automatic copy: the user confirms it.
+        label_sharing.confirm_existing_label(
+            db, existing, current_user.id, embedding_model_id=embedding_model_id
+        )
+        db.flush()
+        _mirror_to_al(db, existing)
+        label_sharing.share_after_change(db, [existing.snippet_id])
+        db.commit()
+        db.refresh(existing)
+        result = AnnotationSchema.model_validate(existing)
+        result.username = current_user.username
+        return result
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -221,8 +236,8 @@ def create_annotation(
     db.commit()
     db.refresh(annotation)
     _mirror_to_al(db, annotation)
+    label_sharing.share_after_change(db, [annotation.snippet_id])
     db.commit()
-    from app.schemas.annotation import Annotation as AnnotationSchema
     result = AnnotationSchema.model_validate(annotation)
     result.username = current_user.username
     return result
@@ -244,12 +259,16 @@ def create_annotations_batch(
     _require_snippet_annotation_access(db, snippet_id, current_user)
     embedding_model_id = _resolve_annotation_model(db, snippet_id, batch_in.embedding_model_id)
 
-    # Existing taxon_ids on this snippet (no duplicates allowed)
-    existing_taxon_ids = {
-        a.taxon_id
+    # Existing labels on this snippet: no duplicates, except that an automatic
+    # shared copy is confirmed by labelling the clip with it again.
+    existing_by_taxon = {
+        a.taxon_id: a
         for a in db.query(AnnotationModel).filter(
             AnnotationModel.snippet_id == snippet_id
         ).all()
+    }
+    existing_taxon_ids = {
+        taxon for taxon, a in existing_by_taxon.items() if a.origin != label_sharing.ORIGIN_AUTO
     }
     seen_in_batch = set()
     created_annotations = []
@@ -318,6 +337,14 @@ def create_annotations_batch(
             )
         seen_in_batch.add(taxon_id)
 
+        shared_copy = existing_by_taxon.get(taxon_id)
+        if shared_copy is not None:
+            label_sharing.confirm_existing_label(
+                db, shared_copy, current_user.id, embedding_model_id=embedding_model_id
+            )
+            created_annotations.append(shared_copy)
+            continue
+
         # Create annotation with resolved name snapshot
         annotation_data = annotation_in.model_dump(exclude={'species_name', 'display_name'})
         annotation_data['taxon_id'] = taxon_id
@@ -340,6 +367,7 @@ def create_annotations_batch(
         db.refresh(annotation)
     for annotation in created_annotations:
         _mirror_to_al(db, annotation)
+    label_sharing.share_after_change(db, [snippet_id])
     db.commit()
     from app.schemas.annotation import Annotation as AnnotationSchema
     result = []
@@ -466,8 +494,11 @@ def delete_annotation(
                 detail="Not authorized to delete annotations in this team",
             )
 
+    lost_copies_on = label_sharing.before_annotations_deleted(db, [annotation], deleted_by=current_user.id)
     _unmirror_from_al(db, annotation)
     db.delete(annotation)
+    db.flush()
+    label_sharing.share_after_change(db, [], lost_copies_on=lost_copies_on)
     db.commit()
     return None
 

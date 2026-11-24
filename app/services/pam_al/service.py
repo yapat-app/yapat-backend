@@ -35,6 +35,7 @@ from app.models.snippet import Snippet
 from app.models.dataset import Dataset
 from app.models.embedding import SnippetSet
 from app.services.embedding_scope import embedding_options, snippet_set_for_model
+from app.services import label_sharing
 from app.schemas.pam_active_learning import (
     ALTrainFromScratchRequest,
     ALFeedbackSubmit,
@@ -650,6 +651,7 @@ class PAMActiveLearningService:
                             "resolved_name_snapshot": resolved.get("canonical_name")
                             or resolved.get("scientific_name")
                             or label,
+                            "al_label": label,
                         }
                     )
                     continue
@@ -664,6 +666,7 @@ class PAMActiveLearningService:
                             "resolved_name_snapshot": resolved.get("canonical_name")
                             or resolved.get("scientific_name")
                             or label,
+                            "al_label": label,
                         }
                     )
                 continue
@@ -677,6 +680,7 @@ class PAMActiveLearningService:
                         "resolved_name_snapshot": matched.get("canonical_name")
                         or matched.get("scientific_name")
                         or label,
+                        "al_label": label,
                     }
                 )
                 continue
@@ -694,33 +698,60 @@ class PAMActiveLearningService:
                     {
                         "taxon_id": custom_taxon_id,
                         "resolved_name_snapshot": label,
+                        "al_label": label,
                     }
                 )
 
         if not resolved_items:
             return
 
-        # Replace the user's annotations for this snippet with the confirmed set.
-        self.db.query(AnnotationModel).filter(
-            AnnotationModel.snippet_id == snippet_id,
-            AnnotationModel.user_id == user_id,
-        ).delete(synchronize_session=False)
-
+        # Replace the user's labels on this snippet with the confirmed set. Labels
+        # that stay are kept as they are, so labels shared from them keep their link.
+        wanted = {}
         for item in resolved_items:
+            wanted.setdefault(item["taxon_id"], item)
+        on_snippet = {
+            row.taxon_id: row
+            for row in self.db.query(AnnotationModel).filter(AnnotationModel.snippet_id == snippet_id).all()
+        }
+        removed = [
+            row for row in on_snippet.values()
+            if row.user_id == user_id
+            and row.origin == label_sharing.ORIGIN_MANUAL
+            and row.taxon_id not in wanted
+        ]
+        lost_copies_on = label_sharing.before_annotations_deleted(self.db, removed, deleted_by=user_id)
+        for row in removed:
+            self.db.delete(row)
+
+        for taxon_id, item in wanted.items():
+            metadata = {
+                "source": "active_learning",
+                "dataset_id": dataset_id,
+                "al_label": item["al_label"],
+            }
+            current = on_snippet.get(taxon_id)
+            if current is not None:
+                if current.origin == label_sharing.ORIGIN_AUTO:
+                    label_sharing.confirm_existing_label(
+                        self.db, current, user_id,
+                        embedding_model_id=embedding_model_id, notes=notes, extra_metadata=metadata,
+                    )
+                # Otherwise the label is there already (this user's, or another person's).
+                continue
             self.db.add(
                 AnnotationModel(
                     snippet_id=snippet_id,
                     user_id=user_id,
                     embedding_model_id=embedding_model_id,
-                    taxon_id=item["taxon_id"],
+                    taxon_id=taxon_id,
                     resolved_name_snapshot=item["resolved_name_snapshot"],
                     notes=notes,
-                    extra_metadata={
-                        "source": "active_learning",
-                        "dataset_id": dataset_id,
-                    },
+                    extra_metadata=metadata,
                 )
             )
+        self.db.flush()
+        label_sharing.share_after_change(self.db, [snippet_id], lost_copies_on=lost_copies_on)
 
     def _delete_final_annotations_from_active_learning(
         self,
@@ -738,10 +769,18 @@ class PAMActiveLearningService:
             )
             .all()
         )
-        for row in rows:
-            meta = getattr(row, "extra_metadata", None) or {}
-            if isinstance(meta, dict) and meta.get("source") == "active_learning":
-                self.db.delete(row)
+        removed = [
+            row for row in rows
+            if row.origin == label_sharing.ORIGIN_MANUAL
+            and isinstance(row.extra_metadata, dict)
+            and row.extra_metadata.get("source") == "active_learning"
+        ]
+        lost_copies_on = label_sharing.before_annotations_deleted(self.db, removed, deleted_by=user_id)
+        for row in removed:
+            self.db.delete(row)
+        if removed:
+            self.db.flush()
+            label_sharing.share_after_change(self.db, [], lost_copies_on=lost_copies_on)
 
     def _get_or_create_custom_taxon_id_for_code(
         self,

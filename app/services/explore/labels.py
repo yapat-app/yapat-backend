@@ -22,7 +22,8 @@ from app.models.snippet import Snippet
 from app.services.explore.builders import stream_rows
 from app.services.explore.query import BaseData, LabelsData
 
-TRUSTED_SOURCES = (ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER)
+# Shared copies from other snippet sets count as labels in the hub.
+TRUSTED_SOURCES = (ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER, ALAnnotationSource.DERIVED)
 
 
 def labels_fingerprint(db: Session, dataset_id: int) -> tuple[int, int]:

@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # Counting annotations rather than labels lets the row grow or shrink with
     # the number of species a site actually has.
     RECENT_LABELS_WINDOW: int = 10
+    # Label sharing between snippet sets of one dataset (3 s and 5 s clips, say).
+    # A label is copied automatically when it is certain to hold for the other
+    # clip; other overlaps go to a review queue. See app/services/label_sharing.py.
+    LABEL_SHARING_ENABLED: bool = True
+    # Clips that overlap by less than this many seconds are not linked at all.
+    LABEL_SHARE_MIN_OVERLAP_S: float = 0.5
+    # Whether automatically shared labels count as training labels.
+    TRAIN_ON_SHARED_LABELS: bool = True
     HOST_DATA_ROOT: str | None = None  # host path (optional)
     HOST_MODELS_AL: str | None = None  # host path for models; used by docker-compose for mounts only
     

@@ -79,6 +79,10 @@ class ALCheckpointHyperparameters(BaseModel):
     excluded_species: Optional[List[str]] = None
     class_counts: Optional[Dict[str, int]] = None
 
+    # Reference pools mixed into training, and the ones left out with why
+    # (issue #93, part 3): {"reference_sample_count": int, "skipped": [...]}.
+    reference_pool: Optional[Dict[str, Any]] = None
+
 class ALCheckpointResponse(BaseModel):
     id: int
     dataset_id: int

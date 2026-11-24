@@ -46,6 +46,7 @@ from app.models.reference_link import DatasetReferenceLink
 from app.models.quick_label_entry import QuickLabelEntry
 from app.models.dataset_ingest_job import DatasetIngestJob, IngestJobStatus, IngestMode, IngestStage
 from app.models.recording_embedding_failure import RecordingEmbeddingFailure
+from app.models.label_share import LabelShareCandidate
 
 __all__ = [
     "User",
@@ -93,4 +94,6 @@ __all__ = [
     "IngestStage",
     "IngestMode",
     "RecordingEmbeddingFailure",
+    # Label sharing review queue
+    "LabelShareCandidate",
 ]

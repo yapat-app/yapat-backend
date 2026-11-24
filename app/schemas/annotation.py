@@ -84,6 +84,14 @@ class Annotation(AnnotationBase):
         None,
         description="Username of the annotator (when available)."
     )
+    origin: str = Field(
+        "manual",
+        description="manual, auto_shared (copied from an overlapping clip) or reviewed_shared.",
+    )
+    derived_from_id: Optional[int] = Field(
+        None,
+        description="For shared labels: the annotation this one was copied from.",
+    )
     taxon_id: str = Field(
         ...,
         description="Namespaced taxon identifier (always present in response)"
