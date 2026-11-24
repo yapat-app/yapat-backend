@@ -24,6 +24,7 @@ def dataset_to_dict(
         "team_id": dataset.team_id,
         "dataset_type": dataset.dataset_type,
         "default_snippet_set_id": dataset.default_snippet_set_id,
+        "default_embedding_model_id": dataset.default_embedding_model_id,
         "spectrogram_f_min_hz": dataset.spectrogram_f_min_hz,
         "spectrogram_f_max_hz": dataset.spectrogram_f_max_hz,
         "retrain_after_threshold": dataset.retrain_after_threshold,

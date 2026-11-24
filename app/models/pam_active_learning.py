@@ -35,6 +35,8 @@ class ALRetrainStatus(str, enum.Enum):
 class ALAnnotationSource(str, enum.Enum):
     GROUND_TRUTH = "ground_truth"
     USER = "user"
+    # Copied automatically from an overlapping clip of another snippet set.
+    DERIVED = "derived"
 
 # ── Model Checkpoint ───────────────────────────────────────────────────
 

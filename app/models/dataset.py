@@ -47,6 +47,13 @@ class Dataset(Base):
         nullable=True,
         index=True
     )  # Default SnippetSet for this dataset
+    # Embedding model the Annotation Hub uses for this dataset, set by an admin or
+    # team owner. Null = the model that embedded the default snippet set first.
+    default_embedding_model_id = Column(
+        Integer,
+        ForeignKey("embedding_models.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     # Mel-spectrogram display band for annotation (Hz). Null = use 0 and Nyquist per snippet.
     spectrogram_f_min_hz = Column(Float, nullable=True)
     spectrogram_f_max_hz = Column(Float, nullable=True)

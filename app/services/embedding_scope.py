@@ -91,14 +91,30 @@ def embedding_options(db: Session, dataset: Dataset) -> List[dict]:
     )
     checkpoint_by_model = {c.embedding_model_id: c for c in active if c.embedding_model_id is not None}
 
+    # The model an admin or team owner chose on the dataset card, while it is usable;
+    # else the first finished model on the default snippet set.
+    chosen_model_id = dataset.default_embedding_model_id
+    if chosen_model_id is not None and not any(
+        model.id == chosen_model_id and job.status == EmbeddingJobStatus.COMPLETED
+        for job, model, _set in jobs
+    ):
+        chosen_model_id = None
+
     default_found = False
     options: List[dict] = []
     for job, model, snippet_set in jobs:
-        is_default = (
-            not default_found
-            and job.snippet_set_id == dataset.default_snippet_set_id
-            and job.status == EmbeddingJobStatus.COMPLETED
-        )
+        if chosen_model_id is not None:
+            is_default = (
+                not default_found
+                and model.id == chosen_model_id
+                and job.status == EmbeddingJobStatus.COMPLETED
+            )
+        else:
+            is_default = (
+                not default_found
+                and job.snippet_set_id == dataset.default_snippet_set_id
+                and job.status == EmbeddingJobStatus.COMPLETED
+            )
         default_found = default_found or is_default
         checkpoint = checkpoint_by_model.get(model.id)
         options.append({
@@ -117,4 +133,9 @@ def embedding_options(db: Session, dataset: Dataset) -> List[dict]:
             "active_checkpoint_id": checkpoint.id if checkpoint else None,
             "model_family_name": checkpoint.model_family_name if checkpoint else family_name_for_model(model),
         })
+    from app.services.reference_readiness import pool_states
+
+    states = pool_states(db, dataset, [option["embedding_model_id"] for option in options])
+    for option in options:
+        option["reference_pools"] = states.get(option["embedding_model_id"], [])
     return options

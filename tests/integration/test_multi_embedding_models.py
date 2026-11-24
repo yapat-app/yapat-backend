@@ -387,3 +387,152 @@ def test_a_failed_first_classifier_waits_for_new_labels(db_session, world):
     assert retry["auto_retrain_job_id"] != job_id
     # The failed run keeps its checkpoint row and version.
     assert db.get(ALModelCheckpoint, retry["auto_retrain_checkpoint_id"]).version == "v0_2"
+
+
+def test_dataset_card_choice_becomes_the_hubs_default_model(db_session, world, client):
+    dataset, three_a, _, five = world
+    service = EmbeddingService(db_session)
+    _finish(db_session, service.create_embedding_job(dataset, three_a))
+    _finish(db_session, service.create_embedding_job(dataset, five))
+
+    response = client.patch(f"/api/datasets/{dataset.id}", json={"default_embedding_model_id": five.id})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["default_embedding_model_id"] == five.id
+    db_session.refresh(dataset)
+    options = {o["embedding_model_id"]: o for o in embedding_options(db_session, dataset)}
+    assert options[five.id]["is_default"] and not options[three_a.id]["is_default"]
+
+
+def test_dataset_card_rejects_a_model_without_finished_embeddings(db_session, world, client):
+    dataset, three_a, three_b, _ = world
+    service = EmbeddingService(db_session)
+    _finish(db_session, service.create_embedding_job(dataset, three_a))
+    service.create_embedding_job(dataset, three_b)  # still pending
+
+    response = client.patch(f"/api/datasets/{dataset.id}", json={"default_embedding_model_id": three_b.id})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "embedding_model_not_ready"
+
+
+# ── Reference pools must match the chosen model (issue #93, part 3) ─────
+
+def _pool(db, dataset, name="pool"):
+    from app.models.reference_link import DatasetReferenceLink
+
+    pool = Dataset(name=name, source_uri=f"{name}_site", dataset_type=DatasetType.PAM, is_reference=True)
+    db.add(pool)
+    db.flush()
+    db.add(DatasetReferenceLink(reference_dataset_id=pool.id, dataset_id=dataset.id))
+    db.commit()
+    return pool
+
+
+def _embed_pool(db, pool, model, with_snippet=True):
+    job = EmbeddingService(db).create_embedding_job(pool, model)
+    _finish(db, job)
+    if with_snippet:
+        snippet = _snippet(db, pool, job.snippet_set_id)
+        db.add(EmbeddingVector(
+            snippet_id=snippet.id, embedding_job_id=job.id, embedding_model_id=model.id,
+            dim=model.dim, vector=[0.1] * model.dim,
+        ))
+        db.commit()
+    return job
+
+
+def _two_models(db, world):
+    dataset, three_a, _, five = world
+    service = EmbeddingService(db)
+    _finish(db, service.create_embedding_job(dataset, three_a))
+    _finish(db, service.create_embedding_job(dataset, five))
+    return dataset, three_a, five
+
+
+def test_switch_is_blocked_while_a_linked_pool_lacks_the_model(db_session, world, client):
+    dataset, three_a, five = _two_models(db_session, world)
+    pool = _pool(db_session, dataset, "frog pool")
+    _embed_pool(db_session, pool, three_a)
+
+    response = client.patch(f"/api/datasets/{dataset.id}", json={"default_embedding_model_id": five.id})
+
+    assert response.status_code == 409, response.text
+    assert "frog pool" in response.json()["detail"]
+    options = {o["embedding_model_id"]: o for o in embedding_options(db_session, dataset)}
+    assert [(p["name"], p["scope"], p["state"], p["snippets"]) for p in options[five.id]["reference_pools"]] == [
+        ("frog pool", "dataset", "not_embedded", 0),
+    ]
+    assert options[three_a.id]["reference_pools"][0]["state"] == "ready"
+
+
+def test_switch_waits_for_a_pool_that_is_still_embedding(db_session, world, client):
+    dataset, _, five = _two_models(db_session, world)
+    pool = _pool(db_session, dataset)
+    EmbeddingService(db_session).create_embedding_job(pool, five)  # pending
+
+    response = client.patch(f"/api/datasets/{dataset.id}", json={"default_embedding_model_id": five.id})
+
+    assert response.status_code == 409
+    states = {o["embedding_model_id"]: o for o in embedding_options(db_session, dataset)}
+    assert states[five.id]["reference_pools"][0]["state"] == "embedding"
+
+
+def test_a_pool_embedded_with_the_model_allows_the_switch(db_session, world, client):
+    dataset, _, five = _two_models(db_session, world)
+    _embed_pool(db_session, _pool(db_session, dataset), five)
+
+    response = client.patch(f"/api/datasets/{dataset.id}", json={"default_embedding_model_id": five.id})
+
+    assert response.status_code == 200, response.text
+
+
+def test_a_pool_without_usable_snippets_does_not_block(db_session, world, client):
+    # e.g. every file is shorter than the model's window: embedding again cannot help.
+    dataset, _, five = _two_models(db_session, world)
+    _embed_pool(db_session, _pool(db_session, dataset), five, with_snippet=False)
+
+    response = client.patch(f"/api/datasets/{dataset.id}", json={"default_embedding_model_id": five.id})
+
+    assert response.status_code == 200, response.text
+    options = {o["embedding_model_id"]: o for o in embedding_options(db_session, dataset)}
+    assert options[five.id]["reference_pools"][0]["state"] == "no_snippets"
+
+
+def test_saving_the_current_model_again_is_not_blocked(db_session, world, client):
+    dataset, three_a, _ = _two_models(db_session, world)
+    dataset.default_embedding_model_id = three_a.id
+    db_session.commit()
+    _pool(db_session, dataset)  # linked later, never embedded
+
+    response = client.patch(f"/api/datasets/{dataset.id}", json={"default_embedding_model_id": three_a.id})
+
+    assert response.status_code == 200, response.text
+
+
+def test_training_names_a_pool_it_left_out_for_the_model(db_session, world, monkeypatch):
+    from app.services.pam_al import _data_helpers as data_h
+
+    dataset, three_a, five = _two_models(db_session, world)
+    pool = _pool(db_session, dataset, "frog pool")
+    _embed_pool(db_session, pool, three_a)
+    monkeypatch.setattr(data_h, "resolve_pam_metadata_path", lambda *a, **k: "frog_pool/meta.csv")
+    monkeypatch.setattr(data_h, "scan_metadata_species", lambda path: {"Frog A"})
+
+    X, _, _, info = data_h.load_reference_pool_training_data(db_session, dataset, five.id, ["Frog A"])
+
+    assert X.shape[0] == 0
+    assert [(s["name"], s["code"]) for s in info["skipped"]] == [("frog pool", "not_embedded")]
+
+
+def test_dataset_card_choice_needs_a_manager(db_session, world, client):
+    dataset, three_a, _, _ = world
+    _finish(db_session, EmbeddingService(db_session).create_embedding_job(dataset, three_a))
+    annotator = User(username="annotator", hashed_password="x", role=UserRole.USER)
+    db_session.add(annotator)
+    db_session.commit()
+    app.dependency_overrides[get_current_active_user] = lambda: annotator
+
+    response = client.patch(f"/api/datasets/{dataset.id}", json={"default_embedding_model_id": three_a.id})
+
+    assert response.status_code == 403

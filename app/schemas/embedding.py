@@ -81,6 +81,16 @@ class EmbeddingJobProgress(BaseModel):
     error_message: Optional[str] = None
 
 
+class ReferencePoolState(BaseModel):
+    """A reference pool linked to the dataset, for one embedding model."""
+    dataset_id: int
+    name: str
+    scope: str  # dataset | team: how the pool is linked
+    # ready | no_snippets | embedding | failed | not_embedded (app/services/reference_readiness.py)
+    state: str
+    snippets: int = 0
+
+
 class EmbeddingOption(BaseModel):
     """One embedding model on a dataset, as offered by the hub's model switcher."""
     embedding_model_id: int
@@ -101,6 +111,8 @@ class EmbeddingOption(BaseModel):
     active_checkpoint_id: Optional[int] = None
     # The classifier's family, or the family to use when training the first one.
     model_family_name: str
+    # Linked reference pools and whether they have this model's embeddings.
+    reference_pools: List[ReferencePoolState] = []
 
 
 class SnippetSet(BaseModel):
