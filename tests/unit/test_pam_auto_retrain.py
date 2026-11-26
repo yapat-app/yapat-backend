@@ -75,6 +75,7 @@ def test_setup_auto_retrain_resolves_and_persists_parent_label_order(monkeypatch
         "get_pam_dataset",
         lambda _db, _id: SimpleNamespace(default_snippet_set_id=12),
     )
+    monkeypatch.setattr(pam_service, "snippet_set_for_model", lambda _db, ds, _model: ds.default_snippet_set_id)
     monkeypatch.setattr(
         pam_service.fb_h,
         "feedback_count_since_retrain",

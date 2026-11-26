@@ -75,7 +75,8 @@ class DatasetIngestJob(Base):
         nullable=False,
     )
 
-    # The dataset's default snippet set at job creation. New snippets go here.
+    # The dataset's default snippet set at job creation. New snippets go here and
+    # into the dataset's other snippet sets.
     snippet_set_id = Column(
         Integer,
         ForeignKey("snippet_sets.id", ondelete="CASCADE"),

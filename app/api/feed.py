@@ -303,8 +303,8 @@ async def search_by_audio_upload(
         start_time: float = Form(..., description="Start time in seconds for the audio snippet"),
         end_time: float = Form(..., description="End time in seconds for the audio snippet"),
         dataset_id: int = Form(..., description="Dataset ID to search within"),
-        embedding_model_id: int = Form(default=1, description="Embedding model ID to use"),
-        snippet_set_id: Optional[int] = Form(default=None, description="Specific snippet set to search in (leave empty to use dataset's default)"),
+        embedding_model_id: Optional[int] = Form(default=None, description="Embedding model to search with (leave empty for the default snippet set's first model)"),
+        snippet_set_id: Optional[int] = Form(default=None, description="Specific snippet set to search in (leave empty to use the model's snippet set)"),
         limit: int = Form(default=10, ge=1, le=100, description="Maximum number of similar snippets to return"),
         skip: int = Form(default=0, ge=0, description="Number of snippets to skip for pagination"),
         db: Session = Depends(get_db),
@@ -323,7 +323,7 @@ async def search_by_audio_upload(
     
     **Requirements**:
     - Audio duration (end_time - start_time) should match the embedding model's window size
-    - For BirdNET: typically 3 seconds
+    - Each embedding model has its own window, e.g. 3 seconds for BirdNET
     - File format: Any format supported by librosa (WAV, MP3, FLAC, OGG, etc.)
     
     """
@@ -392,11 +392,23 @@ async def search_by_audio_upload(
         
         # Generate embedding for the uploaded audio snippet
         try:
-            from app.services.birdnet_model import BirdNetEmbedder
+            from app.models.dataset import Dataset as DatasetModel
+            from app.models.embedding import EmbeddingModel
+            from app.services.embedders import get_embedder
+            from app.services.embedding_scope import default_model_for_set, snippet_set_for_model
 
-            # Use BirdNET embedder to generate embedding
-            # Note: This assumes BirdNET model. For other models, add model selection logic.
-            query_vector = BirdNetEmbedder.embed(
+            dataset = db.get(DatasetModel, dataset_id)
+            if dataset is None:
+                raise HTTPException(status_code=404, detail="Dataset not found")
+            if embedding_model_id is None and dataset.default_snippet_set_id is not None:
+                embedding_model_id = default_model_for_set(db, dataset.default_snippet_set_id)
+            model = db.get(EmbeddingModel, embedding_model_id) if embedding_model_id else None
+            if model is None:
+                raise HTTPException(status_code=400, detail="Dataset has no finished embedding model to search with")
+            if not snippet_set_id:
+                snippet_set_id = snippet_set_for_model(db, dataset, model.id)
+
+            query_vector = get_embedder(model.implementation_key).embed(
                 audio_path=temp_file_path,
                 start_time=start_time
             )

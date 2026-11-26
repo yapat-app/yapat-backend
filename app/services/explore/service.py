@@ -30,6 +30,7 @@ from app.schemas.explore import (
     SummaryRequest,
     ViewportRequest,
 )
+from app.services.embedding_scope import models_for_set
 from app.services.explore import registry
 from app.services.explore.builders import PROJECTION_METHODS
 from app.services.explore.query import (
@@ -101,7 +102,8 @@ class ExploreService:
 
     # ── scope ─────────────────────────────────────────────────────────────
 
-    def _validate_scope(self, scope: ExploreScope) -> SnippetSet:
+    def _validate_scope(self, scope: ExploreScope) -> tuple[SnippetSet, int]:
+        """Check access and the ids in the scope. Returns the set and the embedding model to use."""
         from app.services.dataset_service import DatasetService
 
         datasets = DatasetService(self.db)
@@ -120,28 +122,38 @@ class ExploreService:
             )
         if snippet_set.status != SnippetSetStatus.READY:
             raise ScopeError(409, f"Snippet set {scope.snippet_set_id} is not ready yet.")
+        checkpoint_model_id = None
         if scope.checkpoint_id is not None:
             checkpoint = self.db.get(ALModelCheckpoint, scope.checkpoint_id)
             if checkpoint is None:
                 raise ScopeError(404, f"Checkpoint {scope.checkpoint_id} not found")
             if checkpoint.dataset_id != scope.dataset_id:
                 raise ScopeError(400, f"Checkpoint {scope.checkpoint_id} does not belong to this dataset.")
-        if (
-            scope.embedding_model_id is not None
-            and scope.embedding_model_id != snippet_set.embedding_model_id
-        ):
+            checkpoint_model_id = checkpoint.embedding_model_id
+
+        ready_models = models_for_set(self.db, snippet_set.id)
+        embedding_model_id = scope.embedding_model_id or checkpoint_model_id or (
+            ready_models[0] if ready_models else None
+        )
+        if embedding_model_id is None or embedding_model_id not in ready_models:
+            raise ScopeError(
+                409,
+                f"embedding_model_id={embedding_model_id} has not finished embedding "
+                f"snippet set {snippet_set.id}.",
+            )
+        if checkpoint_model_id is not None and checkpoint_model_id != embedding_model_id:
             raise ScopeError(
                 400,
-                f"embedding_model_id={scope.embedding_model_id} does not match snippet set "
-                f"{snippet_set.id} (embedding_model_id={snippet_set.embedding_model_id}).",
+                f"Checkpoint {scope.checkpoint_id} was trained on embedding_model_id={checkpoint_model_id}, "
+                f"not embedding_model_id={embedding_model_id}.",
             )
-        return snippet_set
+        return snippet_set, int(embedding_model_id)
 
     def frame(self, scope: ExploreScope) -> Frame:
-        snippet_set = self._validate_scope(scope)
+        _snippet_set, embedding_model_id = self._validate_scope(scope)
         # Release the read transaction before any potentially long build.
         self.db.commit()
-        base = registry.get_base(self.db, scope.snippet_set_id)
+        base = registry.get_base(self.db, scope.snippet_set_id, embedding_model_id)
         model = None
         if scope.checkpoint_id is not None:
             model = registry.get_model(
@@ -151,10 +163,12 @@ class ExploreService:
                 scope.snippet_set_id,
                 predictions_exist=lambda: self._predictions_exist(scope),
             )
-        labels = registry.get_labels(self.db, base, scope.dataset_id, scope.snippet_set_id)
+        labels = registry.get_labels(
+            self.db, base, scope.dataset_id, scope.snippet_set_id, embedding_model_id
+        )
         return Frame(
             scope=scope,
-            embedding_model_id=int(snippet_set.embedding_model_id),
+            embedding_model_id=embedding_model_id,
             base=base,
             model=model,
             labels=labels,

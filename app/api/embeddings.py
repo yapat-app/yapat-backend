@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_active_user
 from app.models.dataset import Dataset
+from app.services.embedding_scope import embedding_options, models_for_set
 from app.services.embedding_service import EmbeddingService
 from app.services.snippet_set_service import SnippetSetService
 from app.tasks.embedding_tasks import run_embedding
@@ -20,6 +21,7 @@ from app.services.dataset_service import DatasetService
 from app.services.embedding_progress import get_progress
 from app.schemas.embedding import (
     EmbeddingModel,
+    EmbeddingOption,
     EmbeddingJobCreateRequest,
     EmbeddingJobProgress,
     EmbeddingJobResponse,
@@ -44,7 +46,7 @@ def list_embedding_models(
 ):
     """List all available embedding models."""
     service = EmbeddingService(db)
-    return service.list_models()
+    return [model for model in service.list_models() if model.is_active]
 
 
 @router.get("/embedding-models/{model_id}", response_model=EmbeddingModel)
@@ -107,7 +109,15 @@ def create_embedding_job(
     # --------------------------
     # Validate embedding model
     # --------------------------
-    model = service.get_model(payload.embedding_model_id)
+    try:
+        model = service.get_model(payload.embedding_model_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if not model.is_active or not model.weights_available:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Embedding model {model.name} is not available on this server.",
+        )
 
     # --------------------------
     # Create job (SnippetSet + EmbeddingJob)
@@ -204,8 +214,43 @@ def get_embedding_job_progress(
 
 
 # ---------------------------------------------------------
+# Embedding options (the hub's model switcher)
+# ---------------------------------------------------------
+
+@router.get("/datasets/{dataset_id}/embedding-options", response_model=List[EmbeddingOption])
+def list_embedding_options(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Embedding models on this dataset, with each one's snippet set, status and classifier."""
+    dataset_service = DatasetService(db)
+    dataset = dataset_service.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if not dataset_service.user_can_access_dataset(current_user, dataset_id):
+        raise HTTPException(status_code=403, detail="Not authorized to access this dataset")
+    return embedding_options(db, dataset)
+
+
+# ---------------------------------------------------------
 # SnippetSet Management
 # ---------------------------------------------------------
+
+def _snippet_set_response(db: Session, snippet_set: SnippetSetModel) -> dict:
+    model_ids = models_for_set(db, snippet_set.id)
+    return {
+        "id": snippet_set.id,
+        "dataset_id": snippet_set.dataset_id,
+        "embedding_model_ids": model_ids,
+        "embedding_model_id": model_ids[0] if model_ids else None,
+        "window_size": snippet_set.window_size,
+        "step_size": snippet_set.step_size,
+        "overlap": snippet_set.overlap,
+        "status": snippet_set.status.value,
+        "created_at": snippet_set.created_at,
+    }
+
 
 @router.get("/datasets/{dataset_id}/snippet-sets", response_model=List[SnippetSet])
 def list_snippet_sets(
@@ -225,7 +270,7 @@ def list_snippet_sets(
         raise HTTPException(status_code=404, detail="Dataset not found")
     
     service = SnippetSetService(db)
-    return service.list_for_dataset(dataset_id)
+    return [_snippet_set_response(db, snippet_set) for snippet_set in service.list_for_dataset(dataset_id)]
 
 
 @router.get("/snippet-sets/{snippet_set_id}", response_model=SnippetSetWithStats)
@@ -249,17 +294,7 @@ def get_snippet_set(
         snippet_set = service.get(snippet_set_id)
         stats = service.get_annotation_stats(snippet_set_id)
         
-        return SnippetSetWithStats(
-            id=snippet_set.id,
-            dataset_id=snippet_set.dataset_id,
-            embedding_model_id=snippet_set.embedding_model_id,
-            window_size=snippet_set.window_size,
-            step_size=snippet_set.step_size,
-            overlap=snippet_set.overlap,
-            status=snippet_set.status.value,
-            created_at=snippet_set.created_at,
-            **stats
-        )
+        return SnippetSetWithStats(**_snippet_set_response(db, snippet_set), **stats)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

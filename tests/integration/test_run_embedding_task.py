@@ -41,6 +41,8 @@ def test_run_embedding_task_generates_snippets_and_embeddings(
     # 2. Create embedding model + job
     # ------------------------------------------
     model = EmbeddingModel(
+        dim=1024,
+        implementation_key="birdnet_v2_4",
         name="birdnet",
         version="1.0",
         default_window_size=0.5,

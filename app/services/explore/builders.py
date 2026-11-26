@@ -37,8 +37,8 @@ PROJECTION_METHODS: tuple[str, ...] = ("pca", "umap", "tsne", "isomap")
 _EPOCH = _dt.date(1970, 1, 1)
 
 
-def base_key(snippet_set_id: int) -> str:
-    return f"ss{int(snippet_set_id)}"
+def base_key(snippet_set_id: int, embedding_model_id: int) -> str:
+    return f"ss{int(snippet_set_id)}_em{int(embedding_model_id)}"
 
 
 def model_key(checkpoint_id: int, snippet_set_id: int) -> str:
@@ -91,7 +91,9 @@ def parse_recording_metadata(meta: Any) -> tuple[str | None, int, int, float]:
     return location, MISSING_DAY, 0, math.nan
 
 
-def build_base_arrays(db: Session, snippet_set_id: int) -> tuple[dict[str, np.ndarray], dict]:
+def build_base_arrays(
+    db: Session, snippet_set_id: int, embedding_model_id: int
+) -> tuple[dict[str, np.ndarray], dict]:
     snippet_set = db.get(SnippetSet, snippet_set_id)
     if snippet_set is None:
         raise ValueError(f"SnippetSet {snippet_set_id} not found")
@@ -99,12 +101,12 @@ def build_base_arrays(db: Session, snippet_set_id: int) -> tuple[dict[str, np.nd
     id_chunks: list[np.ndarray] = []
     rec_chunks: list[np.ndarray] = []
     dur_chunks: list[np.ndarray] = []
-    # Only snippets that have an embedding: one left without (BirdNET returned
-    # nothing, or its recording failed during "add recordings") can never be
-    # scored or projected, so the hub does not list it.
+    # Only snippets that have an embedding from this model: one left without (the
+    # model returned nothing, or its recording failed during "add recordings") can
+    # never be scored or projected, so the hub does not list it.
     has_vector = exists().where(
         EmbeddingVector.snippet_id == Snippet.id,
-        EmbeddingVector.embedding_model_id == snippet_set.embedding_model_id,
+        EmbeddingVector.embedding_model_id == embedding_model_id,
     )
     stmt = (
         select(Snippet.id, Snippet.recording_id, Snippet.start_time, Snippet.end_time)
@@ -166,7 +168,7 @@ def build_base_arrays(db: Session, snippet_set_id: int) -> tuple[dict[str, np.nd
     meta = {
         "snippet_set_id": int(snippet_set_id),
         "dataset_id": int(snippet_set.dataset_id),
-        "embedding_model_id": int(snippet_set.embedding_model_id),
+        "embedding_model_id": int(embedding_model_id),
         "locations": locations,
         "n": int(snippet_ids.shape[0]),
     }

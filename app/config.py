@@ -2,6 +2,7 @@
 Configuration
 """
 
+from pathlib import Path
 from typing import Optional, Union
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -36,6 +37,14 @@ class Settings(BaseSettings):
     # Counting annotations rather than labels lets the row grow or shrink with
     # the number of species a site actually has.
     RECENT_LABELS_WINDOW: int = 10
+    # Label sharing between snippet sets of one dataset (3 s and 5 s clips, say).
+    # A label is copied automatically when it is certain to hold for the other
+    # clip; other overlaps go to a review queue. See app/services/label_sharing.py.
+    LABEL_SHARING_ENABLED: bool = True
+    # Clips that overlap by less than this many seconds are not linked at all.
+    LABEL_SHARE_MIN_OVERLAP_S: float = 0.5
+    # Whether automatically shared labels count as training labels.
+    TRAIN_ON_SHARED_LABELS: bool = True
     HOST_DATA_ROOT: str | None = None  # host path (optional)
     HOST_MODELS_AL: str | None = None  # host path for models; used by docker-compose for mounts only
     
@@ -77,6 +86,15 @@ class Settings(BaseSettings):
     # than dataset size — a dataset with tens of thousands of recordings
     # would otherwise create tens of thousands of chord entries.
     EMBEDDING_CHORD_CHUNK_SIZE: int = 25
+
+    # Weights of embedding models too large for git; filled by
+    # scripts/download_embedding_weights.py.
+    EMBEDDING_WEIGHTS_DIR: str = str(Path(__file__).resolve().parent.parent / "embedding_weights")
+    # cpu or gpu, set by the Dockerfile from DEVICE in .env. With gpu, ONNX embedding
+    # models use the GPU in services that have one, and the CPU in those that don't.
+    DEVICE: str = "cpu"
+    # Threads per worker process for ONNX embedding models.
+    EMBEDDING_ONNX_THREADS: int = 2
 
     # scan_dataset gets its own, longer time budget instead of the app-wide
     # default above — it can legitimately run for hours on very large

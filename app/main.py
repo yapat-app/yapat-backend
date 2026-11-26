@@ -24,6 +24,7 @@ from app.api import (
     explore,
     feed,
     invitations,
+    label_sharing,
     pam_active_learning,
     reference_links,
     recordings,
@@ -94,6 +95,7 @@ app.include_router(visualisations.router, prefix=f"{settings.API_STR}/visualisat
 app.include_router(wssed.router, prefix=f"{settings.API_STR}/wssed", tags=["wssed"])
 app.include_router(study_events.router, prefix=f"{settings.API_STR}/study-events", tags=["study-events"])
 app.include_router(explore.router, prefix=f"{settings.API_STR}/explore", tags=["explore"])
+app.include_router(label_sharing.router, prefix=f"{settings.API_STR}/label-sharing", tags=["label-sharing"])
 
 
 @app.get("/")

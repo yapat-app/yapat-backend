@@ -422,21 +422,18 @@ def pam_al_score_ingested_snippets(self, ingest_job_id: int):
             )
             .all()
         )
-        # A checkpoint trained on another (older) snippet set never sees this one.
-        checkpoints = [
-            c for c in checkpoints
-            if (c.hyperparameters or {}).get("resolved_snippet_set_id") in (None, job.snippet_set_id)
-        ]
         if not checkpoints:
             complete_job(ingest_job_id, snippets_scored=0, scoring_skipped_reason="no_active_checkpoint")
             return {"status": "completed", "job_id": ingest_job_id, "scored": 0}
 
         scored = 0
         for ckpt in checkpoints:
+            # Each classifier scores the clips of its own embedding model.
+            snippet_set_id = (ckpt.hyperparameters or {}).get("resolved_snippet_set_id") or job.snippet_set_id
             scored += score_unscored_snippets(
                 db,
                 ckpt,
-                job.snippet_set_id,
+                int(snippet_set_id),
                 on_total=lambda n: ingest_progress.start_stage(ingest_job_id, n),
                 on_scored=lambda n: ingest_progress.incr(ingest_job_id, n),
             )

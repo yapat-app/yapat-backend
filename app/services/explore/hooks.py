@@ -44,7 +44,11 @@ def publish_model_layer_from_inference(
             checkpoint_id=checkpoint_id, snippet_set_id=int(snippet_set_id),
         )
         storage.write_layer("model", model_key(checkpoint_id, snippet_set_id), arrays, meta)
-        prune_model_layers(int(snippet_set_id), keep_checkpoint_id=int(checkpoint_id))
+        prune_model_layers(
+            int(snippet_set_id),
+            keep_checkpoint_id=int(checkpoint_id),
+            active_checkpoint_ids=_active_checkpoint_ids(db, checkpoint_id),
+        )
     except Exception:
         logger.exception(
             "explore: publishing model layer for checkpoint %s failed; invalidating", checkpoint_id
@@ -112,16 +116,32 @@ def append_to_model_layer(
 MODEL_LAYERS_KEPT_PER_SNIPPET_SET = 3
 
 
+def _active_checkpoint_ids(db: Session, checkpoint_id: int) -> set[int]:
+    """Active checkpoints of the checkpoint's dataset, one per classifier family."""
+    from app.models.pam_active_learning import ALModelCheckpoint, ALModelFamilyState
+
+    dataset_id = db.query(ALModelCheckpoint.dataset_id).filter(ALModelCheckpoint.id == checkpoint_id).scalar()
+    rows = (
+        db.query(ALModelFamilyState.active_model_checkpoint_id)
+        .filter(ALModelFamilyState.dataset_id == dataset_id)
+        .all()
+    )
+    return {int(row[0]) for row in rows if row[0] is not None}
+
+
 def prune_model_layers(
     snippet_set_id: int,
     keep_checkpoint_id: int,
     keep: int = MODEL_LAYERS_KEPT_PER_SNIPPET_SET,
+    active_checkpoint_ids: set[int] | None = None,
 ) -> None:
     """Delete model layers of superseded checkpoints for a snippet set.
 
     Every retrain publishes a layer as large as the snippet set, so only the
     newest few checkpoints are kept on disk. A client still pointing at a
-    pruned checkpoint gets it rebuilt from Postgres on demand.
+    pruned checkpoint gets it rebuilt from Postgres on demand. Embedding models
+    sharing the snippet set each have an active checkpoint, and those are kept
+    so that retraining one model does not slow down switching to another.
     """
     import re
     import shutil
@@ -140,7 +160,7 @@ def prune_model_layers(
     found.sort(reverse=True)
     kept = {name for _, name in found[:keep]}
     for checkpoint_id, name in found:
-        if name in kept or checkpoint_id == keep_checkpoint_id:
+        if name in kept or checkpoint_id == keep_checkpoint_id or checkpoint_id in (active_checkpoint_ids or ()):
             continue
         storage.invalidate_layer("model", name)
         shutil.rmtree(root / name, ignore_errors=True)
@@ -170,12 +190,17 @@ def invalidate_projection(dataset_id: int, embedding_model_id: int) -> None:
 def invalidate_dataset_base(db: Session, dataset_id: int) -> None:
     """Recording metadata changed: rebuild base layers of every snippet set."""
     try:
-        from app.models.embedding import SnippetSet
+        from app.models.embedding import EmbeddingJob
         from app.services.explore import registry
         from app.services.explore.builders import base_key
 
-        ids = [row[0] for row in db.query(SnippetSet.id).filter(SnippetSet.dataset_id == dataset_id).all()]
-        for snippet_set_id in ids:
-            registry.invalidate("base", base_key(snippet_set_id))
+        pairs = (
+            db.query(EmbeddingJob.snippet_set_id, EmbeddingJob.embedding_model_id)
+            .filter(EmbeddingJob.dataset_id == dataset_id)
+            .distinct()
+            .all()
+        )
+        for snippet_set_id, embedding_model_id in pairs:
+            registry.invalidate("base", base_key(snippet_set_id, embedding_model_id))
     except Exception:
         logger.exception("explore: invalidating base layers for dataset %s failed", dataset_id)

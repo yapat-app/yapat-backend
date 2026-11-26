@@ -58,6 +58,7 @@ from app.schemas.quick_label import (
     RecentLabelResponse,
 )
 from app.services.dataset_service import DatasetService, ReferenceMetadataNotFound
+from app.services.reference_readiness import ReferencePoolsNotReady
 from app.services.dataset_ingest_service import DatasetIngestService
 from app.services.recording_metadata_import_service import (
     RecordingMetadataImportService,
@@ -371,6 +372,8 @@ def update_dataset(
             status_code=400,
             detail=f"Label file not found: {e.expected_path}",
         )
+    except ReferencePoolsNotReady as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         code = str(e)
         if code == "not_found":
@@ -382,6 +385,7 @@ def update_dataset(
             "invalid_spectrogram_f_max",
             "spectrogram_f_max_lte_min",
             "invalid_source_uri",
+            "embedding_model_not_ready",
         ):
             raise HTTPException(status_code=400, detail=code)
         raise

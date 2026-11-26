@@ -18,7 +18,7 @@ def build_explore_layer(self, kind: str, params: dict):
     from app.services.explore.builders import base_key, model_key, projection_key
 
     if kind == "base":
-        key = base_key(params["snippet_set_id"])
+        key = base_key(params["snippet_set_id"], params["embedding_model_id"])
     elif kind == "model":
         key = model_key(params["checkpoint_id"], params["snippet_set_id"])
     elif kind == "projection":

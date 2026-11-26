@@ -80,12 +80,11 @@ def _make_dataset(db_session, team_id, source_uri="site/current", snippet_status
     db_session.flush()
     model = db_session.query(EmbeddingModel).first()
     if model is None:
-        model = EmbeddingModel(name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
+        model = EmbeddingModel(dim=1024, name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
         db_session.add(model)
         db_session.flush()
     ss = SnippetSet(
         dataset_id=ds.id,
-        embedding_model_id=model.id,
         window_size=3.0,
         step_size=3.0,
         overlap=0.0,
@@ -420,6 +419,7 @@ def _failure(db_session, dataset, file_name, missing, reason, dismissed=False):
     db_session.flush()
     db_session.add(RecordingEmbeddingFailure(
         dataset_id=dataset.id, snippet_set_id=dataset.default_snippet_set_id, recording_id=rec.id,
+        embedding_model_id=db_session.query(EmbeddingModel.id).first()[0],
         snippets_missing=missing, reason=reason,
         dismissed_at=datetime.now(timezone.utc) if dismissed else None,
     ))

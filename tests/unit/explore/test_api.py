@@ -52,13 +52,13 @@ def world(db_session):
     outsider = User(username="outsider", hashed_password="x", role=UserRole.USER)
     ds = Dataset(name="d", source_uri="/tmp/d", dataset_type=DatasetType.PAM)
     other_ds = Dataset(name="o", source_uri="/tmp/o", dataset_type=DatasetType.PAM)
-    em = EmbeddingModel(name="birdnet", window_size=3, step_size=3, overlap=0)
+    em = EmbeddingModel(dim=1024, name="birdnet", window_size=3, step_size=3, overlap=0)
     db_session.add_all([admin, outsider, ds, other_ds, em])
     db_session.flush()
 
-    ss = SnippetSet(dataset_id=ds.id, embedding_model_id=em.id, window_size=3, step_size=3,
+    ss = SnippetSet(dataset_id=ds.id, window_size=3, step_size=3,
                     overlap=0, status=SnippetSetStatus.READY)
-    other_ss = SnippetSet(dataset_id=other_ds.id, embedding_model_id=em.id, window_size=3,
+    other_ss = SnippetSet(dataset_id=other_ds.id, window_size=3,
                           step_size=3, overlap=0, status=SnippetSetStatus.READY)
     db_session.add_all([ss, other_ss])
     db_session.flush()
@@ -309,7 +309,7 @@ def test_validation_errors(world, client_for):
     r = admin.post("/api/explore/feed", json={"scope": scope(world, checkpoint_id=world["empty_ckpt"].id)})
     assert r.status_code == 409 and r.json()["status"] == "no_predictions"
     r = admin.post("/api/explore/feed", json={"scope": scope(world, embedding_model_id=world["em"].id + 99)})
-    assert r.status_code == 400
+    assert r.status_code == 409
     r = admin.post("/api/explore/feed", json={"scope": scope(world), "limit": 5000})
     assert r.status_code == 422
     r = admin.post("/api/explore/feed", json={"scope": scope(world), "filters": {"months": [13]}})
@@ -351,8 +351,8 @@ def test_building_returns_202_when_not_inline(world, client_for, monkeypatch):
     assert r2.status_code == 202
     assert len(delayed) == 1  # de-duplicated by the Redis guard
 
-    fake.store[registry.error_key("base", f"ss{world['ss'].id}")] = b"boom"
-    fake.delete(registry.guard_key("base", f"ss{world['ss'].id}"))
+    fake.store[registry.error_key("base", f"ss{world['ss'].id}_em{world['em'].id}")] = b"boom"
+    fake.delete(registry.guard_key("base", f"ss{world['ss'].id}_em{world['em'].id}"))
     r3 = client.post("/api/explore/summary", json={"scope": scope(world)})
     assert r3.status_code == 500 and "boom" in r3.json()["detail"]
 

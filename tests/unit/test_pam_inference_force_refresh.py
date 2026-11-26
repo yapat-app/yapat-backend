@@ -61,11 +61,11 @@ def engine():
 def world(db_session):
     admin = User(username="admin", hashed_password="x", role=UserRole.ADMIN)
     ds = Dataset(name="d", source_uri="/tmp/d", dataset_type=DatasetType.PAM)
-    em = EmbeddingModel(name="birdnet", window_size=3, step_size=3, overlap=0)
+    em = EmbeddingModel(dim=1024, name="birdnet", window_size=3, step_size=3, overlap=0)
     db_session.add_all([admin, ds, em])
     db_session.flush()
 
-    ss = SnippetSet(dataset_id=ds.id, embedding_model_id=em.id, window_size=3,
+    ss = SnippetSet(dataset_id=ds.id, window_size=3,
                     step_size=3, overlap=0, status=SnippetSetStatus.READY)
     db_session.add(ss)
     db_session.flush()

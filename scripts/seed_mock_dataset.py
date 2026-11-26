@@ -46,7 +46,7 @@ import psycopg2
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-EMBEDDING_DIM = 1024  # fixed by app.models.embedding.VectorType
+EMBEDDING_DIM = 1024  # the size of BirdNET 2.4's vectors
 SCORE_THRESHOLD = 0.5  # probability at/above which a label is "predicted"
 PROJECTION_METHODS = ("pca", "umap", "tsne")  # isomap left NULL on purpose
 DEFAULT_STEPS = ("catalog", "recordings", "snippets", "predictions", "projection", "embeddings", "labels", "finalize")
@@ -259,8 +259,8 @@ def ensure_embedding_model(cur) -> int:
         return int(row[0])
     cur.execute(
         "INSERT INTO embedding_models (name, version, description, window_size, step_size, overlap, "
-        "requires_fixed_window, requires_fixed_step, requires_fixed_overlap) "
-        "VALUES ('birdnet', '2.4', 'mock', 3, 3, 0, 1, 1, 1) RETURNING id"
+        "requires_fixed_window, requires_fixed_step, requires_fixed_overlap, dim) "
+        f"VALUES ('birdnet', '2.4', 'mock', 3, 3, 0, 1, 1, 1, {EMBEDDING_DIM}) RETURNING id"
     )
     return int(cur.fetchone()[0])
 
@@ -309,9 +309,9 @@ def create_catalog(cur, args, labels: Sequence[str], admin_id: int) -> dict:
     dataset_id = int(cur.fetchone()[0])
 
     cur.execute(
-        "INSERT INTO snippet_sets (dataset_id, embedding_model_id, window_size, step_size, overlap, status) "
-        "VALUES (%s, %s, %s, %s, 0, 'ready') RETURNING id",
-        (dataset_id, embedding_model_id, args.window, args.window),
+        "INSERT INTO snippet_sets (dataset_id, window_size, step_size, overlap, status) "
+        "VALUES (%s, %s, %s, 0, 'ready') RETURNING id",
+        (dataset_id, args.window, args.window),
     )
     snippet_set_id = int(cur.fetchone()[0])
     cur.execute(

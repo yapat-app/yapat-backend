@@ -1,7 +1,7 @@
 
 from sqlalchemy import (
     Column, Index, Integer, String, DateTime, ForeignKey, Float, Text, JSON,
-    Enum as SQLEnum, UniqueConstraint,
+    Enum as SQLEnum, UniqueConstraint, event,
 )
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
@@ -35,6 +35,8 @@ class ALRetrainStatus(str, enum.Enum):
 class ALAnnotationSource(str, enum.Enum):
     GROUND_TRUTH = "ground_truth"
     USER = "user"
+    # Copied automatically from an overlapping clip of another snippet set.
+    DERIVED = "derived"
 
 # ── Model Checkpoint ───────────────────────────────────────────────────
 
@@ -61,6 +63,14 @@ class ALModelCheckpoint(Base):
     label_config_path = Column(String, nullable=False)
     model_type = Column(String, nullable=False, default=ALModelType.PAM_LINEAR_MULTILABEL)
     hyperparameters = Column(JSON, nullable=True)
+    # Copied from hyperparameters on save (see _sync_checkpoint_embedding_model).
+    # A classifier only works with the embedding model it was trained on.
+    embedding_model_id = Column(
+        Integer,
+        ForeignKey("embedding_models.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     is_base = Column(Integer, nullable=False, default=0)  # 1 = base model entry
     parent_checkpoint_id = Column(
         Integer,
@@ -98,6 +108,14 @@ class ALModelCheckpoint(Base):
     __table_args__ = (
         UniqueConstraint("dataset_id", "model_family_name", "version", name="uq_al_checkpoint"),
     )
+
+@event.listens_for(ALModelCheckpoint, "before_insert")
+@event.listens_for(ALModelCheckpoint, "before_update")
+def _sync_checkpoint_embedding_model(_mapper, _connection, checkpoint) -> None:
+    embedding_model_id = (checkpoint.hyperparameters or {}).get("embedding_model_id")
+    if embedding_model_id is not None:
+        checkpoint.embedding_model_id = int(embedding_model_id)
+
 
 class ALModelFamilyState(Base):
     __tablename__ = "al_model_family_state"

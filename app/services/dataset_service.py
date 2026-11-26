@@ -308,12 +308,50 @@ class DatasetService:
         if "spectrogram_f_min_hz" in data or "spectrogram_f_max_hz" in data:
             self._validate_spectrogram_range(next_f_min, next_f_max)
 
+        if data.get("default_embedding_model_id") is not None:
+            self._validate_embedding_model_choice(
+                dataset,
+                data["default_embedding_model_id"],
+                # Re-saving the current model is not a switch.
+                check_reference_pools=data["default_embedding_model_id"] != dataset.default_embedding_model_id,
+            )
+
         for key, value in data.items():
             setattr(dataset, key, value)
 
         self.db.commit()
         self.db.refresh(dataset)
         return dataset
+
+    def _validate_embedding_model_choice(
+        self,
+        dataset: DatasetModel,
+        embedding_model_id: int,
+        check_reference_pools: bool = True,
+    ) -> None:
+        """The hub can only use a model whose embeddings finished on this dataset,
+        and on every linked reference pool (issue #93, part 3)."""
+        from app.models.embedding import EmbeddingJob, EmbeddingJobStatus, EmbeddingModel
+        from app.services.reference_readiness import ReferencePoolsNotReady, blocking_pools
+
+        finished = (
+            self.db.query(EmbeddingJob.id)
+            .filter(
+                EmbeddingJob.dataset_id == dataset.id,
+                EmbeddingJob.embedding_model_id == embedding_model_id,
+                EmbeddingJob.status == EmbeddingJobStatus.COMPLETED,
+            )
+            .first()
+        )
+        if finished is None:
+            raise ValueError("embedding_model_not_ready")
+        if not check_reference_pools:
+            return
+        missing = blocking_pools(self.db, dataset, embedding_model_id)
+        if missing:
+            model = self.db.get(EmbeddingModel, embedding_model_id)
+            name = f"{model.name} {model.version or ''}".strip() if model else None
+            raise ReferencePoolsNotReady(missing, name)
 
     # ---------------------------------------------------------
     # Path validation

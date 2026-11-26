@@ -189,6 +189,30 @@ def _ensure_family_state(
 
 
 
+def assert_family_uses_embedding_model(
+    db: Session,
+    dataset_id: int,
+    model_family_name: str,
+    embedding_model_id: int,
+) -> None:
+    """A family's checkpoints replace each other, so they must share an embedding model."""
+    other = (
+        db.query(ALModelCheckpoint.embedding_model_id)
+        .filter(
+            ALModelCheckpoint.dataset_id == dataset_id,
+            ALModelCheckpoint.model_family_name == model_family_name,
+            ALModelCheckpoint.embedding_model_id.isnot(None),
+            ALModelCheckpoint.embedding_model_id != embedding_model_id,
+        )
+        .first()
+    )
+    if other is not None:
+        raise ValueError(
+            f"Model family '{model_family_name}' was trained on embedding model {other[0]}, "
+            f"not {embedding_model_id}. Use a separate family per embedding model."
+        )
+
+
 def get_active_checkpoint_for_model_family(
     db: Session,
     dataset_id: int,

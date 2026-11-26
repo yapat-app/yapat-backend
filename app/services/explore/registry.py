@@ -160,7 +160,7 @@ order_cache = KeyedLRU(6)
 similarity_cache = KeyedLRU(16)
 
 _labels_lock = threading.Lock()
-_labels_key_locks: dict[tuple[int, int], threading.Lock] = {}
+_labels_key_locks: dict[tuple[int, int, int], threading.Lock] = {}
 
 
 @dataclass
@@ -171,7 +171,7 @@ class _LabelsEntry:
     data: LabelsData
 
 
-_labels_entries: "OrderedDict[tuple[int, int], _LabelsEntry]" = OrderedDict()
+_labels_entries: "OrderedDict[tuple[int, int, int], _LabelsEntry]" = OrderedDict()
 _LABELS_MAX_ENTRIES = 16
 
 
@@ -194,8 +194,10 @@ def reset_caches() -> None:
 def run_build(db: Session, kind: str, params: dict) -> str:
     """Build and publish a layer. Used by the Celery task and inline mode."""
     if kind == "base":
-        arrays, meta = build_base_arrays(db, int(params["snippet_set_id"]))
-        key = base_key(params["snippet_set_id"])
+        arrays, meta = build_base_arrays(
+            db, int(params["snippet_set_id"]), int(params["embedding_model_id"])
+        )
+        key = base_key(params["snippet_set_id"], params["embedding_model_id"])
     elif kind == "model":
         arrays, meta = build_model_arrays(
             db, int(params["checkpoint_id"]), int(params["snippet_set_id"])
@@ -296,9 +298,12 @@ def _get_or_build(db: Session, kind: str, key: str, params: dict) -> storage.Lay
 # ── Typed accessors ───────────────────────────────────────────────────────────
 
 
-def get_base(db: Session, snippet_set_id: int) -> BaseData:
-    key = base_key(snippet_set_id)
-    layer = _get_or_build(db, "base", key, {"snippet_set_id": int(snippet_set_id)})
+def get_base(db: Session, snippet_set_id: int, embedding_model_id: int) -> BaseData:
+    key = base_key(snippet_set_id, embedding_model_id)
+    layer = _get_or_build(
+        db, "base", key,
+        {"snippet_set_id": int(snippet_set_id), "embedding_model_id": int(embedding_model_id)},
+    )
 
     def load() -> BaseData:
         return BaseData(
@@ -374,8 +379,12 @@ def align_model(base: BaseData, layer: storage.Layer) -> ModelData:
     )
 
 
-def get_labels(db: Session, base: BaseData, dataset_id: int, snippet_set_id: int) -> LabelsData:
-    cache_key = (int(dataset_id), int(snippet_set_id))
+def get_labels(
+    db: Session, base: BaseData, dataset_id: int, snippet_set_id: int, embedding_model_id: int
+) -> LabelsData:
+    # One entry per model: each has its own base layer, so sharing an entry would
+    # make switching models in the hub rebuild the labels every time.
+    cache_key = (int(dataset_id), int(snippet_set_id), int(embedding_model_id))
     now = time.monotonic()
     with _labels_lock:
         entry = _labels_entries.get(cache_key)

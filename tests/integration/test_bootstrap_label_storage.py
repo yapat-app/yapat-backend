@@ -58,13 +58,13 @@ def isolated(tmp_path, monkeypatch):
 def env(db_session):
     """40 embedded snippets in two clusters, no model yet, bootstrap threshold 3."""
     rng = np.random.default_rng(7)
-    em = EmbeddingModel(name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
+    em = EmbeddingModel(dim=1024, name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
     ds = Dataset(name="bootstrap", source_uri="site", dataset_type=DatasetType.PAM,
                  retrain_after_threshold=3)
     user = User(username="bootstrap_user", hashed_password="x", role=UserRole.ADMIN)
     db_session.add_all([em, ds, user])
     db_session.flush()
-    ss = SnippetSet(dataset_id=ds.id, embedding_model_id=em.id, window_size=3.0, step_size=3.0,
+    ss = SnippetSet(dataset_id=ds.id, window_size=3.0, step_size=3.0,
                     overlap=0.0, status=SnippetSetStatus.READY)
     db_session.add(ss)
     db_session.flush()

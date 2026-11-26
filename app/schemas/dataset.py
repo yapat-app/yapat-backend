@@ -47,6 +47,8 @@ class DatasetUpdate(BaseModel):
     retrain_after_threshold: Optional[int] = None
     is_reference: Optional[bool] = None
     reference_metadata_path: Optional[str] = None
+    # Must have a finished embedding job on this dataset.
+    default_embedding_model_id: Optional[int] = None
 
     @field_validator("spectrogram_f_min_hz", "spectrogram_f_max_hz")
     @classmethod
@@ -92,6 +94,7 @@ class Dataset(DatasetBase):
     team_id: Optional[int] = None
     dataset_type: Optional[DatasetType] = DatasetType.PAM
     default_snippet_set_id: Optional[int] = None
+    default_embedding_model_id: Optional[int] = None
     spectrogram_f_min_hz: Optional[float] = None
     spectrogram_f_max_hz: Optional[float] = None
     quick_labels: Optional[List[Dict[str, Any]]] = None

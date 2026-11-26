@@ -2,7 +2,7 @@
 Snippet model
 """
 
-from sqlalchemy import Column, Integer, DateTime, ForeignKey, Float
+from sqlalchemy import Column, Integer, DateTime, ForeignKey, Float, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -31,6 +31,11 @@ class Snippet(Base):
     duration = Column(Float, nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        # Finds the clips of other snippet sets that overlap a clip (label sharing).
+        Index("ix_snippets_recording_set_start", "recording_id", "snippet_set_id", "start_time"),
+    )
 
     # Relationships
     recording = relationship("Recording", back_populates="snippets")

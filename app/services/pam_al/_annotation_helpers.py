@@ -20,6 +20,23 @@ from app.models.pam_active_learning import (
 )
 from active_learning.config import NO_EVENT_LABEL, NO_EVENT_LABELS
 
+# Labels shown as a clip's labels in the hub: shared copies included.
+DISPLAY_SOURCES = (
+    ALAnnotationSource.GROUND_TRUTH,
+    ALAnnotationSource.USER,
+    ALAnnotationSource.DERIVED,
+)
+
+
+def training_sources() -> tuple:
+    """Label sources a classifier trains on. Automatic shared copies are a setting."""
+    from app.config import settings
+
+    if settings.TRAIN_ON_SHARED_LABELS:
+        return DISPLAY_SOURCES
+    return (ALAnnotationSource.GROUND_TRUTH, ALAnnotationSource.USER)
+
+
 _SLUG_WHITESPACE_RE = re.compile(r"\s+")
 _SLUG_INVALID_CHARS_RE = re.compile(r"[^a-z0-9_-]")
 
@@ -249,10 +266,7 @@ def get_trusted_annotations(
         db.query(ALSnippetAnnotation.snippet_id, ALSnippetAnnotation.label)
         .filter(
             ALSnippetAnnotation.dataset_id == dataset_id,
-            ALSnippetAnnotation.source.in_([
-                ALAnnotationSource.GROUND_TRUTH,
-                ALAnnotationSource.USER,
-            ]),
+            ALSnippetAnnotation.source.in_(training_sources()),
         )
         .all()
     )
@@ -346,10 +360,7 @@ def get_labels_by_snippet(
         db.query(ALSnippetAnnotation.snippet_id, ALSnippetAnnotation.label)
         .filter(
             ALSnippetAnnotation.dataset_id == dataset_id,
-            ALSnippetAnnotation.source.in_([
-                ALAnnotationSource.GROUND_TRUTH,
-                ALAnnotationSource.USER,
-            ]),
+            ALSnippetAnnotation.source.in_(DISPLAY_SOURCES),
         )
     )
     if snippet_set_id is not None:
@@ -388,10 +399,7 @@ def get_label_details_by_snippet(
         .outerjoin(User, User.id == ALSnippetAnnotation.user_id)
         .filter(
             ALSnippetAnnotation.dataset_id == dataset_id,
-            ALSnippetAnnotation.source.in_([
-                ALAnnotationSource.GROUND_TRUTH,
-                ALAnnotationSource.USER,
-            ]),
+            ALSnippetAnnotation.source.in_(DISPLAY_SOURCES),
         )
     )
     if snippet_set_id is not None:
@@ -404,7 +412,12 @@ def get_label_details_by_snippet(
     for snippet_id, label, source, user_id, username in query.all():
         source_value = source.value if hasattr(source, "value") else str(source)
         is_ground_truth = source_value == ALAnnotationSource.GROUND_TRUTH.value
-        labeled_by = "Ground truth" if is_ground_truth else username
+        if is_ground_truth:
+            labeled_by = "Ground truth"
+        elif source_value == ALAnnotationSource.DERIVED.value:
+            labeled_by = f"Shared from {username}" if username else "Shared"
+        else:
+            labeled_by = username
         key = (label, source_value, user_id)
         grouped.setdefault(snippet_id, {})[key] = {
             "label": label,

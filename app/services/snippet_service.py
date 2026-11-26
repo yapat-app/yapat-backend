@@ -11,6 +11,7 @@ from app.models.annotation import Annotation
 from app.models.recording import Recording
 from app.models.embedding import SnippetSet, SnippetSetStatus
 from app.models.dataset import Dataset
+from app.services.embedding_scope import default_model_for_set
 
 
 class SnippetService:
@@ -444,8 +445,10 @@ class SnippetService:
         
         # Determine the embedding model to use
         if embedding_model_id is None:
-            # Use the snippet_set's embedding model
-            embedding_model_id = snippet_set.embedding_model_id
+            # Use the first model to embed the snippet_set
+            embedding_model_id = default_model_for_set(self.db, snippet_set_id)
+            if embedding_model_id is None:
+                raise ValueError(f"SnippetSet(id={snippet_set_id}) has no finished embedding model")
         
         # Get query vector
         vector_store = VectorStore(self.db)

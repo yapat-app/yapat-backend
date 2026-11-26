@@ -61,11 +61,11 @@ def env(db_session, engine, monkeypatch):
     monkeypatch.setattr(ingest_tasks, "SessionLocal", factory)
     monkeypatch.setattr(pam_al_tasks, "SessionLocal", factory)
 
-    em = EmbeddingModel(name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
+    em = EmbeddingModel(dim=1024, name="BirdNET", window_size=3.0, step_size=3.0, overlap=0.0)
     ds = Dataset(name="retrain-waits", source_uri="site", dataset_type=DatasetType.PAM)
     db_session.add_all([em, ds])
     db_session.flush()
-    ss = SnippetSet(dataset_id=ds.id, embedding_model_id=em.id, window_size=3.0, step_size=3.0,
+    ss = SnippetSet(dataset_id=ds.id, window_size=3.0, step_size=3.0,
                     overlap=0.0, status=SnippetSetStatus.READY)
     db_session.add(ss)
     db_session.flush()
@@ -222,7 +222,7 @@ def test_cold_start_created_by_the_service_is_held_and_released(
     run = env.ingest(minutes_ago=1)   # see the SQLite note in the test above
     _, job = PAMActiveLearningService(db_session).setup_train_from_scratch(
         ALTrainFromScratchRequest(dataset_id=env.dataset.id, snippet_set_id=snippet_set.id,
-                                  embedding_model_id=snippet_set.embedding_model_id))
+                                  embedding_model_id=db_session.query(EmbeddingModel.id).first()[0]))
 
     assert job.trigger == "cold_start" and job.started_at is None
     assert retrain_deferral.dispatch_or_wait(db_session, job) == run.id
@@ -360,7 +360,7 @@ def test_train_from_scratch_endpoint_waits_for_a_running_ingest(
         response = TestClient(app).post("/api/pam-al/train-from-scratch", json={
             "dataset_id": env.dataset.id,
             "snippet_set_id": snippet_set.id,
-            "embedding_model_id": snippet_set.embedding_model_id,
+            "embedding_model_id": db_session.query(EmbeddingModel.id).first()[0],
         })
     finally:
         app.dependency_overrides.clear()

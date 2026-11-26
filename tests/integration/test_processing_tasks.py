@@ -26,7 +26,6 @@ def test_snippet_generation_placeholder(db_session):
     # Provide dummy embedding_model_id=1 (a placeholder)
     ss = SnippetSet(
         dataset_id=ds.id,
-        embedding_model_id=1,
         window_size=3.0,
         step_size=1.5,
         overlap=0.5,
